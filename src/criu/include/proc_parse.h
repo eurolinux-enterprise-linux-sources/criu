@@ -4,6 +4,7 @@
 #include <sys/types.h>
 
 #include <compel/compel.h>
+#include "images/seccomp.pb-c.h"
 
 #define PROC_TASK_COMM_LEN	32
 #define PROC_TASK_COMM_LEN_FMT	"(%31s"
@@ -63,6 +64,12 @@ struct proc_pid_stat {
 	int			exit_code;
 };
 
+struct seccomp_info {
+	SeccompFilter filter;
+	int id;
+	struct seccomp_info *prev;
+};
+
 #define PROC_CAP_SIZE	2
 
 struct proc_status_creds {
@@ -100,6 +107,5 @@ int parse_children(pid_t pid, pid_t **_c, int *_n);
 
 extern bool is_vma_range_fmt(char *line);
 extern void parse_vmflags(char *buf, u32 *flags, u64 *madv, int *io_pf);
-extern int parse_uptime(uint64_t *upt);
 
 #endif /* __CR_PROC_PARSE_H__ */

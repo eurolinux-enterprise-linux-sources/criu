@@ -8,7 +8,6 @@
 # criu restore <options> --action-script $(pwd)/scripts/fake-restore.sh
 #
 if [ "$CRTOOLS_SCRIPT_ACTION" == "post-restore" ]; then
-	touch restore-succeeded
 	exit 1
 else
 	exit 0

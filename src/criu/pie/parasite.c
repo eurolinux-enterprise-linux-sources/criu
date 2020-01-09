@@ -6,13 +6,12 @@
 #include <sys/mount.h>
 #include <stdarg.h>
 #include <sys/ioctl.h>
-#include <sys/uio.h>
 
-#include "common/config.h"
 #include "int.h"
 #include "types.h"
 #include <compel/plugins/std/syscall.h>
 #include "parasite.h"
+#include "config.h"
 #include "fcntl.h"
 #include "prctl.h"
 #include "common/lock.h"
@@ -67,8 +66,6 @@ static int dump_pages(struct parasite_dump_pages_args *args)
 {
 	int p, ret, tsock;
 	struct iovec *iovs;
-	int off, nr_segs;
-	unsigned long spliced_bytes = 0;
 
 	tsock = parasite_get_rpc_sock();
 	p = recv_fd(tsock);
@@ -76,29 +73,11 @@ static int dump_pages(struct parasite_dump_pages_args *args)
 		return -1;
 
 	iovs = pargs_iovs(args);
-	off = 0;
-	nr_segs = args->nr_segs;
-	if (nr_segs > UIO_MAXIOV)
-		nr_segs = UIO_MAXIOV;
-	while (1) {
-		ret = sys_vmsplice(p, &iovs[args->off + off], nr_segs,
-					SPLICE_F_GIFT | SPLICE_F_NONBLOCK);
-		if (ret < 0) {
-			sys_close(p);
-			pr_err("Can't splice pages to pipe (%d/%d/%d)\n",
-						ret, nr_segs, args->off + off);
-			return -1;
-		}
-		spliced_bytes += ret;
-		off += nr_segs;
-		if (off == args->nr_segs)
-			break;
-		if (off + nr_segs > args->nr_segs)
-			nr_segs = args->nr_segs - off;
-	}
-	if (spliced_bytes != args->nr_pages * PAGE_SIZE) {
+	ret = sys_vmsplice(p, &iovs[args->off], args->nr_segs,
+				SPLICE_F_GIFT | SPLICE_F_NONBLOCK);
+	if (ret != PAGE_SIZE * args->nr_pages) {
 		sys_close(p);
-		pr_err("Can't splice all pages to pipe (%lu/%d)\n", spliced_bytes, args->nr_pages);
+		pr_err("Can't splice pages to pipe (%d/%d)\n", ret, args->nr_pages);
 		return -1;
 	}
 
@@ -172,28 +151,16 @@ static int dump_thread_common(struct parasite_dump_thread *ti)
 
 	arch_get_tls(&ti->tls);
 	ret = sys_prctl(PR_GET_TID_ADDRESS, (unsigned long) &ti->tid_addr, 0, 0, 0);
-	if (ret) {
-		pr_err("Unable to get the clear_child_tid address: %d\n", ret);
+	if (ret)
 		goto out;
-	}
 
 	ret = sys_sigaltstack(NULL, &ti->sas);
-	if (ret) {
-		pr_err("Unable to get signal stack context: %d\n", ret);
+	if (ret)
 		goto out;
-	}
 
 	ret = sys_prctl(PR_GET_PDEATHSIG, (unsigned long)&ti->pdeath_sig, 0, 0, 0);
-	if (ret) {
-		pr_err("Unable to get the parent death signal: %d\n", ret);
+	if (ret)
 		goto out;
-	}
-
-	ret = sys_prctl(PR_GET_NAME, (unsigned long) &ti->comm, 0, 0, 0);
-	if (ret) {
-		pr_err("Unable to get the thread name: %d\n", ret);
-		goto out;
-	}
 
 	ret = dump_creds(ti->creds);
 out:
@@ -581,7 +548,7 @@ static int parasite_check_vdso_mark(struct parasite_vdso_vma_entry *args)
 	if (is_vdso_mark(m)) {
 		/*
 		 * Make sure we don't meet some corrupted entry
-		 * where signature matches but versions do not!
+		 * where signature matches but verions is not!
 		 */
 		if (m->version != VDSO_MARK_CUR_VERSION) {
 			pr_err("vdso: Mark version mismatch!\n");
@@ -642,7 +609,7 @@ static int parasite_dump_cgroup(struct parasite_dump_cgroup_args *args)
 		return -1;
 	}
 
-	if (len == sizeof(args->contents)) {
+	if (len == sizeof(*args)) {
 		pr_warn("/proc/self/cgroup was bigger than the page size\n");
 		return -1;
 	}

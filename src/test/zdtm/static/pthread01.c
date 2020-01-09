@@ -33,7 +33,7 @@ static char *decode_signal(const sigset_t *s, char *buf)
 
 #define COLLECT(sig)						\
 	do {							\
-		if (sigismember(s, sig))			\
+		if ((long)s->__val[0] & (long)sigmask(sig))	\
 			strcat(buf, #sig " ");			\
 	} while (0)
 

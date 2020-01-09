@@ -7,9 +7,6 @@ const char *test_doc	= "Start a calculation, leaving FPU in a certain state,\n"
 const char *test_author	= "Pavel Emelianov <xemul@parallels.com>";
 
 #if defined(__i386__) || defined(__x86_64__)
-
-#include "cpuid.h"
-
 void start(float a, float b, float c, float d)
 {
 	__asm__ volatile (
@@ -34,15 +31,16 @@ float finish(void)
 	return res;
 }
 
-#define CPUID_FEAT_EDX_FPU (1 << 0)
-
 int chk_proc_fpu(void)
 {
-	uint32_t eax, ebx, ecx, edx;
+	unsigned long fi;
 
-	cpuid(1, &eax, &ebx, &ecx, &edx);
-
-	return edx & CPUID_FEAT_EDX_FPU;
+	__asm__ volatile (
+			"mov $1, %%eax\n"
+			"cpuid\n"
+			: "=d" (fi) : : "eax"
+		);
+	return fi & (1 << 0);
 }
 #endif
 

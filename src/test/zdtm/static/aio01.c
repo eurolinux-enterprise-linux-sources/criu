@@ -30,7 +30,7 @@ int main(int argc, char **argv)
 {
 	struct iocb iocb, *iocbp = &iocb;
 	volatile struct aio_ring *ring;
-	aio_context_t ctx = 0;
+	unsigned long ctx = 0;
 	struct io_event event;
 	unsigned tail[2], head[2];
 	unsigned nr[2];
@@ -91,7 +91,7 @@ int main(int argc, char **argv)
 	test_msg("tail=%u, head=%u, nr=%u\n", tail[1], head[1], nr[1]);
 
 	if (tail[0] != tail[1] || head[0] != head[1] || nr[0] != nr[1]) {
-		fail("mismatch");
+		fail("missmatch");
 		return 1;
 	}
 

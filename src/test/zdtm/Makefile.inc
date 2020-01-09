@@ -21,16 +21,6 @@ endif
 
 SRCARCH ?= $(ARCH)
 
-ifeq ($(ARCH),arm)
-	ARMV := $(shell echo $(UNAME-M) | sed -nr 's/armv([[:digit:]]).*/\1/p; t; i7')
-
-	ifeq ($(ARMV),6)
-		USERCFLAGS += -march=armv6
-	else ifeq ($(ARMV),7)
-		USERCFLAGS += -march=armv7-a
-	endif
-endif
-
 CC	:= gcc
 CFLAGS	+= -g -O2 -Wall -Werror -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0
 CFLAGS	+= $(USERCFLAGS)
@@ -54,13 +44,14 @@ ifeq ($(ARCH),x86)
 endif
 endif
 
-%.d: %.c
-	$(E) " DEP      " $@
-	$(Q)$(CC) $(CFLAGS) $(CPPFLAGS) -MM -MP -c $< -o $@
+DEPEND.c = $(COMPILE.c) -MM -MP
+%.d:   %.c
+	$(E) " DEP      " $*.d
+	$(Q)$(DEPEND.c) $(OUTPUT_OPTION) $<
 
 %.o: %.c | %.d
 	$(E) " CC       " $@
-	$(Q)$(CC) $(CFLAGS) $(CPPFLAGS) -c $< -o $@
+	$(Q)$(COMPILE.c) $(OUTPUT_OPTION) $<
 
 %: %.o $(LDLIBS)
 	@echo $@ >> .gitignore
@@ -98,9 +89,6 @@ dep: $(DEP)
 
 no-deps-targets	:= clean cleandep cleanout realclean groups.cleanout
 
-ifeq ($(strip $(DEP)),)
-$(error No DEP defined in sub-make)
-endif
 ifeq ($(filter $(no-deps-targets), $(MAKECMDGOALS)),)
 -include $(wildcard $(DEP))
 endif

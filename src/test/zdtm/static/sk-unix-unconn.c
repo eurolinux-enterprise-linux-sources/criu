@@ -33,12 +33,8 @@ int main(int argc, char ** argv)
 
 	len = snprintf(path, sizeof(path), "X/zdtm-%s-%d/X", argv[0], getpid());
 
-	if (len >= sizeof(addr.sun_path)) {
-		pr_err("%s\n", path);
-		return 1;
-	}
 	addr.sun_family = AF_UNIX;
-	memcpy(addr.sun_path, path, len);
+	strncpy(addr.sun_path, path, sizeof(addr.sun_path));
 	addrlen = sizeof(addr.sun_family) + len;
 	addr.sun_path[0] = 0;
 	addr.sun_path[len - 1] = 0;

@@ -47,7 +47,7 @@ static int pipe_data_read(struct cr_img *img, struct pipe_data_rst *r)
 	 */
 
 	r->data = mmap(NULL, bytes, PROT_READ | PROT_WRITE,
-			MAP_SHARED | MAP_ANONYMOUS, 0, 0);
+			MAP_SHARED | MAP_ANON, 0, 0);
 	if (r->data == MAP_FAILED) {
 		pr_perror("Can't map mem for pipe buffers");
 		return -1;
@@ -168,16 +168,6 @@ int restore_pipe_data(int img_type, int pfd, u32 id, struct pipe_data_rst **hash
 		return -1;
 	}
 
-	if (pd->pde->has_size) {
-		pr_info("Restoring size %#x for %#x\n",
-				pd->pde->size, pd->pde->pipe_id);
-		ret = fcntl(pfd, F_SETPIPE_SZ, pd->pde->size);
-		if (ret < 0) {
-			pr_perror("Can't restore pipe size");
-			goto err;
-		}
-	}
-
 	iov.iov_base = pd->data;
 	iov.iov_len = pd->pde->bytes;
 
@@ -213,6 +203,15 @@ int restore_pipe_data(int img_type, int pfd, u32 id, struct pipe_data_rst **hash
 	pd->data = NULL;
 out:
 	ret = 0;
+	if (pd->pde->has_size) {
+		pr_info("Restoring size %#x for %#x\n",
+				pd->pde->size, pd->pde->pipe_id);
+		ret = fcntl(pfd, F_SETPIPE_SZ, pd->pde->size);
+		if (ret < 0)
+			pr_perror("Can't restore pipe size");
+		else
+			ret = 0;
+	}
 err:
 	return ret;
 }
@@ -440,12 +439,6 @@ int dump_one_pipe_data(struct pipe_data_dump *pd, int lfd, const struct fd_parms
 
 	if (pipe(steal_pipe) < 0) {
 		pr_perror("Can't create pipe for stealing data");
-		goto err;
-	}
-
-	/* steal_pipe has to be able to fit all data from a target pipe */
-	if (fcntl(steal_pipe[1], F_SETPIPE_SZ, pipe_size) < 0) {
-		pr_perror("Unable to set a pipe size");
 		goto err;
 	}
 

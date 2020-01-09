@@ -40,17 +40,13 @@ message task_core_entry {
 
 	optional signal_queue_entry	signals_s	= 10;
 
-	/* These two are deprecated, should be per-thread */
-	optional seccomp_mode	old_seccomp_mode	= 11;
-	optional uint32		old_seccomp_filter	= 12;
+	optional seccomp_mode		seccomp_mode	= 11;
+	optional uint32			seccomp_filter	= 12;
 
 	optional uint32			loginuid	= 13;
 
 	optional int32			oom_score_adj	= 14;
 	repeated sa_entry		sigactions	= 15;
-	// Reserved for tty inheritance
-	//optional int32		tty_nr		= 16;
-	//optional int32		tty_pgrp	= 17;
 }
 
 message task_kobj_ids_entry {
@@ -86,11 +82,6 @@ message thread_core_entry {
 
 	optional signal_queue_entry	signals_p	= 9;
 	optional creds_entry		creds		= 10;
-
-	optional seccomp_mode		seccomp_mode	= 11;
-	optional uint32			seccomp_filter	= 12;
-
-	optional string			comm		= 13;
 }
 
 message task_rlimits_entry {

@@ -1,3 +1,5 @@
+#!/bin/env python2
+
 # This file contains methods to deal with criu images.
 #
 # According to http://criu.org/Images, criu images can be described
@@ -38,18 +40,16 @@
 # }
 #
 import io
-import base64
+import google
 import struct
 import os
+import sys
+import json
+import pb2dict
 import array
 
-from . import magic
-from . import pb
-from . import pb2dict
-
-if "encodebytes" not in dir(base64):
-	base64.encodebytes = base64.encodestring
-	base64.decodebytes = base64.decodestring
+import magic
+from pb import *
 
 #
 # Predefined hardcoded constants
@@ -91,13 +91,13 @@ class entry_handler:
 			entry = {}
 
 			# Read payload
-			pbuff = self.payload()
+			pb = self.payload()
 			buf = f.read(4)
-			if buf == b'':
+			if buf == '':
 				break
 			size, = struct.unpack('i', buf)
-			pbuff.ParseFromString(f.read(size))
-			entry = pb2dict.pb2dict(pbuff, pretty)
+			pb.ParseFromString(f.read(size))
+			entry = pb2dict.pb2dict(pb, pretty)
 
 			# Read extra
 			if self.extra_handler:
@@ -112,10 +112,10 @@ class entry_handler:
 							num /= 1024.0
 						return "%.1fYB" % num
 
-					pl_size = self.extra_handler.skip(f, pbuff)
+					pl_size = self.extra_handler.skip(f, pb)
 					entry['extra'] = '... <%s>' % human_readable(pl_size)
 				else:
-					entry['extra'] = self.extra_handler.load(f, pbuff)
+					entry['extra'] = self.extra_handler.load(f, pb)
 
 			entries.append(entry)
 
@@ -138,16 +138,16 @@ class entry_handler:
 			extra = entry.pop('extra', None)
 
 			# Write payload
-			pbuff = self.payload()
-			pb2dict.dict2pb(entry, pbuff)
-			pb_str = pbuff.SerializeToString()
+			pb = self.payload()
+			pb2dict.dict2pb(entry, pb)
+			pb_str = pb.SerializeToString()
 			size = len(pb_str)
 			f.write(struct.pack('i', size))
 			f.write(pb_str)
 
 			# Write extra
 			if self.extra_handler and extra:
-				self.extra_handler.dump(extra, f, pbuff)
+				self.extra_handler.dump(extra, f, pb)
 
 	def dumps(self, entries):
 		"""
@@ -184,16 +184,16 @@ class pagemap_handler:
 	def load(self, f, pretty = False, no_payload = False):
 		entries = []
 
-		pbuff = pb.pagemap_head()
+		pb = pagemap_head()
 		while True:
 			buf = f.read(4)
-			if buf == b'':
+			if buf == '':
 				break
 			size, = struct.unpack('i', buf)
-			pbuff.ParseFromString(f.read(size))
-			entries.append(pb2dict.pb2dict(pbuff, pretty))
+			pb.ParseFromString(f.read(size))
+			entries.append(pb2dict.pb2dict(pb, pretty))
 
-			pbuff = pb.pagemap_entry()
+			pb = pagemap_entry()
 
 		return entries
 
@@ -202,15 +202,15 @@ class pagemap_handler:
 		return self.load(f, pretty)
 
 	def dump(self, entries, f):
-		pbuff = pb.pagemap_head()
+		pb = pagemap_head()
 		for item in entries:
-			pb2dict.dict2pb(item, pbuff)
-			pb_str = pbuff.SerializeToString()
+			pb2dict.dict2pb(item, pb)
+			pb_str = pb.SerializeToString()
 			size = len(pb_str)
 			f.write(struct.pack('i', size))
 			f.write(pb_str)
 
-			pbuff = pb.pagemap_entry()
+			pb = pagemap_entry()
 
 	def dumps(self, entries):
 		f = io.BytesIO('')
@@ -225,7 +225,7 @@ class ghost_file_handler:
 	def load(self, f, pretty = False, no_payload = False):
 		entries = []
 
-		gf = pb.ghost_file_entry()
+		gf = ghost_file_entry()
 		buf = f.read(4)
 		size, = struct.unpack('i', buf)
 		gf.ParseFromString(f.read(size))
@@ -234,7 +234,7 @@ class ghost_file_handler:
 		if gf.chunks:
 			entries.append(g_entry)
 			while True:
-				gc = pb.ghost_chunk_entry()
+				gc = ghost_chunk_entry()
 				buf = f.read(4)
 				if buf == '':
 					break
@@ -244,13 +244,13 @@ class ghost_file_handler:
 				if no_payload:
 					f.seek(gc.len, os.SEEK_CUR)
 				else:
-					entry['extra'] = base64.encodebytes(f.read(gc.len))
+					entry['extra'] = f.read(gc.len).encode('base64')
 				entries.append(entry)
 		else:
 			if no_payload:
 				f.seek(0, os.SEEK_END)
 			else:
-				g_entry['extra'] = base64.encodebytes(f.read())
+				g_entry['extra'] = f.read().encode('base64')
 			entries.append(g_entry)
 
 		return entries
@@ -260,25 +260,25 @@ class ghost_file_handler:
 		return self.load(f, pretty)
 
 	def dump(self, entries, f):
-		pbuff = pb.ghost_file_entry()
+		pb = ghost_file_entry()
 		item = entries.pop(0)
-		pb2dict.dict2pb(item, pbuff)
-		pb_str = pbuff.SerializeToString()
+		pb2dict.dict2pb(item, pb)
+		pb_str = pb.SerializeToString()
 		size = len(pb_str)
 		f.write(struct.pack('i', size))
 		f.write(pb_str)
 
-		if pbuff.chunks:
+		if pb.chunks:
 			for item in entries:
-				pbuff = pb.ghost_chunk_entry()
-				pb2dict.dict2pb(item, pbuff)
-				pb_str = pbuff.SerializeToString()
+				pb = ghost_chunk_entry()
+				pb2dict.dict2pb(item, pb)
+				pb_str = pb.SerializeToString()
 				size = len(pb_str)
 				f.write(struct.pack('i', size))
 				f.write(pb_str)
-				f.write(base64.decodebytes(item['extra']))
+				f.write(item['extra'].decode('base64'))
 		else:
-			f.write(base64.decodebytes(item['extra']))
+			f.write(item['extra'].decode('base64'))
 
 	def dumps(self, entries):
 		f = io.BytesIO('')
@@ -296,10 +296,10 @@ class pipes_data_extra_handler:
 	def load(self, f, pload):
 		size = pload.bytes
 		data = f.read(size)
-		return base64.encodebytes(data)
+		return data.encode('base64')
 
 	def dump(self, extra, f, pload):
-		data = base64.decodebytes(extra)
+		data = extra.decode('base64')
 		f.write(data)
 
 	def skip(self, f, pload):
@@ -310,10 +310,10 @@ class sk_queues_extra_handler:
 	def load(self, f, pload):
 		size = pload.length
 		data = f.read(size)
-		return base64.encodebytes(data)
+		return data.encode('base64')
 
-	def dump(self, extra, f, _unused):
-		data = base64.decodebytes(extra)
+	def dump(self, extra, f, pb):
+		data = extra.decode('base64')
 		f.write(data)
 
 	def skip(self, f, pload):
@@ -322,31 +322,31 @@ class sk_queues_extra_handler:
 
 
 class tcp_stream_extra_handler:
-	def load(self, f, pbuff):
+	def load(self, f, pb):
 		d = {}
 
-		inq	= f.read(pbuff.inq_len)
-		outq	= f.read(pbuff.outq_len)
+		inq	= f.read(pb.inq_len)
+		outq	= f.read(pb.outq_len)
 
-		d['inq']	= base64.encodebytes(inq)
-		d['outq']	= base64.encodebytes(outq)
+		d['inq']	= inq.encode('base64')
+		d['outq']	= outq.encode('base64')
 
 		return d
 
-	def dump(self, extra, f, _unused):
-		inq	= base64.decodebytes(extra['inq'])
-		outq	= base64.decodebytes(extra['outq'])
+	def dump(self, extra, f, pb):
+		inq	= extra['inq'].decode('base64')
+		outq	= extra['outq'].decode('base64')
 
 		f.write(inq)
 		f.write(outq)
 
-	def skip(self, f, pbuff):
+	def skip(self, f, pb):
 		f.seek(0, os.SEEK_END)
-		return pbuff.inq_len + pbuff.outq_len
+		return pb.inq_len + pb.outq_len
 
 class ipc_sem_set_handler:
-	def load(self, f, pbuff):
-		entry = pb2dict.pb2dict(pbuff)
+	def load(self, f, pb):
+		entry = pb2dict.pb2dict(pb)
 		size = sizeof_u16 * entry['nsems']
 		rounded = round_up(size, sizeof_u64)
 		s = array.array('H')
@@ -356,8 +356,8 @@ class ipc_sem_set_handler:
 		f.seek(rounded - size, 1)
 		return s.tolist()
 
-	def dump(self, extra, f, pbuff):
-		entry = pb2dict.pb2dict(pbuff)
+	def dump(self, extra, f, pb):
+		entry = pb2dict.pb2dict(pb)
 		size = sizeof_u16 * entry['nsems']
 		rounded = round_up(size, sizeof_u64)
 		s = array.array('H')
@@ -369,53 +369,53 @@ class ipc_sem_set_handler:
 		f.write(s.tostring())
 		f.write('\0' * (rounded - size))
 
-	def skip(self, f, pbuff):
-		entry = pb2dict.pb2dict(pbuff)
+	def skip(self, f, pb):
+		entry = pb2dict.pb2dict(pb)
 		size = sizeof_u16 * entry['nsems']
 		f.seek(round_up(size, sizeof_u64), os.SEEK_CUR)
 		return size
 
 class ipc_msg_queue_handler:
-	def load(self, f, pbuff):
-		entry = pb2dict.pb2dict(pbuff)
+	def load(self, f, pb):
+		entry = pb2dict.pb2dict(pb)
 		messages = []
 		for x in range (0, entry['qnum']):
 			buf = f.read(4)
 			if buf == '':
 				break
 			size, = struct.unpack('i', buf)
-			msg = pb.ipc_msg()
+			msg = ipc_msg()
 			msg.ParseFromString(f.read(size))
 			rounded = round_up(msg.msize, sizeof_u64)
 			data = f.read(msg.msize)
 			f.seek(rounded - msg.msize, 1)
 			messages.append(pb2dict.pb2dict(msg))
-			messages.append(base64.encodebytes(data))
+			messages.append(data.encode('base64'))
 		return messages
 
-	def dump(self, extra, f, pbuff):
-		entry = pb2dict.pb2dict(pbuff)
+	def dump(self, extra, f, pb):
+		entry = pb2dict.pb2dict(pb)
 		for i in range (0, len(extra), 2):
-			msg = pb.ipc_msg()
+			msg = ipc_msg()
 			pb2dict.dict2pb(extra[i], msg)
 			msg_str = msg.SerializeToString()
 			size = len(msg_str)
 			f.write(struct.pack('i', size))
 			f.write(msg_str)
 			rounded = round_up(msg.msize, sizeof_u64)
-			data = base64.decodebytes(extra[i + 1])
+			data = extra[i + 1].decode('base64')
 			f.write(data[:msg.msize])
 			f.write('\0' * (rounded - msg.msize))
 
-	def skip(self, f, pbuff):
-		entry = pb2dict.pb2dict(pbuff)
+	def skip(self, f, pb):
+		entry = pb2dict.pb2dict(pb)
 		pl_len = 0
 		for x in range (0, entry['qnum']):
 			buf = f.read(4)
 			if buf == '':
 				break
 			size, = struct.unpack('i', buf)
-			msg = pb.ipc_msg()
+			msg = ipc_msg()
 			msg.ParseFromString(f.read(size))
 			rounded = round_up(msg.msize, sizeof_u64)
 			f.seek(rounded, os.SEEK_CUR)
@@ -424,24 +424,24 @@ class ipc_msg_queue_handler:
 		return pl_len
 
 class ipc_shm_handler:
-	def load(self, f, pbuff):
-		entry = pb2dict.pb2dict(pbuff)
+	def load(self, f, pb):
+		entry = pb2dict.pb2dict(pb)
 		size = entry['size']
 		data = f.read(size)
 		rounded = round_up(size, sizeof_u32)
 		f.seek(rounded - size, 1)
-		return base64.encodebytes(data)
+		return data.encode('base64')
 
-	def dump(self, extra, f, pbuff):
-		entry = pb2dict.pb2dict(pbuff)
+	def dump(self, extra, f, pb):
+		entry = pb2dict.pb2dict(pb)
 		size = entry['size']
-		data = base64.decodebytes(extra)
+		data = extra.decode('base64')
 		rounded = round_up(size, sizeof_u32)
 		f.write(data[:size])
 		f.write('\0' * (rounded - size))
 
-	def skip(self, f, pbuff):
-		entry = pb2dict.pb2dict(pbuff)
+	def skip(self, f, pb):
+		entry = pb2dict.pb2dict(pb)
 		size = entry['size']
 		rounded = round_up(size, sizeof_u32)
 		f.seek(rounded, os.SEEK_CUR)
@@ -449,65 +449,64 @@ class ipc_shm_handler:
 
 
 handlers = {
-	'INVENTORY'		: entry_handler(pb.inventory_entry),
-	'CORE'			: entry_handler(pb.core_entry),
-	'IDS'			: entry_handler(pb.task_kobj_ids_entry),
-	'CREDS'			: entry_handler(pb.creds_entry),
-	'UTSNS'			: entry_handler(pb.utsns_entry),
-	'IPC_VAR'		: entry_handler(pb.ipc_var_entry),
-	'FS'			: entry_handler(pb.fs_entry),
+	'INVENTORY'		: entry_handler(inventory_entry),
+	'CORE'			: entry_handler(core_entry),
+	'IDS'			: entry_handler(task_kobj_ids_entry),
+	'CREDS'			: entry_handler(creds_entry),
+	'UTSNS'			: entry_handler(utsns_entry),
+	'IPC_VAR'		: entry_handler(ipc_var_entry),
+	'FS'			: entry_handler(fs_entry),
 	'GHOST_FILE'		: ghost_file_handler(),
-	'MM'			: entry_handler(pb.mm_entry),
-	'CGROUP'		: entry_handler(pb.cgroup_entry),
-	'TCP_STREAM'		: entry_handler(pb.tcp_stream_entry, tcp_stream_extra_handler()),
-	'STATS'			: entry_handler(pb.stats_entry),
+	'MM'			: entry_handler(mm_entry),
+	'CGROUP'		: entry_handler(cgroup_entry),
+	'TCP_STREAM'		: entry_handler(tcp_stream_entry, tcp_stream_extra_handler()),
+	'STATS'			: entry_handler(stats_entry),
 	'PAGEMAP'		: pagemap_handler(), # Special one
-	'PSTREE'		: entry_handler(pb.pstree_entry),
-	'REG_FILES'		: entry_handler(pb.reg_file_entry),
-	'NS_FILES'		: entry_handler(pb.ns_file_entry),
-	'EVENTFD_FILE'		: entry_handler(pb.eventfd_file_entry),
-	'EVENTPOLL_FILE'	: entry_handler(pb.eventpoll_file_entry),
-	'EVENTPOLL_TFD'		: entry_handler(pb.eventpoll_tfd_entry),
-	'SIGNALFD'		: entry_handler(pb.signalfd_entry),
-	'TIMERFD'		: entry_handler(pb.timerfd_entry),
-	'INOTIFY_FILE'		: entry_handler(pb.inotify_file_entry),
-	'INOTIFY_WD'		: entry_handler(pb.inotify_wd_entry),
-	'FANOTIFY_FILE'		: entry_handler(pb.fanotify_file_entry),
-	'FANOTIFY_MARK'		: entry_handler(pb.fanotify_mark_entry),
-	'VMAS'			: entry_handler(pb.vma_entry),
-	'PIPES'			: entry_handler(pb.pipe_entry),
-	'FIFO'			: entry_handler(pb.fifo_entry),
-	'SIGACT'		: entry_handler(pb.sa_entry),
-	'NETLINK_SK'		: entry_handler(pb.netlink_sk_entry),
-	'REMAP_FPATH'		: entry_handler(pb.remap_file_path_entry),
-	'MNTS'			: entry_handler(pb.mnt_entry),
-	'TTY_FILES'		: entry_handler(pb.tty_file_entry),
-	'TTY_INFO'		: entry_handler(pb.tty_info_entry),
-	'TTY_DATA'		: entry_handler(pb.tty_data_entry),
-	'RLIMIT'		: entry_handler(pb.rlimit_entry),
-	'TUNFILE'		: entry_handler(pb.tunfile_entry),
-	'EXT_FILES'		: entry_handler(pb.ext_file_entry),
-	'IRMAP_CACHE'		: entry_handler(pb.irmap_cache_entry),
-	'FILE_LOCKS'		: entry_handler(pb.file_lock_entry),
-	'FDINFO'		: entry_handler(pb.fdinfo_entry),
-	'UNIXSK'		: entry_handler(pb.unix_sk_entry),
-	'INETSK'		: entry_handler(pb.inet_sk_entry),
-	'PACKETSK'		: entry_handler(pb.packet_sock_entry),
-	'ITIMERS'		: entry_handler(pb.itimer_entry),
-	'POSIX_TIMERS'		: entry_handler(pb.posix_timer_entry),
-	'NETDEV'		: entry_handler(pb.net_device_entry),
-	'PIPES_DATA'		: entry_handler(pb.pipe_data_entry, pipes_data_extra_handler()),
-	'FIFO_DATA'		: entry_handler(pb.pipe_data_entry, pipes_data_extra_handler()),
-	'SK_QUEUES'		: entry_handler(pb.sk_packet_entry, sk_queues_extra_handler()),
-	'IPCNS_SHM'		: entry_handler(pb.ipc_shm_entry, ipc_shm_handler()),
-	'IPCNS_SEM'		: entry_handler(pb.ipc_sem_entry, ipc_sem_set_handler()),
-	'IPCNS_MSG'		: entry_handler(pb.ipc_msg_entry, ipc_msg_queue_handler()),
-	'NETNS'			: entry_handler(pb.netns_entry),
-	'USERNS'		: entry_handler(pb.userns_entry),
-	'SECCOMP'		: entry_handler(pb.seccomp_entry),
-	'AUTOFS'		: entry_handler(pb.autofs_entry),
-	'FILES'                 : entry_handler(pb.file_entry),
-	'CPUINFO'		: entry_handler(pb.cpuinfo_entry),
+	'PSTREE'		: entry_handler(pstree_entry),
+	'REG_FILES'		: entry_handler(reg_file_entry),
+	'NS_FILES'		: entry_handler(ns_file_entry),
+	'EVENTFD_FILE'		: entry_handler(eventfd_file_entry),
+	'EVENTPOLL_FILE'	: entry_handler(eventpoll_file_entry),
+	'EVENTPOLL_TFD'		: entry_handler(eventpoll_tfd_entry),
+	'SIGNALFD'		: entry_handler(signalfd_entry),
+	'TIMERFD'		: entry_handler(timerfd_entry),
+	'INOTIFY_FILE'		: entry_handler(inotify_file_entry),
+	'INOTIFY_WD'		: entry_handler(inotify_wd_entry),
+	'FANOTIFY_FILE'		: entry_handler(fanotify_file_entry),
+	'FANOTIFY_MARK'		: entry_handler(fanotify_mark_entry),
+	'VMAS'			: entry_handler(vma_entry),
+	'PIPES'			: entry_handler(pipe_entry),
+	'FIFO'			: entry_handler(fifo_entry),
+	'SIGACT'		: entry_handler(sa_entry),
+	'NETLINK_SK'		: entry_handler(netlink_sk_entry),
+	'REMAP_FPATH'		: entry_handler(remap_file_path_entry),
+	'MNTS'			: entry_handler(mnt_entry),
+	'TTY_FILES'		: entry_handler(tty_file_entry),
+	'TTY_INFO'		: entry_handler(tty_info_entry),
+	'TTY_DATA'		: entry_handler(tty_data_entry),
+	'RLIMIT'		: entry_handler(rlimit_entry),
+	'TUNFILE'		: entry_handler(tunfile_entry),
+	'EXT_FILES'		: entry_handler(ext_file_entry),
+	'IRMAP_CACHE'		: entry_handler(irmap_cache_entry),
+	'FILE_LOCKS'		: entry_handler(file_lock_entry),
+	'FDINFO'		: entry_handler(fdinfo_entry),
+	'UNIXSK'		: entry_handler(unix_sk_entry),
+	'INETSK'		: entry_handler(inet_sk_entry),
+	'PACKETSK'		: entry_handler(packet_sock_entry),
+	'ITIMERS'		: entry_handler(itimer_entry),
+	'POSIX_TIMERS'		: entry_handler(posix_timer_entry),
+	'NETDEV'		: entry_handler(net_device_entry),
+	'PIPES_DATA'		: entry_handler(pipe_data_entry, pipes_data_extra_handler()),
+	'FIFO_DATA'		: entry_handler(pipe_data_entry, pipes_data_extra_handler()),
+	'SK_QUEUES'		: entry_handler(sk_packet_entry, sk_queues_extra_handler()),
+	'IPCNS_SHM'		: entry_handler(ipc_shm_entry, ipc_shm_handler()),
+	'IPCNS_SEM'		: entry_handler(ipc_sem_entry, ipc_sem_set_handler()),
+	'IPCNS_MSG'		: entry_handler(ipc_msg_entry, ipc_msg_queue_handler()),
+	'NETNS'			: entry_handler(netns_entry),
+	'USERNS'		: entry_handler(userns_entry),
+	'SECCOMP'		: entry_handler(seccomp_entry),
+	'AUTOFS'		: entry_handler(autofs_entry),
+	'FILES'                 : entry_handler(file_entry),
 	}
 
 def __rhandler(f):
@@ -591,6 +590,6 @@ def dumps(img):
 	Same as dump(), but takes only an image and returns
 	a string.
 	"""
-	f = io.BytesIO(b'')
+	f = io.BytesIO('')
 	dump(img, f)
 	return f.getvalue()

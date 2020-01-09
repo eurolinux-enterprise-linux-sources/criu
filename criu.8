@@ -2,12 +2,12 @@
 .\"     Title: criu
 .\"    Author: [see the "AUTHOR" section]
 .\" Generator: DocBook XSL Stylesheets vsnapshot <http://docbook.sf.net/>
-.\"      Date: 04/23/2019
+.\"      Date: 09/28/2017
 .\"    Manual: CRIU Manual
-.\"    Source: criu 3.12
+.\"    Source: criu 3.5
 .\"  Language: English
 .\"
-.TH "CRIU" "8" "04/23/2019" "criu 3\&.12" "CRIU Manual"
+.TH "CRIU" "8" "09/28/2017" "criu 3\&.5" "CRIU Manual"
 .\" -----------------------------------------------------------------
 .\" * Define some portability stuff
 .\" -----------------------------------------------------------------
@@ -262,16 +262,6 @@ above plus lots of debug\&.
 .RE
 .RE
 .PP
-\fB\-\-config\fR \fIfile\fR
-.RS 4
-Pass a specific configuration file to criu\&.
-.RE
-.PP
-\fB\-\-no\-default\-config\fR
-.RS 4
-Forbid parsing of default configuration files\&.
-.RE
-.PP
 \fB\-\-pidfile\fR \fIfile\fR
 .RS 4
 Write root task, service or page\-server pid into a
@@ -282,6 +272,11 @@ Write root task, service or page\-server pid into a
 .RS 4
 Write logging messages to
 \fIfile\fR\&.
+.RE
+.PP
+\fB\-\-log\-pid\fR
+.RS 4
+Write separate logging files per each pid\&.
 .RE
 .PP
 \fB\-\-display\-stats\fR
@@ -360,21 +355,16 @@ run prior to beginning a
 \fBrestore\fR
 .RE
 .PP
-\fBpost\-restore\fR
-.RS 4
-run upon
-\fBrestore\fR
-completion
-.RE
-.PP
 \fBpre\-resume\fR
 .RS 4
 run when all processes and resources are restored but tasks are stopped waiting for final kick to run\&. Must not fail\&.
 .RE
 .PP
-\fBpost\-resume\fR
+\fBpost\-restore\fR
 .RS 4
-called at the very end, when everything is restored and processes were resumed
+run upon
+\fBrestore\fR
+completion
 .RE
 .PP
 \fBnetwork\-lock\fR
@@ -389,17 +379,7 @@ run to unlock network in a target network namespace
 .PP
 \fBsetup\-namespaces\fR
 .RS 4
-run once root task has just been created with required namespaces\&. Note it is an early stage of restore, when nothing is restored yet, except for namespaces themselves
-.RE
-.PP
-\fBpost\-setup\-namespaces\fR
-.RS 4
-called after the namespaces are configured
-.RE
-.PP
-\fBorphan\-pts\-master\fR
-.RS 4
-called after master pty is opened and unlocked\&. This hook can be used only in the RPC mode, and the notification message contains a file descriptor for the master pty
+run once root task just been created with required namespaces\&. Note it is an early stage of restore, when nothing is restored yet except for namespaces themselves
 .RE
 .RE
 .PP
@@ -458,7 +438,7 @@ of resource, followed by resource
 \fIid\fR
 (enclosed in literal square brackets), and optional
 \fIvalue\fR
-(prepended by a literal colon)\&. The following resource types are currently supported:
+(prepended by a literal semicolon)\&. The following resource types are currently supported:
 \fBmnt\fR,
 \fBdev\fR,
 \fBfile\fR,
@@ -487,7 +467,7 @@ to also dump external master mounts,
 \fBs\fR
 to also dump external shared mounts (default behavior is to abort dumping if such mounts are found)\&. If
 \fIflags\fR
-are not provided, colon is optional\&.
+are not provided, semicolon is optional\&.
 .RE
 .PP
 \fB\-\-external dev[\fR\fImajor\fR\fB/\fR\fIminor\fR\fB]:\fR\fIname\fR
@@ -652,6 +632,11 @@ This option skips in\-flight TCP connections\&. If any TCP connections that are 
 ignores these connections, rather than errors out\&. The TCP stack on the client side is expected to handle the re\-connect gracefully\&.
 .RE
 .PP
+\fB\-\-tcp\-close\fR
+.RS 4
+Restore connected TCP sockets in closed state\&.
+.RE
+.PP
 \fB\-\-evasive\-devices\fR
 .RS 4
 Use any path to a device file if the original one is inaccessible\&.
@@ -715,72 +700,13 @@ as well\&.
 .PP
 \fB\-\-cpu\-cap\fR [\fIcap\fR[,\fIcap\fR\&...]]
 .RS 4
-Specify CPU capabilities to write to an image file\&. The argument is a comma\-separated list of:
-.sp
-.RS 4
-.ie n \{\
-\h'-04'\(bu\h'+03'\c
-.\}
-.el \{\
-.sp -1
-.IP \(bu 2.3
-.\}
-\fBnone\fR
-to ignore capabilities at all; the image will not be produced on dump, neither any check performed on restore;
-.RE
-.sp
-.RS 4
-.ie n \{\
-\h'-04'\(bu\h'+03'\c
-.\}
-.el \{\
-.sp -1
-.IP \(bu 2.3
-.\}
-\fBfpu\fR
-to check if FPU module is compatible;
-.RE
-.sp
-.RS 4
-.ie n \{\
-\h'-04'\(bu\h'+03'\c
-.\}
-.el \{\
-.sp -1
-.IP \(bu 2.3
-.\}
-\fBins\fR
-to check if CPU supports all instructions required;
-.RE
-.sp
-.RS 4
-.ie n \{\
-\h'-04'\(bu\h'+03'\c
-.\}
-.el \{\
-.sp -1
-.IP \(bu 2.3
-.\}
-\fBcpu\fR
-to check if CPU capabilities are exactly matching;
-.RE
-.sp
-.RS 4
-.ie n \{\
-\h'-04'\(bu\h'+03'\c
-.\}
-.el \{\
-.sp -1
-.IP \(bu 2.3
-.\}
-\fBall\fR
-for all above set\&.
-.RE
-.sp
-By default the option is set to
-\fBfpu\fR
-and
-\fBins\fR\&.
+Specify CPU capabilities to write to an image file\&. The argument is a comma\-separated list of
+\fBnone\fR,
+\fBfpu\fR,
+\fBcpu\fR,
+\fBins\fR,
+\fBall\fR\&. If the argument is omitted or set to
+\fBnone\fR, capabilities will not be written, which is the default behavior\&.
 .RE
 .PP
 \fB\-\-cgroup\-root\fR [\fIcontroller\fR:]/\fInewroot\fR
@@ -898,11 +824,6 @@ Restore root task as a sibling (makes sense only with
 \fB\-\-restore\-detached\fR)\&.
 .RE
 .PP
-\fB\-\-log\-pid\fR
-.RS 4
-Write separate logging files per each pid\&.
-.RE
-.PP
 \fB\-r\fR, \fB\-\-root\fR \fIpath\fR
 .RS 4
 Change the root filesystem to
@@ -918,7 +839,7 @@ of resource, followed by resource
 \fIid\fR
 (enclosed in literal square brackets), and optional
 \fIvalue\fR
-(prepended by a literal colon)\&. The following resource types are currently supported:
+(prepended by a literal semicolon)\&. The following resource types are currently supported:
 \fBmnt\fR,
 \fBdev\fR,
 \fBveth\fR,
@@ -1027,11 +948,6 @@ and
 phases so other side of a connection simply notice a kind of lag\&.
 .RE
 .PP
-\fB\-\-tcp\-close\fR
-.RS 4
-Restore connected TCP sockets in closed state\&.
-.RE
-.PP
 \fB\-\-veth\-pair\fR \fIIN\fR\fB=\fR\fIOUT\fR
 .RS 4
 Correspondence between outside and inside names of veth devices\&.
@@ -1040,16 +956,6 @@ Correspondence between outside and inside names of veth devices\&.
 \fB\-l\fR, \fB\-\-file\-locks\fR
 .RS 4
 Restore file locks from the image\&.
-.RE
-.PP
-\fB\-\-lsm\-profile\fR \fItype\fR\fB:\fR\fIname\fR
-.RS 4
-Specify an LSM profile to be used during restore\&. The
-\FCtype\F[]
-can be either
-\fBapparmor\fR
-or
-\fBselinux\fR\&.
 .RE
 .PP
 \fB\-\-auto\-dedup\fR
@@ -1204,24 +1110,19 @@ Launches \fBcriu\fR in page server mode\&.
 Runs page server as a daemon (background process)\&.
 .RE
 .PP
-\fB\-\-status\-fd\fR
+\fB\-\-status_fd\fR
 .RS 4
-Write \e0 to the FD and close it once page\-server is ready to handle requests\&. The status\-fd allows to not daemonize a process and get its exit code at the end\&. It isn\(cqt supposed to use \-\-daemon and \-\-status\-fd together\&.
+Write \e\e0 to the FD and close it once page\-server is ready to handle requests\&. The status\-fd allows to not daemonize a process and get its exit code at the end\&. It isn\(cqt supposed to use \-\-daemon and \-\-status\-fd together\&.
 .RE
 .PP
 \fB\-\-address\fR \fIaddress\fR
 .RS 4
-Page server IP address or hostname\&.
+Page server IP address\&.
 .RE
 .PP
 \fB\-\-port\fR \fInumber\fR
 .RS 4
 Page server port number\&.
-.RE
-.PP
-\fB\-\-ps\-socket\fR \fIfd\fR
-.RS 4
-Use provided file descriptor as socket for incoming connection\&. In this case \-\-address and \-\-port are ignored\&. Useful for intercepting page\-server traffic e\&.g\&. to add encryption or authentication\&.
 .RE
 .PP
 \fB\-\-lazy\-pages\fR
@@ -1232,13 +1133,13 @@ daemon\&. In this mode the
 \fBpage\-server\fR
 reads local memory dump and allows the remote
 \fBlazy\-pages\fR
-daemon to request memory pages in random order\&.
+deamon to request memory pages in random order\&.
 .RE
 .SS "lazy\-pages"
 .sp
 Launches \fBcriu\fR in lazy\-pages daemon mode\&.
 .sp
-The \fBlazy\-pages\fR daemon is responsible for managing user\-level demand paging for the restored processes\&. It gets information required to fill the process memory pages from the \fBrestore\fR and from the checkpoint directory\&. When a restored process access certain memory page for the first time, the \fBlazy\-pages\fR daemon injects its contents into the process address space\&. The memory pages that are not yet requested by the restored processes are injected in the background\&.
+The \fBlazy\-pages\fR daemon is responsible for managing user\-level demand paging for the restored processes\&. It gets information required to fill the process memory pages from the \fBrestore\fR and from the checkpont directory\&. When a restored process access certain memory page for the first time, the \fBlazy\-pages\fR daemon injects its contents into the process address space\&. The memory pages that are not yet requested by the restored processes are injected in the background\&.
 .SS "exec"
 .sp
 Executes a system call inside a destination task\*(Aqs context\&. This functionality is deprecated; please use \fBCompel\fR instead\&.
@@ -1254,110 +1155,6 @@ Fetches current CPU features and write them into an image file\&.
 .SS "cpuinfo check"
 .sp
 Fetches current CPU features (i\&.e\&. CPU the \fBcriu\fR is running on) and test if they are compatible with the ones present in an image file\&.
-.SH "CONFIGURATION FILES"
-.sp
-\fBCriu\fR supports usage of configuration files to avoid the need of writing every option on command line, which is useful especially with repeated usage of same options\&. A specific configuration file can be passed with the "\fB\-\-config\fR \fIfile\fR" option\&. If no file is passed, the default configuration files \fI/etc/criu/default\&.conf\fR and \fI$HOME/\&.criu/default\&.conf\fR are parsed (if present on the system)\&. If the environment variable CRIU_CONFIG_FILE is set, it will also be parsed\&.
-.sp
-The options passed to CRIU via CLI, RPC or configuration file are evaluated in the following order:
-.sp
-.RS 4
-.ie n \{\
-\h'-04'\(bu\h'+03'\c
-.\}
-.el \{\
-.sp -1
-.IP \(bu 2.3
-.\}
-apply_config(/etc/criu/default\&.conf)
-.RE
-.sp
-.RS 4
-.ie n \{\
-\h'-04'\(bu\h'+03'\c
-.\}
-.el \{\
-.sp -1
-.IP \(bu 2.3
-.\}
-apply_config($HOME/\&.criu/default\&.conf)
-.RE
-.sp
-.RS 4
-.ie n \{\
-\h'-04'\(bu\h'+03'\c
-.\}
-.el \{\
-.sp -1
-.IP \(bu 2.3
-.\}
-apply_config(CRIU_CONFIG_FILE)
-.RE
-.sp
-.RS 4
-.ie n \{\
-\h'-04'\(bu\h'+03'\c
-.\}
-.el \{\
-.sp -1
-.IP \(bu 2.3
-.\}
-apply_config(\fB\-\-config\fR
-\fIfile\fR)
-.RE
-.sp
-.RS 4
-.ie n \{\
-\h'-04'\(bu\h'+03'\c
-.\}
-.el \{\
-.sp -1
-.IP \(bu 2.3
-.\}
-apply_config(CLI) or apply_config(RPC)
-.RE
-.sp
-.RS 4
-.ie n \{\
-\h'-04'\(bu\h'+03'\c
-.\}
-.el \{\
-.sp -1
-.IP \(bu 2.3
-.\}
-apply_config(RPC configuration file) (only for RPC mode)
-.RE
-.sp
-Default configuration file parsing can be deactivated with "\fB\-\-no\-default\-config\fR" if needed\&. Parsed configuration files are merged with command line options, which allows overriding boolean options\&.
-.SS "Configuration file syntax"
-.sp
-Comments are supported using \*(Aq#\*(Aq sign\&. The rest of the line is ignored\&. Options are the same as command line options without the \*(Aq\-\-\*(Aq prefix, use one option per line (with corresponding argument if applicable, divided by whitespaces)\&. If needed, the argument can be provided in double quotes (this should be needed only if the argument contains whitespaces)\&. In case this type of argument contains a literal double quote as well, it can be escaped using the \*(Aq\e\*(Aq sign\&. Usage of commands is disallowed and all other escape sequences are interpreted literally\&.
-.sp
-Example of configuration file to illustrate syntax:
-.sp
-.if n \{\
-.RS 4
-.\}
-.fam C
-.ps -1
-.nf
-.BB lightgray
-$ cat ~/\&.criu/default\&.conf
-tcp\-established
-work\-dir "/home/USERNAME/criu/my \e"work\e" directory"
-#this is a comment
-no\-restore\-sibling   # this is another comment
-.EB lightgray
-.fi
-.fam
-.ps +1
-.if n \{\
-.RE
-.\}
-.SS "Configuration files in RPC mode"
-.sp
-Not only does \fBcriu\fR evaluate configuration files in CLI mode, it also evaluates configuration files in RPC mode\&. Just as in CLI mode the configuration file values are evaluated first\&. This means that any option set via RPC will overwrite the configuration file setting\&. The user can thus change \fBcriu\fR\*(Aqs default behavior but it is not possible to change settings which are explicitly set by the RPC client\&.
-.sp
-The RPC client can, however, specify an additional configuration file which will be evaluated after the RPC options (see above for option evaluation order)\&. The RPC client can specify this additional configuration file via "req\&.opts\&.config_file = \fI/path/to/file\fR"\&. The values from this configuration file will overwrite all other configuration file settings or RPC options\&. \fBThis can lead to undesired behavior of criu and should only be used carefully\&.\fR
 .SH "EXAMPLES"
 .sp
 To checkpoint a program with pid of \fB1234\fR and write all image files into directory \fBcheckpoint\fR:

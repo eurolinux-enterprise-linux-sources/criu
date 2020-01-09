@@ -20,13 +20,6 @@
 #include "infect-priv.h"
 #include "log.h"
 
-#ifndef NT_X86_XSTATE
-#define NT_X86_XSTATE	0x202		/* x86 extended state using xsave */
-#endif
-#ifndef NT_PRSTATUS
-#define NT_PRSTATUS	1		/* Contains copy of prstatus struct */
-#endif
-
 /*
  * Injected syscall instruction
  */
@@ -116,7 +109,7 @@ void compel_convert_from_fxsr(struct user_i387_ia32_struct *env,
 			      struct i387_fxsave_struct *fxsave)
 {
 	struct fpxreg *from = (struct fpxreg *)&fxsave->st_space[0];
-	struct fpreg *to = (struct fpreg *)env->st_space;
+	struct fpreg *to = (struct fpreg *)&env->st_space[0];
 	int i;
 
 	env->cwd = fxsave->cwd | 0xffff0000u;
@@ -219,7 +212,7 @@ int sigreturn_prep_fpu_frame_plain(struct rt_sigframe *sigframe,
 			return -1;
 		}
 
-		sigframe->native.uc.uc_mcontext.fpstate = (uint64_t)addr;
+		sigframe->native.uc.uc_mcontext.fpstate = (void *)addr;
 	} else if (!sigframe->is_native) {
 		sigframe->compat.uc.uc_mcontext.fpstate =
 			(uint32_t)(unsigned long)(void *)&fpu_state->fpu_state_ia32;
@@ -232,35 +225,11 @@ int sigreturn_prep_fpu_frame_plain(struct rt_sigframe *sigframe,
 	((user_regs_native(pregs)) ? (int64_t)((pregs)->native.name) :	\
 				(int32_t)((pregs)->compat.name))
 
-static int get_task_xsave(pid_t pid, user_fpregs_struct_t *xsave)
+int get_task_regs(pid_t pid, user_regs_struct_t *regs, save_regs_t save, void *arg)
 {
+	user_fpregs_struct_t xsave	= {  }, *xs = NULL;
+
 	struct iovec iov;
-
-	iov.iov_base = xsave;
-	iov.iov_len = sizeof(*xsave);
-
-	if (ptrace(PTRACE_GETREGSET, pid, (unsigned int)NT_X86_XSTATE, &iov) < 0) {
-		pr_perror("Can't obtain FPU registers for %d", pid);
-		return -1;
-	}
-
-	return 0;
-}
-
-static int get_task_fpregs(pid_t pid, user_fpregs_struct_t *xsave)
-{
-	if (ptrace(PTRACE_GETFPREGS, pid, NULL, xsave)) {
-		pr_perror("Can't obtain FPU registers for %d", pid);
-		return -1;
-	}
-
-	return 0;
-}
-
-int get_task_regs(pid_t pid, user_regs_struct_t *regs, save_regs_t save,
-		  void *arg, unsigned long flags)
-{
-	user_fpregs_struct_t xsave = { }, *xs = NULL;
 	int ret = -1;
 
 	pr_info("Dumping general registers for %d in %s mode\n", pid,
@@ -293,23 +262,20 @@ int get_task_regs(pid_t pid, user_regs_struct_t *regs, save_regs_t save,
 
 	pr_info("Dumping GP/FPU registers for %d\n", pid);
 
-	if (!compel_cpu_has_feature(X86_FEATURE_OSXSAVE)) {
-		ret = get_task_fpregs(pid, &xsave);
-	} else if (unlikely(flags & INFECT_X86_PTRACE_MXCSR_BUG)) {
-		/*
-		 * get_task_fpregs() will fill FP state,
-		 * get_task_xsave() will overwrite rightly sse/mmx/etc
-		 */
-		pr_warn("Skylake xsave fpu bug workaround used\n");
-		ret = get_task_fpregs(pid, &xsave);
-		if (!ret)
-			ret = get_task_xsave(pid, &xsave);
-	} else {
-		ret = get_task_xsave(pid, &xsave);
-	}
+	if (compel_cpu_has_feature(X86_FEATURE_OSXSAVE)) {
+		iov.iov_base = &xsave;
+		iov.iov_len = sizeof(xsave);
 
-	if (ret)
-		goto err;
+		if (ptrace(PTRACE_GETREGSET, pid, (unsigned int)NT_X86_XSTATE, &iov) < 0) {
+			pr_perror("Can't obtain FPU registers for %d", pid);
+			goto err;
+		}
+	} else {
+		if (ptrace(PTRACE_GETFPREGS, pid, NULL, &xsave)) {
+			pr_perror("Can't obtain FPU registers for %d", pid);
+			goto err;
+		}
+	}
 
 	xs = &xsave;
 out:
@@ -327,10 +293,9 @@ int compel_syscall(struct parasite_ctl *ctl, int nr, long *ret,
 		unsigned long arg6)
 {
 	user_regs_struct_t regs = ctl->orig.regs;
-	bool native = user_regs_native(&regs);
 	int err;
 
-	if (native) {
+	if (user_regs_native(&regs)) {
 		user_regs_struct64 *r = &regs.native;
 
 		r->ax  = (uint64_t)nr;
@@ -356,9 +321,7 @@ int compel_syscall(struct parasite_ctl *ctl, int nr, long *ret,
 		err = compel_execute_syscall(ctl, &regs, code_int_80);
 	}
 
-	*ret = native ?
-		(long)get_user_reg(&regs, ax) :
-		(int)get_user_reg(&regs, ax);
+	*ret = get_user_reg(&regs, ax);
 	return err;
 }
 
@@ -381,13 +344,6 @@ void *remote_mmap(struct parasite_ctl *ctl,
 				"check selinux execmem policy\n", ctl->rpid);
 		return NULL;
 	}
-
-	/*
-	 * For compat tasks the address in foreign process
-	 * must lay inside 4 bytes.
-	 */
-	if (compat_task)
-		map &= 0xfffffffful;
 
 	return (void *)map;
 }

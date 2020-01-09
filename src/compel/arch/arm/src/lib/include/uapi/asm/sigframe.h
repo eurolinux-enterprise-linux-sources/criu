@@ -73,7 +73,7 @@ struct rt_sigframe {
 		     "svc #0					    \n"	\
 		     :							\
 		     : "r"(new_sp)					\
-		     : "memory")
+		     : "sp","memory")
 
 #define RT_SIGFRAME_UC(rt_sigframe)		(&rt_sigframe->sig.uc)
 #define RT_SIGFRAME_REGIP(rt_sigframe)		(rt_sigframe)->sig.uc.uc_mcontext.arm_ip
@@ -81,10 +81,5 @@ struct rt_sigframe {
 #define RT_SIGFRAME_AUX_SIGFRAME(rt_sigframe)	((struct aux_sigframe *)&(rt_sigframe)->sig.uc.uc_regspace)
 #define RT_SIGFRAME_FPU(rt_sigframe)		(&RT_SIGFRAME_AUX_SIGFRAME(rt_sigframe)->vfp)
 #define RT_SIGFRAME_OFFSET(rt_sigframe)		0
-
-#define rt_sigframe_erase_sigset(sigframe)				\
-	memset(&sigframe->sig.uc.uc_sigmask, 0, sizeof(k_rtsigset_t))
-#define rt_sigframe_copy_sigset(sigframe, from)				\
-	memcpy(&sigframe->sig.uc.uc_sigmask, from, sizeof(k_rtsigset_t))
 
 #endif /* UAPI_COMPEL_ASM_SIGFRAME_H__ */

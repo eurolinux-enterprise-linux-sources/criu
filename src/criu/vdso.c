@@ -167,14 +167,14 @@ static void drop_rt_vdso(struct vm_area_list *vma_area_list,
 		}
 	}
 
-	pr_debug("vdso: Dropping marked vdso at %lx\n",
+	pr_debug("vdso: Droppping marked vdso at %lx\n",
 			(long)rt_vdso_marked->e->start);
 	list_del(&rt_vdso_marked->list);
 	xfree(rt_vdso_marked);
 	vma_area_list->nr--;
 
 	if (rt_vvar_marked) {
-		pr_debug("vdso: Dropping marked vvar at %lx\n",
+		pr_debug("vdso: Droppping marked vvar at %lx\n",
 				(long)rt_vvar_marked->e->start);
 		list_del(&rt_vvar_marked->list);
 		xfree(rt_vvar_marked);
@@ -505,7 +505,7 @@ static int vdso_fill_compat_symtable(struct vdso_maps *native,
 		return 0;
 
 	vdso_mmap = mmap(NULL, COMPAT_VDSO_BUF_SZ, PROT_READ | PROT_WRITE,
-			MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+			MAP_SHARED | MAP_ANON, -1, 0);
 	if (vdso_mmap == MAP_FAILED) {
 		pr_perror("Failed to mmap buf for compat vdso");
 		return -1;
@@ -656,7 +656,7 @@ int kerndat_vdso_preserves_hint(void)
 		void *new_addr;
 
 		new_addr = mmap(0, vdso_size, PROT_NONE,
-				MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+				MAP_ANON | MAP_PRIVATE, -1, 0);
 		if (new_addr == MAP_FAILED)
 			exit(1);
 

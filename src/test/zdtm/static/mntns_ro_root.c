@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <limits.h>
 #include <sys/mount.h>
+#include <dirent.h>
 
 #include "zdtmtst.h"
 

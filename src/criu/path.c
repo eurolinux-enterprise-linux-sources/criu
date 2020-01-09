@@ -99,7 +99,7 @@ char *mnt_get_sibling_path(struct mount_info *m,
 		rpath++;
 
 	if (rpath[0] != '\0')
-		snprintf(path, len, "/%s", rpath);
+		off = snprintf(path, len, "/%s", rpath);
 
 	return buf;
 }

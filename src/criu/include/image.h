@@ -12,6 +12,11 @@
 #include "log.h"
 #include "common/bug.h"
 
+#ifdef _ARCH_PPC64
+#define PAGE_IMAGE_SIZE	65536
+#else
+#define PAGE_IMAGE_SIZE	4096
+#endif /* _ARCH_PPC64 */
 #define PAGE_RSS	1
 #define PAGE_ANON	2
 
@@ -45,7 +50,7 @@
  *  	contents modification especially when tasks are
  *  	migrating between different kernel versions
  *  - heap
- *  	"heap" area in application, currently for information only
+ *  	"heap" area in application, currently for inforamtion only
  *  - file private
  *  	stands for privately memory mapped files
  *  - file shared
@@ -101,8 +106,8 @@ extern bool img_common_magic;
 #define O_NOBUF		(O_DIRECT)
 #define O_SERVICE	(O_DIRECTORY)
 #define O_DUMP		(O_WRONLY | O_CREAT | O_TRUNC)
+#define O_SHOW		(O_RDONLY | O_NOBUF)
 #define O_RSTR		(O_RDONLY)
-#define O_FORCE_LOCAL	(O_SYNC)
 
 struct cr_img {
 	union {

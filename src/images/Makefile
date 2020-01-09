@@ -62,7 +62,6 @@ proto-obj-y	+= time.o
 proto-obj-y	+= sysctl.o
 proto-obj-y	+= autofs.o
 proto-obj-y	+= macvlan.o
-proto-obj-y	+= sit.o
 
 CFLAGS		+= -iquote $(obj)/
 
@@ -92,7 +91,7 @@ ifeq ($(PROTOUFIX),y)
 endif
 $(obj)/$(1).pb-c.d: $(obj)/$(1).pb-c.c $(addsuffix .pb-c.d,$(addprefix $(obj)/,$(2))) $(makefile-deps)
 	$$(E) "  DEP     " $$@
-	$$(Q) $$(CC) -M -MT $$@ -MT $$(patsubst %.d,%.o,$$@) $$(CFLAGS) $$< -o $$@
+	$$(Q) $$(CC) -M -MT $$@ -MT $(patsubst %.d,%.o,$$@) $$(CFLAGS) $$< -o $$@
 endef
 
 $(foreach file, $(proto-obj-y),                                                 \

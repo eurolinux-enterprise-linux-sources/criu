@@ -37,6 +37,8 @@
 #include "irmap.h"
 #include "kerndat.h"
 #include "proc_parse.h"
+#include <sys/un.h>
+#include <sys/socket.h>
 #include "common/scm.h"
 #include "uffd.h"
 
@@ -240,11 +242,7 @@ static int setup_opts_from_req(int sk, CriuOpts *req)
 	char images_dir_path[PATH_MAX];
 	char work_dir_path[PATH_MAX];
 	char status_fd[PATH_MAX];
-	bool output_changed_by_rpc_conf = false;
-	bool work_changed_by_rpc_conf = false;
-	bool imgs_changed_by_rpc_conf = false;
 	int i;
-	bool dummy = false;
 
 	if (getsockopt(sk, SOL_SOCKET, SO_PEERCRED, &ids, &ids_len)) {
 		pr_perror("Can't get socket options");
@@ -259,81 +257,11 @@ static int setup_opts_from_req(int sk, CriuOpts *req)
 	BUG_ON(st.st_ino == -1);
 	service_sk_ino = st.st_ino;
 
-	/*
-	 * Evaluate an additional configuration file if specified.
-	 * This needs to happen twice, because it is needed early to detect
-	 * things like work_dir, imgs_dir and logfile. The second parsing
-	 * of the optional RPC configuration file happens at the end and
-	 * overwrites all options set via RPC.
-	 */
-	if (req->config_file) {
-		char *tmp_output = opts.output;
-		char *tmp_work = opts.work_dir;
-		char *tmp_imgs = opts.imgs_dir;
-
-		opts.output = NULL;
-		opts.work_dir = NULL;
-		opts.imgs_dir = NULL;
-
-		rpc_cfg_file = req->config_file;
-		i = parse_options(0, NULL, &dummy, &dummy, PARSING_RPC_CONF);
-		if (i) {
-			xfree(tmp_output);
-			xfree(tmp_work);
-			xfree(tmp_imgs);
-			goto err;
-		}
-		/* If this is non-NULL, the RPC configuration file had a value, use it.*/
-		if (opts.output)
-			output_changed_by_rpc_conf = true;
-		/* If this is NULL, use the old value if it was set. */
-		if (!opts.output && tmp_output) {
-			opts.output = tmp_output;
-			tmp_output = NULL;
-		}
-
-		if (opts.work_dir)
-			work_changed_by_rpc_conf = true;
-		if (!opts.work_dir && tmp_work) {
-			opts.work_dir = tmp_work;
-			tmp_work = NULL;
-		}
-
-		if (opts.imgs_dir)
-			imgs_changed_by_rpc_conf = true;
-		/*
-		 * As the images directory is a required RPC setting, it is not
-		 * necessary to use the value from other configuration files.
-		 * Either it is set in the RPC configuration file or it is set
-		 * via RPC.
-		 */
-		xfree(tmp_output);
-		xfree(tmp_work);
-		xfree(tmp_imgs);
-	}
-
-	/*
-	 * open images_dir - images_dir_fd is a required RPC parameter
-	 *
-	 * This assumes that if opts.imgs_dir is set we have a value
-	 * from the configuration file parser. The test to see that
-	 * imgs_changed_by_rpc_conf is true is used to make sure the value
-	 * is from the RPC configuration file.
-	 * The idea is that only the RPC configuration file is able to
-	 * overwrite RPC settings:
-	 *  * apply_config(global_conf)
-	 *  * apply_config(user_conf)
-	 *  * apply_config(environment variable)
-	 *  * apply_rpc_options()
-	 *  * apply_config(rpc_conf)
-	 */
-	if (imgs_changed_by_rpc_conf)
-		strncpy(images_dir_path, opts.imgs_dir, PATH_MAX - 1);
-	else
-		sprintf(images_dir_path, "/proc/%d/fd/%d", ids.pid, req->images_dir_fd);
+	/* open images_dir */
+	sprintf(images_dir_path, "/proc/%d/fd/%d", ids.pid, req->images_dir_fd);
 
 	if (req->parent_img)
-		SET_CHAR_OPTS(img_parent, req->parent_img);
+		opts.img_parent = req->parent_img;
 
 	if (open_image_dir(images_dir_path) < 0) {
 		pr_perror("Can't open images directory");
@@ -347,17 +275,9 @@ static int setup_opts_from_req(int sk, CriuOpts *req)
 	}
 
 	/* chdir to work dir */
-	if (work_changed_by_rpc_conf)
-		/* Use the value from the RPC configuration file first. */
-		strncpy(work_dir_path, opts.work_dir, PATH_MAX - 1);
-	else if (req->has_work_dir_fd)
-		/* Use the value set via RPC. */
+	if (req->has_work_dir_fd)
 		sprintf(work_dir_path, "/proc/%d/fd/%d", ids.pid, req->work_dir_fd);
-	else if (opts.work_dir)
-		/* Use the value from one of the other configuration files. */
-		strncpy(work_dir_path, opts.work_dir, PATH_MAX - 1);
 	else
-		/* Use the images directory a work directory. */
 		strcpy(work_dir_path, images_dir_path);
 
 	if (chdir(work_dir_path)) {
@@ -366,35 +286,21 @@ static int setup_opts_from_req(int sk, CriuOpts *req)
 	}
 
 	/* initiate log file in work dir */
-	if (req->log_file && !output_changed_by_rpc_conf) {
-		/*
-		 * If RPC sets a log file and if there nothing from the
-		 * RPC configuration file, use the RPC value.
-		 */
+	if (req->log_file) {
 		if (strchr(req->log_file, '/')) {
 			pr_perror("No subdirs are allowed in log_file name");
 			goto err;
 		}
 
-		SET_CHAR_OPTS(output, req->log_file);
-	} else if (!opts.output) {
-		SET_CHAR_OPTS(output, DEFAULT_LOG_FILENAME);
-	}
+		opts.output = req->log_file;
+	} else
+		opts.output = DEFAULT_LOG_FILENAME;
 
-	/* This is needed later to correctly set the log_level */
-	opts.log_level = req->log_level;
 	log_set_loglevel(req->log_level);
 	if (log_init(opts.output) == -1) {
 		pr_perror("Can't initiate log");
 		goto err;
 	}
-
-	if (req->config_file) {
-		pr_debug("Overwriting RPC settings with values from %s\n", req->config_file);
-	}
-
-	if (kerndat_init())
-		return 1;
 
 	if (log_keep_err()) {
 		pr_perror("Can't tune log");
@@ -419,7 +325,7 @@ static int setup_opts_from_req(int sk, CriuOpts *req)
 	}
 
 	if (req->root)
-		SET_CHAR_OPTS(root, req->root);
+		opts.root = req->root;
 
 	if (req->has_rst_sibling) {
 		if (!opts.swrk_restore) {
@@ -435,9 +341,6 @@ static int setup_opts_from_req(int sk, CriuOpts *req)
 
 	if (req->has_tcp_skip_in_flight)
 		opts.tcp_skip_in_flight = req->tcp_skip_in_flight;
-
-	if (req->has_tcp_close)
-		opts.tcp_close = req->tcp_close;
 
 	if (req->has_weak_sysctls)
 		opts.weak_sysctls = req->weak_sysctls;
@@ -474,14 +377,11 @@ static int setup_opts_from_req(int sk, CriuOpts *req)
 	}
 
 	if (req->ps) {
-		opts.port = (short)req->ps->port;
+		opts.port = htons((short)req->ps->port);
 
 		if (!opts.lazy_pages) {
 			opts.use_page_server = true;
-			if (req->ps->address)
-				SET_CHAR_OPTS(addr, req->ps->address);
-			else
-				opts.addr = NULL;
+			opts.addr = req->ps->address;
 
 			if (req->ps->has_fd) {
 				if (!opts.swrk_restore)
@@ -539,10 +439,8 @@ static int setup_opts_from_req(int sk, CriuOpts *req)
 			goto err;
 	}
 
-	if (req->has_cpu_cap) {
+	if (req->has_cpu_cap)
 		opts.cpu_cap = req->cpu_cap;
-		opts.cpu_cap |= CPU_CAP_IMAGE;
-	}
 
 	/*
 	 * FIXME: For backward compatibility we setup
@@ -587,21 +485,16 @@ static int setup_opts_from_req(int sk, CriuOpts *req)
 	}
 
 	if (req->freeze_cgroup)
-		SET_CHAR_OPTS(freeze_cgroup, req->freeze_cgroup);
-
-	if (req->lsm_profile) {
-		opts.lsm_supplied = true;
-		SET_CHAR_OPTS(lsm_profile, req->lsm_profile);
-	}
+		opts.freeze_cgroup = req->freeze_cgroup;
 
 	if (req->has_timeout)
 		opts.timeout = req->timeout;
 
 	if (req->cgroup_props)
-		SET_CHAR_OPTS(cgroup_props, req->cgroup_props);
+		opts.cgroup_props = req->cgroup_props;
 
 	if (req->cgroup_props_file)
-		SET_CHAR_OPTS(cgroup_props_file, req->cgroup_props_file);
+		opts.cgroup_props_file = req->cgroup_props_file;
 
 	for (i = 0; i < req->n_cgroup_dump_controller; i++) {
 		if (!cgp_add_dump_controller(req->cgroup_dump_controller[i]))
@@ -643,18 +536,7 @@ static int setup_opts_from_req(int sk, CriuOpts *req)
 	if (req->orphan_pts_master)
 		opts.orphan_pts_master = true;
 
-
-	/* Evaluate additional configuration file a second time to overwrite
-	 * all RPC settings. */
-	if (req->config_file) {
-		rpc_cfg_file = req->config_file;
-		i = parse_options(0, NULL, &dummy, &dummy, PARSING_RPC_CONF);
-		if (i)
-			goto err;
-	}
-
-	log_set_loglevel(opts.log_level);
-	if (check_options())
+	if (check_namespace_opts())
 		goto err;
 
 	return 0;
@@ -677,7 +559,7 @@ static int dump_using_req(int sk, CriuOpts *req)
 	/*
 	 * FIXME -- cr_dump_tasks() may return code from custom
 	 * scripts, that can be positive. However, right now we
-	 * don't have ability to push scripts via RPC, so positive
+	 * don't have ability to push scripts via RPC, so psitive
 	 * ret values are impossible here.
 	 */
 	if (cr_dump_tasks(req->pid))
@@ -743,36 +625,17 @@ exit:
 	return success ? 0 : 1;
 }
 
-static int check(int sk, CriuOpts *req)
+static int check(int sk)
 {
-	int pid, status;
 	CriuResp resp = CRIU_RESP__INIT;
 
 	resp.type = CRIU_REQ_TYPE__CHECK;
 
-	pid = fork();
-	if (pid < 0) {
-		pr_perror("Can't fork");
-		goto out;
-	}
+	setproctitle("check --rpc");
 
-	if (pid == 0) {
-		setproctitle("check --rpc");
+	if (!cr_check())
+		resp.success = true;
 
-		if (setup_opts_from_req(sk, req))
-			exit(1);
-
-		exit(!!cr_check());
-	}
-	if (waitpid(pid, &status, 0) != pid) {
-		pr_perror("Unable to wait %d", pid);
-		goto out;
-	}
-	if (status)
-		goto out;
-
-	resp.success = true;
-out:
 	return send_criu_msg(sk, &resp);
 }
 
@@ -803,11 +666,10 @@ cout:
 		exit(ret);
 	}
 
-	if (waitpid(pid, &status, 0) != pid) {
-		pr_perror("Unable to wait %d", pid);
+	wait(&status);
+	if (!WIFEXITED(status))
 		goto out;
-	}
-	if (status != 0)
+	if (WEXITSTATUS(status) != 0)
 		goto out;
 
 	success = true;
@@ -844,7 +706,12 @@ static int pre_dump_loop(int sk, CriuReq *msg)
 	return dump_using_req(sk, msg->opts);
 }
 
-static int start_page_server_req(int sk, CriuOpts *req, bool daemon_mode)
+struct ps_info {
+	int pid;
+	unsigned short port;
+};
+
+static int start_page_server_req(int sk, CriuOpts *req)
 {
 	int ret = -1, pid, start_pipe[2];
 	ssize_t count;
@@ -869,43 +736,35 @@ static int start_page_server_req(int sk, CriuOpts *req, bool daemon_mode)
 
 		pr_debug("Starting page server\n");
 
-		pid = cr_page_server(daemon_mode, false, start_pipe[1]);
+		pid = cr_page_server(true, false, start_pipe[1]);
 		if (pid < 0)
 			goto out_ch;
 
-		if (daemon_mode) {
-			info.pid = pid;
-			info.port = opts.port;
+		info.pid = pid;
+		info.port = opts.port;
 
-			count = write(start_pipe[1], &info, sizeof(info));
-			if (count != sizeof(info))
-				goto out_ch;
-		}
+		count = write(start_pipe[1], &info, sizeof(info));
+		if (count != sizeof(info))
+			goto out_ch;
 
 		ret = 0;
 out_ch:
-		if (daemon_mode && ret < 0 && pid > 0)
+		if (ret < 0 && pid > 0)
 			kill(pid, SIGKILL);
 		close(start_pipe[1]);
 		exit(ret);
 	}
 
 	close(start_pipe[1]);
-
-	if (daemon_mode) {
-		if (waitpid(pid, &ret, 0) != pid) {
-			pr_perror("Unable to wait %d", pid);
+	wait(&ret);
+	if (WIFEXITED(ret)) {
+		if (WEXITSTATUS(ret)) {
+			pr_err("Child exited with an error\n");
 			goto out;
 		}
-		if (WIFEXITED(ret)) {
-			if (WEXITSTATUS(ret)) {
-				pr_err("Child exited with an error\n");
-				goto out;
-			}
-		} else {
-			pr_err("Child wasn't terminated normally\n");
-			goto out;
-		}
+	} else {
+		pr_err("Child wasn't terminated normally\n");
+		goto out;
 	}
 
 	count = read(start_pipe[0], &info, sizeof(info));
@@ -913,12 +772,11 @@ out_ch:
 	if (count != sizeof(info))
 		goto out;
 
+	success = true;
+	ps.has_pid = true;
 	ps.pid = info.pid;
 	ps.has_port = true;
 	ps.port = info.port;
-
-	success = true;
-	ps.has_pid = true;
 	resp.ps = &ps;
 
 	pr_debug("Page server started\n");
@@ -945,9 +803,6 @@ static int chk_keepopen_req(CriuReq *msg)
 	if (msg->type == CRIU_REQ_TYPE__PAGE_SERVER)
 		/* This just fork()-s so no leaks */
 		return 0;
-	if (msg->type == CRIU_REQ_TYPE__PAGE_SERVER_CHLD)
-		/* This just fork()-s so no leaks */
-		return 0;
 	else if (msg->type == CRIU_REQ_TYPE__CPUINFO_DUMP ||
 		 msg->type == CRIU_REQ_TYPE__CPUINFO_CHECK)
 		return 0;
@@ -969,8 +824,8 @@ static int handle_version(int sk, CriuReq * msg)
 	CriuVersion version = CRIU_VERSION__INIT;
 
 	/* This assumes we will always have a major and minor version */
-	version.major_number = CRIU_VERSION_MAJOR;
-	version.minor_number = CRIU_VERSION_MINOR;
+	version.major = CRIU_VERSION_MAJOR;
+	version.minor = CRIU_VERSION_MINOR;
 	if (strcmp(CRIU_GITID, "0")) {
 		version.gitid = CRIU_GITID;
 	}
@@ -1021,9 +876,6 @@ static int handle_feature_check(int sk, CriuReq * msg)
 	}
 
 	if (pid == 0) {
-		/* kerndat_init() is called from setup_opts_from_req() */
-		if (setup_opts_from_req(sk, msg->opts))
-			exit(1);
 
 		setproctitle("feature-check --rpc");
 
@@ -1043,18 +895,24 @@ static int handle_feature_check(int sk, CriuReq * msg)
 		/*
 		 * If this point is reached the information about the features
 		 * is transmitted from the forked CRIU process (here).
-		 * If an error occurred earlier, the feature check response will be
+		 * If an error occured earlier, the feature check response will be
 		 * be send from the parent process.
 		 */
 		ret = send_criu_msg(sk, &resp);
-		exit(!!ret);
+
+		exit(ret);
 	}
-	if (waitpid(pid, &status, 0) != pid) {
-		pr_perror("Unable to wait %d", pid);
+
+	ret = waitpid(pid, &status,  0);
+	if (ret == -1)
 		goto out;
-	}
-	if (status != 0)
-		goto out;
+
+	if (WIFEXITED(status) && !WEXITSTATUS(status))
+		/*
+		 * The child process exited was able to send the answer.
+		 * Nothing more to do here.
+		 */
+		return 0;
 
 	/*
 	 * The child process was not able to send an answer. Tell
@@ -1063,29 +921,6 @@ static int handle_feature_check(int sk, CriuReq * msg)
 out:
 	resp.type = msg->type;
 	resp.success = false;
-
-	return send_criu_msg(sk, &resp);
-}
-
-static int handle_wait_pid(int sk, int pid)
-{
-	CriuResp resp = CRIU_RESP__INIT;
-	bool success = false;
-	int status;
-
-	if (waitpid(pid, &status, 0) == -1) {
-		resp.cr_errno = errno;
-		pr_perror("Unable to wait %d", pid);
-		goto out;
-	}
-
-	resp.status = status;
-	resp.has_status = true;
-
-	success = true;
-out:
-	resp.type = CRIU_REQ_TYPE__WAIT_PID;
-	resp.success = success;
 
 	return send_criu_msg(sk, &resp);
 }
@@ -1121,10 +956,7 @@ cout:
 		exit(ret);
 	}
 
-	if (waitpid(pid, &status, 0) != pid) {
-		pr_perror("Unable to wait %d", pid);
-		goto out;
-	}
+	wait(&status);
 	if (!WIFEXITED(status))
 		goto out;
 	switch (WEXITSTATUS(status)) {
@@ -1172,19 +1004,13 @@ more:
 		ret = restore_using_req(sk, msg->opts);
 		break;
 	case CRIU_REQ_TYPE__CHECK:
-		ret = check(sk, msg->opts);
+		ret = check(sk);
 		break;
 	case CRIU_REQ_TYPE__PRE_DUMP:
 		ret = pre_dump_loop(sk, msg);
 		break;
 	case CRIU_REQ_TYPE__PAGE_SERVER:
-		ret = start_page_server_req(sk, msg->opts, true);
-		break;
-	case CRIU_REQ_TYPE__PAGE_SERVER_CHLD:
-		ret = start_page_server_req(sk, msg->opts, false);
-		break;
-	case CRIU_REQ_TYPE__WAIT_PID:
-		ret =  handle_wait_pid(sk, msg->pid);
+		ret =  start_page_server_req(sk, msg->opts);
 		break;
 	case CRIU_REQ_TYPE__CPUINFO_DUMP:
 	case CRIU_REQ_TYPE__CPUINFO_CHECK:
@@ -1299,7 +1125,7 @@ int cr_service(bool daemon_mode)
 
 		if (opts.addr == NULL) {
 			pr_warn("Binding to local dir address!\n");
-			SET_CHAR_OPTS(addr, CR_DEFAULT_SERVICE_ADDRESS);
+			opts.addr = CR_DEFAULT_SERVICE_ADDRESS;
 		}
 
 		strcpy(server_addr.sun_path, opts.addr);
@@ -1345,9 +1171,6 @@ int cr_service(bool daemon_mode)
 	}
 
 	if (setup_sigchld_handler())
-		goto err;
-
-	if (close_status_fd())
 		goto err;
 
 	while (1) {

@@ -2,9 +2,9 @@
 #define __CR_KERNDAT_H__
 
 #include <stdbool.h>
+
 #include "int.h"
-#include "common/config.h"
-#include "asm/kerndat.h"
+#include "config.h"
 #ifdef CONFIG_VDSO
 #include "util-vdso.h"
 #endif
@@ -20,7 +20,6 @@ extern int kerndat_init(void);
 extern int kerndat_get_dirty_track(void);
 extern int kerndat_fdinfo_has_lock(void);
 extern int kerndat_loginuid(void);
-extern int kerndat_files_stat(bool early);
 
 enum pagemap_func {
 	PM_UNKNOWN,
@@ -47,9 +46,6 @@ struct kerndat_s {
 	bool ipv6;
 	enum loginuid_func luid;
 	bool compat_cr;
-	bool sk_ns;
-	bool sk_unix_file;
-	bool tun_ns;
 	enum pagemap_func pmap;
 	unsigned int has_xtlocks;
 	unsigned long mmap_min_addr;
@@ -67,13 +63,6 @@ struct kerndat_s {
 	struct vdso_symtable	vdso_sym_compat;
 #endif
 #endif
-	bool has_nsid;
-	bool has_link_nsid;
-	unsigned int sysctl_nr_open;
-	unsigned long files_stat_max_files;
-	bool x86_has_ptrace_fpu_xsave_bug;
-	bool has_inotify_setnextwd;
-	bool has_kcmp_epoll_tfd;
 };
 
 extern struct kerndat_s kdat;

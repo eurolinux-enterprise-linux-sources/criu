@@ -1,5 +1,8 @@
 CRIU_SO			:= libcriu.so
 UAPI_HEADERS		:= lib/c/criu.h images/rpc.proto
+PYTHON_BIN ?= python2
+
+.PHONY: .FORCE
 
 #
 # File to keep track of files installed by setup.py
@@ -53,7 +56,7 @@ install: lib-c lib-py crit/crit lib/c/criu.pc.in
 	$(Q) sed -e 's,@version@,$(CRIU_VERSION),' -e 's,@libdir@,$(LIBDIR),' -e 's,@includedir@,$(dir $(INCLUDEDIR)/criu/),' lib/c/criu.pc.in > lib/c/criu.pc
 	$(Q) install -m 644 lib/c/criu.pc $(DESTDIR)$(LIBDIR)/pkgconfig
 	$(E) "  INSTALL " crit
-	$(Q) $(PYTHON) scripts/crit-setup.py install --prefix=$(DESTDIR)$(PREFIX) --record $(CRIT_SETUP_FILES)
+	$(Q) $(PYTHON_BIN) scripts/crit-setup.py install --prefix=$(DESTDIR)$(PREFIX) --record $(CRIT_SETUP_FILES)
 .PHONY: install
 
 uninstall:

@@ -25,6 +25,7 @@ restorer-obj-y	+= ./$(ARCH_DIR)/restorer.o
 
 ifeq ($(ARCH),x86)
         ifeq ($(CONFIG_COMPAT),y)
+                restorer-obj-y	+= ./$(ARCH_DIR)/call32.o
                 restorer-obj-y	+= ./$(ARCH_DIR)/restorer_unmap.o
                 restorer-obj-y	+= ./$(ARCH_DIR)/sigaction_compat_pie.o
         endif
@@ -36,7 +37,7 @@ $(1)-obj-e	+= pie.lib.a
 $(1)-obj-e	+= $$(compel_plugins)
 
 # Dependency on compel linker script, to relink if it has changed
-$$(obj)/$(1).built-in.o: $$(LDS) $$(compel_plugins)
+$$(obj)/$(1).built-in.o: $$(LDS)
 
 $$(obj)/$(1)-blob.h: $$(obj)/$(1).built-in.o
 	$$(call msg-gen, $$@)

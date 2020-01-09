@@ -40,7 +40,6 @@
 #include "cgroup-props.h"
 #include "timerfd.h"
 #include "path.h"
-#include "fault-injection.h"
 
 #include "protobuf.h"
 #include "images/fdinfo.pb-c.h"
@@ -61,15 +60,15 @@
 #define SIGEV_THREAD_ID 4       /* deliver to thread */
 #endif
 
-#define BUF_SIZE	4096	/* Good enough value - can be changed */
-
 struct buffer {
-	char buf[BUF_SIZE];
+	char buf[PAGE_SIZE];
 	char end; /* '\0' */
 };
 
 static struct buffer __buf;
 static char *buf = __buf.buf;
+
+#define BUF_SIZE sizeof(__buf.buf)
 
 /*
  * This is how AIO ring buffers look like in proc
@@ -311,12 +310,8 @@ static int vma_get_mapfile_user(const char *fname, struct vma_area *vma,
 		vma->e->status |= VMA_ANON_SHARED;
 		vma->e->shmid = vfi->ino;
 
-		if (!strncmp(fname, "/SYSV", 5)) {
+		if (!strncmp(fname, "/SYSV", 5))
 			vma->e->status |= VMA_AREA_SYSVIPC;
-		} else {
-			if (fault_injected(FI_HUGE_ANON_SHMEM_ID))
-				vma->e->shmid += FI_HUGE_ANON_SHMEM_ID_BASE;
-		}
 
 		return 0;
 	}
@@ -603,9 +598,6 @@ static int handle_vma(pid_t pid, struct vma_area *vma_area,
 			if (!strncmp(file_path, "/SYSV", 5)) {
 				pr_info("path: %s\n", file_path);
 				vma_area->e->status |= VMA_AREA_SYSVIPC;
-			} else {
-				if (fault_injected(FI_HUGE_ANON_SHMEM_ID))
-					vma_area->e->shmid += FI_HUGE_ANON_SHMEM_ID_BASE;
 			}
 		} else {
 			if (vma_area->e->flags & MAP_PRIVATE)
@@ -1645,7 +1637,7 @@ static int parse_fdinfo_pid_s(int pid, int fd, int type, void *arg)
 	struct bfd f;
 	char *str;
 	bool entry_met = false;
-	int ret, exit_code = -1;
+	int ret, exit_code = -1;;
 
 	f.fd = open_proc(pid, "fdinfo/%d", fd);
 	if (f.fd < 0)
@@ -1715,7 +1707,6 @@ static int parse_fdinfo_pid_s(int pid, int fd, int type, void *arg)
 			}
 
 			fl->real_owner = fdinfo->owner;
-			fl->fl_holder = pid;
 			fl->owners_fd = fd;
 			list_add_tail(&fl->list, &file_lock_list);
 		}
@@ -1762,23 +1753,9 @@ static int parse_fdinfo_pid_s(int pid, int fd, int type, void *arg)
 
 			eventpoll_tfd_entry__init(e);
 
-			ret = sscanf(str, "tfd: %d events: %x data: %llx"
-				     " pos:%lli ino:%lx sdev:%x",
-					&e->tfd, &e->events, (long long *)&e->data,
-					(long long *)&e->pos, (long *)&e->inode,
-					&e->dev);
-			if (ret < 3 || ret > 6) {
-				eventpoll_tfd_entry__free_unpacked(e, NULL);
-				goto parse_err;
-			} else if (ret == 3) {
-				e->has_dev = false;
-				e->has_inode = false;
-				e->has_pos = false;
-			} else if (ret == 6) {
-				e->has_dev = true;
-				e->has_inode = true;
-				e->has_pos = true;
-			} else if (ret < 6) {
+			ret = sscanf(str, "tfd: %d events: %x data: %"PRIx64,
+					&e->tfd, &e->events, &e->data);
+			if (ret != 3) {
 				eventpoll_tfd_entry__free_unpacked(e, NULL);
 				goto parse_err;
 			}
@@ -1796,7 +1773,7 @@ static int parse_fdinfo_pid_s(int pid, int fd, int type, void *arg)
 
 			if (type != FD_TYPES__SIGNALFD)
 				goto parse_err;
-			ret = sscanf(str, "sigmask: %llx",
+			ret = sscanf(str, "sigmask: %Lx",
 					(unsigned long long *)&sfd->sigmask);
 			if (ret != 1)
 				goto parse_err;
@@ -2029,14 +2006,8 @@ static int parse_file_lock_buf(char *buf, struct file_lock *fl,
 		fl->fl_kind = FL_FLOCK;
 	else if (!strcmp(fl_flag, "OFDLCK"))
 		fl->fl_kind = FL_OFD;
-	else if (!strcmp(fl_flag, "LEASE"))
-		fl->fl_kind = FL_LEASE;
 	else
 		fl->fl_kind = FL_UNKNOWN;
-
-	if (fl->fl_kind == FL_LEASE && !strcmp(fl_type, "BREAKING")) {
-		fl->fl_ltype |= LEASE_BREAKING;
-	}
 
 	if (!strcmp(fl_type, "MSNFS")) {
 		fl->fl_ltype |= LOCK_MAND;
@@ -2642,29 +2613,4 @@ err:
 	closedir(dir);
 	xfree(ch);
 	return -1;
-}
-
-#define CSEC_PER_SEC 100
-
-int parse_uptime(uint64_t *upt)
-{
-	unsigned long sec, csec;
-	FILE *f;
-
-	f = fopen("/proc/uptime", "r");
-	if (!f) {
-		pr_perror("Failed to fopen /proc/uptime");
-		return -1;
-	}
-
-	if (fscanf(f, "%lu.%2lu", &sec, &csec) != 2) {
-		pr_perror("Failed to parse /proc/uptime");
-		fclose(f);
-		return -1;
-	}
-
-	*upt = sec * USEC_PER_SEC + csec * (USEC_PER_SEC / CSEC_PER_SEC);
-
-	fclose(f);
-	return 0;
 }

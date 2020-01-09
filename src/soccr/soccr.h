@@ -5,7 +5,7 @@
 #include <stdint.h>		/* uint32_t */
 #include <sys/socket.h>		/* sockaddr */
 
-#include "common/config.h"
+#include "config.h"
 
 /* All packets with this mark have not to be blocked. */
 #define SOCCR_MARK 0xC114

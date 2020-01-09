@@ -1,3 +1,4 @@
+#include <sys/time.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
@@ -13,8 +14,10 @@
 #include <sys/stat.h>
 #include <sys/vfs.h>
 #include <sys/time.h>
+#include <sys/resource.h>
 #include <sys/wait.h>
 
+#include <sys/sendfile.h>
 
 #include <sched.h>
 #include <sys/resource.h>
@@ -79,24 +82,17 @@
 #include "seize.h"
 #include "fault-injection.h"
 #include "dump.h"
-#include "eventpoll.h"
 
 /*
  * Architectures can overwrite this function to restore register sets that
  * are not covered by ptrace_set/get_regs().
- *
- * with_threads = false: Only the register sets of the tasks are restored
- * with_threads = true : The register sets of the tasks with all their threads
- *			 are restored
  */
-int __attribute__((weak)) arch_set_thread_regs(struct pstree_item *item,
-					       bool with_threads)
+int __attribute__((weak)) arch_set_thread_regs(struct pstree_item *item)
 {
 	return 0;
 }
 
-#define PERSONALITY_LENGTH	9
-static char loc_buf[PERSONALITY_LENGTH];
+static char loc_buf[PAGE_SIZE];
 
 void free_mappings(struct vm_area_list *vma_area_list)
 {
@@ -713,12 +709,7 @@ int dump_thread_core(int pid, CoreEntry *core, const struct parasite_dump_thread
 			tc->has_pdeath_sig = true;
 			tc->pdeath_sig = ti->pdeath_sig;
 		}
-		tc->comm = xstrdup(ti->comm);
-		if (tc->comm == NULL)
-			return -1;
 	}
-	if (!ret)
-		ret = seccomp_dump_thread(pid, tc);
 
 	return ret;
 }
@@ -732,6 +723,7 @@ static int dump_task_core_all(struct parasite_ctl *ctl,
 	CoreEntry *core = item->core[0];
 	pid_t pid = item->pid->real;
 	int ret = -1;
+	struct proc_status_creds *creds;
 	struct parasite_dump_cgroup_args cgroup_args, *info = NULL;
 
 	BUILD_BUG_ON(sizeof(cgroup_args) < PARASITE_ARG_SIZE_MIN);
@@ -743,6 +735,18 @@ static int dump_task_core_all(struct parasite_ctl *ctl,
 	ret = get_task_personality(pid, &core->tc->personality);
 	if (ret < 0)
 		goto err;
+
+	creds = dmpi(item)->pi_creds;
+	if (creds->s.seccomp_mode != SECCOMP_MODE_DISABLED) {
+		pr_info("got seccomp mode %d for %d\n", creds->s.seccomp_mode, vpid(item));
+		core->tc->has_seccomp_mode = true;
+		core->tc->seccomp_mode = creds->s.seccomp_mode;
+
+		if (creds->s.seccomp_mode == SECCOMP_MODE_FILTER) {
+			core->tc->has_seccomp_filter = true;
+			core->tc->seccomp_filter = creds->last_filter;
+		}
+	}
 
 	strlcpy((char *)core->tc->comm, stat->comm, TASK_COMM_LEN);
 	core->tc->flags = stat->flags;
@@ -838,7 +842,6 @@ static int collect_file_locks(void)
 static int dump_task_thread(struct parasite_ctl *parasite_ctl,
 				const struct pstree_item *item, int id)
 {
-	struct parasite_thread_ctl *tctl = dmpi(item)->thread_ctls[id];
 	struct pid *tid = &item->threads[id];
 	CoreEntry *core = item->core[id];
 	pid_t pid = tid->real;
@@ -849,7 +852,7 @@ static int dump_task_thread(struct parasite_ctl *parasite_ctl,
 	pr_info("Dumping core for thread (pid: %d)\n", pid);
 	pr_info("----------------------------------------\n");
 
-	ret = parasite_dump_thread_seized(tctl, parasite_ctl, id, tid, core);
+	ret = parasite_dump_thread_seized(parasite_ctl, id, tid, core);
 	if (ret) {
 		pr_err("Can't dump thread for pid %d\n", pid);
 		goto err;
@@ -1090,7 +1093,7 @@ static int dump_zombies(void)
 		return -1;
 
 	/*
-	 * We dump zombies separately because for pid-ns case
+	 * We dump zombies separately becase for pid-ns case
 	 * we'd have to resolve their pids w/o parasite via
 	 * target ns' proc.
 	 */
@@ -1129,7 +1132,7 @@ err:
 	return ret;
 }
 
-static int pre_dump_one_task(struct pstree_item *item, InventoryEntry *parent_ie)
+static int pre_dump_one_task(struct pstree_item *item)
 {
 	pid_t pid = item->pid->real;
 	struct vm_area_list vmas;
@@ -1188,8 +1191,6 @@ static int pre_dump_one_task(struct pstree_item *item, InventoryEntry *parent_ie
 
 	mdc.pre_dump = true;
 	mdc.lazy = false;
-	mdc.stat = NULL;
-	mdc.parent_ie = parent_ie;
 
 	ret = parasite_dump_pages_seized(item, &vmas, &mdc, parasite_ctl);
 	if (ret)
@@ -1208,7 +1209,7 @@ err_cure:
 	goto err_free;
 }
 
-static int dump_one_task(struct pstree_item *item, InventoryEntry *parent_ie)
+static int dump_one_task(struct pstree_item *item)
 {
 	pid_t pid = item->pid->real;
 	struct vm_area_list vmas;
@@ -1280,7 +1281,7 @@ static int dump_one_task(struct pstree_item *item, InventoryEntry *parent_ie)
 
 	if (fault_injected(FI_DUMP_EARLY)) {
 		pr_info("fault: CRIU sudden detach\n");
-		kill(getpid(), SIGKILL);
+		BUG();
 	}
 
 	if (root_ns_mask & CLONE_NEWPID && root_item == item) {
@@ -1294,6 +1295,8 @@ static int dump_one_task(struct pstree_item *item, InventoryEntry *parent_ie)
 
 		if (install_service_fd(CR_PROC_FD_OFF, pfd) < 0)
 			goto err_cure_imgset;
+
+		close(pfd);
 	}
 
 	ret = parasite_fixup_vdso(parasite_ctl, pid, &vmas);
@@ -1344,17 +1347,10 @@ static int dump_one_task(struct pstree_item *item, InventoryEntry *parent_ie)
 			pr_err("Dump files (pid: %d) failed with %d\n", pid, ret);
 			goto err_cure;
 		}
-		ret = flush_eventpoll_dinfo_queue();
-		if (ret) {
-			pr_err("Dump eventpoll (pid: %d) failed with %d\n", pid, ret);
-			goto err_cure;
-		}
 	}
 
 	mdc.pre_dump = false;
 	mdc.lazy = opts.lazy_pages;
-	mdc.stat = &pps_buf;
-	mdc.parent_ie = parent_ie;
 
 	ret = parasite_dump_pages_seized(item, &vmas, &mdc, parasite_ctl);
 	if (ret)
@@ -1468,32 +1464,16 @@ static int setup_alarm_handler()
 	return 0;
 }
 
-static int cr_pre_dump_finish(int status)
+static int cr_pre_dump_finish(int ret)
 {
-	InventoryEntry he = INVENTORY_ENTRY__INIT;
 	struct pstree_item *item;
-	int ret;
-
-	/*
-	 * Restore registers for tasks only. The threads have not been
-	 * infected. Therefore, the thread register sets have not been changed.
-	 */
-	ret = arch_set_thread_regs(root_item, false);
-	if (ret)
-		goto err;
-
-	ret = inventory_save_uptime(&he);
-	if (ret)
-		goto err;
 
 	pstree_switch_state(root_item, TASK_ALIVE);
 
 	timing_stop(TIME_FROZEN);
 
-	if (status < 0) {
-		ret = status;
+	if (ret < 0)
 		goto err;
-	}
 
 	pr_info("Pre-dumping tasks' memory\n");
 	for_each_pstree_item(item) {
@@ -1525,7 +1505,6 @@ static int cr_pre_dump_finish(int status)
 	}
 
 	free_pstree(root_item);
-	seccomp_free_entries();
 
 	if (irmap_predump_run()) {
 		ret = -1;
@@ -1539,9 +1518,6 @@ err:
 	if (bfd_flush_images())
 		ret = -1;
 
-	if (write_img_inventory(&he))
-		ret = -1;
-
 	if (ret)
 		pr_err("Pre-dumping FAILED.\n");
 	else {
@@ -1553,14 +1529,8 @@ err:
 
 int cr_pre_dump_tasks(pid_t pid)
 {
-	InventoryEntry *parent_ie = NULL;
 	struct pstree_item *item;
 	int ret = -1;
-
-	/*
-	 * We might need a lot of pipes to fetch huge number of pages to dump.
-	 */
-	rlimit_unlimit_nofile();
 
 	root_item = alloc_pstree_item();
 	if (!root_item)
@@ -1610,17 +1580,9 @@ int cr_pre_dump_tasks(pid_t pid)
 	if (collect_namespaces(false) < 0)
 		goto err;
 
-	/* Errors handled later in detect_pid_reuse */
-	parent_ie = get_parent_inventory();
-
 	for_each_pstree_item(item)
-		if (pre_dump_one_task(item, parent_ie))
+		if (pre_dump_one_task(item))
 			goto err;
-
-	if (parent_ie) {
-		inventory_entry__free_unpacked(parent_ie, NULL);
-		parent_ie = NULL;
-	}
 
 	ret = cr_dump_shmem();
 	if (ret)
@@ -1631,9 +1593,6 @@ int cr_pre_dump_tasks(pid_t pid)
 
 	ret = 0;
 err:
-	if (parent_ie)
-		inventory_entry__free_unpacked(parent_ie, NULL);
-
 	return cr_pre_dump_finish(ret);
 }
 
@@ -1646,10 +1605,8 @@ static int cr_lazy_mem_dump(void)
 	ret = cr_page_server(false, true, -1);
 
 	for_each_pstree_item(item) {
-		if (item->pid->state != TASK_DEAD) {
-			destroy_page_pipe(dmpi(item)->mem_pp);
-			compel_cure_local(dmpi(item)->parasite_ctl);
-		}
+		destroy_page_pipe(dmpi(item)->mem_pp);
+		compel_cure_local(dmpi(item)->parasite_ctl);
 	}
 
 	if (ret)
@@ -1701,18 +1658,18 @@ static int cr_dump_finish(int ret)
 	 *  - error happened during checkpoint: just clean up
 	 *    everything and continue execution of the dumpee;
 	 *
-	 *  - dump succeeded but post-dump script returned
+	 *  - dump successed but post-dump script returned
 	 *    some ret code: same as in previous scenario --
 	 *    just clean up everything and continue execution,
 	 *    we will return script ret code back to criu caller
 	 *    and it's up to a caller what to do with running instance
 	 *    of the dumpee -- either kill it, or continue running;
 	 *
-	 *  - dump succeeded but -R option passed, pointing that
+	 *  - dump successed but -R option passed, pointing that
 	 *    we're asked to continue execution of the dumpee. It's
 	 *    assumed that a user will use post-dump script to keep
 	 *    consistency of the FS and other resources, we simply
-	 *    start rollback procedure and cleanup everything.
+	 *    start rollback procedure and cleanup everyhting.
 	 */
 	if (ret || post_dump_ret || opts.final_state == TASK_ALIVE) {
 		network_unlock();
@@ -1723,14 +1680,12 @@ static int cr_dump_finish(int ret)
 	if (!ret && opts.lazy_pages)
 		ret = cr_lazy_mem_dump();
 
-	if (arch_set_thread_regs(root_item, true) < 0)
-		return -1;
+	arch_set_thread_regs(root_item);
 	pstree_switch_state(root_item,
 			    (ret || post_dump_ret) ?
 			    TASK_ALIVE : opts.final_state);
 	timing_stop(TIME_FROZEN);
 	free_pstree(root_item);
-	seccomp_free_entries();
 	free_file_locks();
 	free_link_remaps();
 	free_aufs_branches();
@@ -1750,7 +1705,6 @@ static int cr_dump_finish(int ret)
 int cr_dump_tasks(pid_t pid)
 {
 	InventoryEntry he = INVENTORY_ENTRY__INIT;
-	InventoryEntry *parent_ie = NULL;
 	struct pstree_item *item;
 	int pre_dump_ret = 0;
 	int ret = -1;
@@ -1758,13 +1712,6 @@ int cr_dump_tasks(pid_t pid)
 	pr_info("========================================\n");
 	pr_info("Dumping processes (pid: %d)\n", pid);
 	pr_info("========================================\n");
-
-	/*
-	 *  We will fetch all file descriptors for each task, their number can
-	 *  be bigger than a default file limit, so we need to raise it to the
-	 *  maximum.
-	 */
-	rlimit_unlimit_nofile();
 
 	root_item = alloc_pstree_item();
 	if (!root_item)
@@ -1806,7 +1753,7 @@ int cr_dump_tasks(pid_t pid)
 	if (prepare_inventory(&he))
 		goto err;
 
-	if (opts.cpu_cap & CPU_CAP_IMAGE) {
+	if (opts.cpu_cap & (CPU_CAP_CPU | CPU_CAP_INS)) {
 		if (cpu_dump_cpuinfo())
 			goto err;
 	}
@@ -1842,20 +1789,12 @@ int cr_dump_tasks(pid_t pid)
 	if (!glob_imgset)
 		goto err;
 
-	if (seccomp_collect_dump_filters() < 0)
+	if (collect_seccomp_filters() < 0)
 		goto err;
 
-	/* Errors handled later in detect_pid_reuse */
-	parent_ie = get_parent_inventory();
-
 	for_each_pstree_item(item) {
-		if (dump_one_task(item, parent_ie))
+		if (dump_one_task(item))
 			goto err;
-	}
-
-	if (parent_ie) {
-		inventory_entry__free_unpacked(parent_ie, NULL);
-		parent_ie = NULL;
 	}
 
 	/*
@@ -1883,23 +1822,15 @@ int cr_dump_tasks(pid_t pid)
 	if (dump_pstree(root_item))
 		goto err;
 
-	/*
-	 * TODO: cr_dump_shmem has to be called before dump_namespaces(),
-	 * because page_ids is a global variable and it is used to dump
-	 * ipc shared memory, but an ipc namespace is dumped in a child
-	 * process.
-	 */
-	ret = cr_dump_shmem();
+	if (root_ns_mask)
+		if (dump_namespaces(root_item, root_ns_mask) < 0)
+			goto err;
+
+	ret = dump_cgroups();
 	if (ret)
 		goto err;
 
-	if (root_ns_mask) {
-		ret = dump_namespaces(root_item, root_ns_mask);
-		if (ret)
-			goto err;
-	}
-
-	ret = dump_cgroups();
+	ret = cr_dump_shmem();
 	if (ret)
 		goto err;
 
@@ -1911,16 +1842,9 @@ int cr_dump_tasks(pid_t pid)
 	if (ret)
 		goto err;
 
-	ret = inventory_save_uptime(&he);
-	if (ret)
-		goto err;
-
 	ret = write_img_inventory(&he);
 	if (ret)
 		goto err;
 err:
-	if (parent_ie)
-		inventory_entry__free_unpacked(parent_ie, NULL);
-
 	return cr_dump_finish(ret);
 }

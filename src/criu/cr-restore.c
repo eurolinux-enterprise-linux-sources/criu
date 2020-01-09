@@ -4,13 +4,16 @@
 #include <limits.h>
 #include <unistd.h>
 #include <errno.h>
+#include <dirent.h>
 #include <string.h>
 
 #include <fcntl.h>
+#include <grp.h>
 
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
+#include <sys/vfs.h>
 #include <sys/wait.h>
 #include <sys/file.h>
 #include <sys/shm.h>
@@ -18,6 +21,7 @@
 #include <sys/prctl.h>
 #include <sched.h>
 
+#include <sys/sendfile.h>
 
 #include "types.h"
 #include <compel/ptrace.h>
@@ -35,6 +39,7 @@
 #include "sk-packet.h"
 #include "common/lock.h"
 #include "files.h"
+#include "files-reg.h"
 #include "pipes.h"
 #include "fifo.h"
 #include "sk-inet.h"
@@ -63,6 +68,7 @@
 #include "plugin.h"
 #include "cgroup.h"
 #include "timerfd.h"
+#include "file-lock.h"
 #include "action-scripts.h"
 #include "shmem.h"
 #include <compel/compel.h>
@@ -115,15 +121,6 @@ static int prepare_rlimits(int pid, struct task_restore_args *, CoreEntry *core)
 static int prepare_posix_timers(int pid, struct task_restore_args *ta, CoreEntry *core);
 static int prepare_signals(int pid, struct task_restore_args *, CoreEntry *core);
 
-/*
- * Architectures can overwrite this function to restore registers that are not
- * present in the sigreturn signal frame.
- */
-int __attribute__((weak)) arch_set_thread_regs_nosigrt(struct pid *pid)
-{
-	return 0;
-}
-
 static inline int stage_participants(int next_stage)
 {
 	switch (next_stage) {
@@ -137,6 +134,7 @@ static inline int stage_participants(int next_stage)
 	case CR_STATE_RESTORE:
 		return task_entries->nr_threads + task_entries->nr_helpers;
 	case CR_STATE_RESTORE_SIGCHLD:
+		return task_entries->nr_threads;
 	case CR_STATE_RESTORE_CREDS:
 		return task_entries->nr_threads;
 	}
@@ -153,7 +151,7 @@ static inline int stage_current_participants(int next_stage)
 	case CR_STATE_RESTORE:
 		/*
 		 * Each thread has to be reported about this stage,
-		 * so if we want to wait all other tasks, we have to
+		 * so if we want to wait all other tast, we have to
 		 * exclude all threads of the current process.
 		 * It is supposed that we will wait other tasks,
 		 * before creating threads of the current task.
@@ -288,7 +286,7 @@ static struct collect_image_info *cinfos_files[] = {
 	&ext_file_cinfo,
 };
 
-/* These images are required to restore namespaces */
+/* These images are requered to restore namespaces */
 static struct collect_image_info *before_ns_cinfos[] = {
 	&tty_info_cinfo, /* Restore devpts content */
 	&tty_cdata,
@@ -323,7 +321,7 @@ static int root_prepare_shared(void)
 	if (prepare_remaps())
 		return -1;
 
-	if (seccomp_read_image())
+	if (prepare_seccomp_filters())
 		return -1;
 
 	if (collect_images(cinfos, ARRAY_SIZE(cinfos)))
@@ -359,23 +357,7 @@ static int root_prepare_shared(void)
 	if (ret)
 		goto err;
 
-	/*
-	 * This should be called with all packets collected AND all
-	 * fdescs and fles prepared BUT post-prep-s not run.
-	 */
-	ret = prepare_scms();
-	if (ret)
-		goto err;
-
 	ret = run_post_prepare();
-	if (ret)
-		goto err;
-
-	ret = unix_prepare_root_shared();
-	if (ret)
-		goto err;
-
-	ret = add_fake_unix_queuers();
 	if (ret)
 		goto err;
 
@@ -384,35 +366,9 @@ err:
 	return ret;
 }
 
-/* This actually populates and occupies ROOT_FD_OFF sfd */
-static int populate_root_fd_off(void)
-{
-	struct ns_id *mntns = NULL;
-	int ret;
-
-        if (root_ns_mask & CLONE_NEWNS) {
-                mntns = lookup_ns_by_id(root_item->ids->mnt_ns_id, &mnt_ns_desc);
-                BUG_ON(!mntns);
-        }
-
-	ret = mntns_get_root_fd(mntns);
-	if (ret < 0)
-		pr_err("Can't get root fd\n");
-	return ret >= 0 ? 0 : -1;
-}
-
-static int populate_pid_proc(void)
-{
-	if (open_pid_proc(vpid(current)) < 0) {
-		pr_err("Can't open PROC_SELF\n");
-		return -1;
-	}
-	return 0;
-}
-
 static rt_sigaction_t sigchld_act;
 /*
- * If parent's sigaction has blocked SIGKILL (which is non-sense),
+ * If parent's sigaction has blocked SIGKILL (which is non-sence),
  * this parent action is non-valid and shouldn't be inherited.
  * Used to mark parent_act* no more valid.
  */
@@ -763,23 +719,6 @@ static int open_cores(int pid, CoreEntry *leader_core)
 
 	current->core = cores;
 
-	/*
-	 * Walk over all threads and if one them is having
-	 * active seccomp mode we will suspend filtering
-	 * on the whole group until restore complete.
-	 *
-	 * Otherwise any criu code which might use same syscall
-	 * if present inside a filter chain would take filter
-	 * action and might break restore procedure.
-	 */
-	for (i = 0; i < current->nr_threads; i++) {
-		ThreadCoreEntry *thread_core = cores[i]->thread_core;
-		if (thread_core->seccomp_mode != SECCOMP_MODE_DISABLED) {
-			rsti(current)->has_seccomp = true;
-			break;
-		}
-	}
-
 	return 0;
 err:
 	xfree(cores);
@@ -838,7 +777,7 @@ static int restore_one_alive_task(int pid, CoreEntry *core)
 
 	args_len = round_up(sizeof(*ta) + sizeof(struct thread_restore_args) *
 			current->nr_threads, page_size());
-	ta = mmap(NULL, args_len, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, 0, 0);
+	ta = mmap(NULL, args_len, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, 0, 0);
 	if (!ta)
 		return -1;
 
@@ -877,6 +816,9 @@ static int restore_one_alive_task(int pid, CoreEntry *core)
 	if (collect_zombie_pids(ta) < 0)
 		return -1;
 
+	if (inherit_fd_fini() < 0)
+		return -1;
+
 	if (prepare_proc_misc(pid, core->tc))
 		return -1;
 
@@ -894,7 +836,7 @@ static int restore_one_alive_task(int pid, CoreEntry *core)
 	if (prepare_timerfds(ta))
 		return -1;
 
-	if (seccomp_prepare_threads(current, ta) < 0)
+	if (seccomp_filters_get_rst_pos(core, ta) < 0)
 		return -1;
 
 	if (prepare_itimers(pid, ta, core) < 0)
@@ -904,13 +846,6 @@ static int restore_one_alive_task(int pid, CoreEntry *core)
 		return -1;
 
 	if (prepare_vmas(current, ta))
-		return -1;
-
-	/*
-	 * Sockets have to be restored in their network namespaces,
-	 * so a task namespace has to be restored after sockets.
-	 */
-	if (restore_task_net_ns(current))
 		return -1;
 
 	if (setup_uffd(pid, ta))
@@ -998,15 +933,13 @@ static int wait_on_helpers_zombies(void)
 	return 0;
 }
 
-static int wait_exiting_children(void);
-
 static int restore_one_zombie(CoreEntry *core)
 {
 	int exit_code = core->tc->exit_code;
 
 	pr_info("Restoring zombie with %d code\n", exit_code);
 
-	if (prepare_fds(current))
+	if (inherit_fd_fini() < 0)
 		return -1;
 
 	if (lazy_pages_setup_zombie(vpid(current)))
@@ -1015,7 +948,7 @@ static int restore_one_zombie(CoreEntry *core)
 	prctl(PR_SET_NAME, (long)(void *)core->tc->comm, 0, 0, 0);
 
 	if (task_entries != NULL) {
-		wait_exiting_children();
+		restore_finish_stage(task_entries, CR_STATE_RESTORE);
 		zombie_prepare_signals();
 	}
 
@@ -1045,27 +978,6 @@ static int restore_one_zombie(CoreEntry *core)
 	return -1;
 }
 
-static int setup_newborn_fds(struct pstree_item *me)
-{
-	if (clone_service_fd(me))
-		return -1;
-
-	if (!me->parent ||
-	    (rsti(me->parent)->fdt && !(rsti(me)->clone_flags & CLONE_FILES))) {
-		/*
-		 * When our parent has shared fd table, some of the table owners
-		 * may be already created. Files, they open, will be inherited
-		 * by current process, and here we close them. Also, service fds
-		 * of parent are closed here. And root_item closes the files,
-		 * that were inherited from criu process.
-		 */
-		if (close_old_fds())
-			return -1;
-	}
-
-	return 0;
-}
-
 static int check_core(CoreEntry *core, struct pstree_item *me)
 {
 	int ret = -1;
@@ -1089,21 +1001,6 @@ static int check_core(CoreEntry *core, struct pstree_item *me)
 		if (!CORE_THREAD_ARCH_INFO(core)) {
 			pr_err("Core info data missed for non-zombie\n");
 			goto out;
-		}
-
-		/*
-		 * Seccomp are moved to per-thread origin,
-		 * so for old images we need to move per-task
-		 * data into proper place.
-		 */
-		if (core->tc->has_old_seccomp_mode) {
-			core->thread_core->has_seccomp_mode = core->tc->has_old_seccomp_mode;
-			core->thread_core->seccomp_mode = core->tc->old_seccomp_mode;
-		}
-		if (core->tc->has_old_seccomp_filter) {
-			core->thread_core->has_seccomp_filter = core->tc->has_old_seccomp_filter;
-			core->thread_core->seccomp_filter = core->tc->old_seccomp_filter;
-			rsti(me)->has_old_seccomp_filter = true;
 		}
 	}
 
@@ -1131,7 +1028,15 @@ static bool child_death_expected(void)
 	return false;
 }
 
-static int wait_exiting_children(void)
+/*
+ * Restore a helper process - artificially created by criu
+ * to restore attributes of process tree.
+ * - sessions for each leaders are dead
+ * - process groups with dead leaders
+ * - dead tasks for which /proc/<pid>/... is opened by restoring task
+ * - whatnot
+ */
+static int restore_one_helper(void)
 {
 	siginfo_t info;
 
@@ -1177,33 +1082,6 @@ static int wait_exiting_children(void)
 	return 0;
 }
 
-/*
- * Restore a helper process - artificially created by criu
- * to restore attributes of process tree.
- * - sessions for each leaders are dead
- * - process groups with dead leaders
- * - dead tasks for which /proc/<pid>/... is opened by restoring task
- * - whatnot
- */
-static int restore_one_helper(void)
-{
-	int i;
-
-	if (prepare_fds(current))
-		return -1;
-
-	if (wait_exiting_children())
-		return -1;
-
-	sfds_protected = false;
-	close_image_dir();
-	close_proc();
-	for (i = SERVICE_FD_MIN + 1; i < SERVICE_FD_MAX; i++)
-		close_service_fd(i);
-
-	return 0;
-}
-
 static int restore_one_task(int pid, CoreEntry *core)
 {
 	int ret;
@@ -1230,6 +1108,7 @@ static int restore_one_task(int pid, CoreEntry *core)
 struct cr_clone_arg {
 	struct pstree_item *item;
 	unsigned long clone_flags;
+	int fd;
 
 	CoreEntry *core;
 };
@@ -1270,15 +1149,6 @@ static void maybe_clone_parent(struct pstree_item *item,
 	}
 }
 
-static bool needs_prep_creds(struct pstree_item *item)
-{
-	/*
-	 * Before the 4.13 kernel, it was impossible to set
-	 * an exe_file if uid or gid isn't zero.
-	 */
-	return (!item->parent && ((root_ns_mask & CLONE_NEWUSER) || getuid()));
-}
-
 static inline int fork_with_pid(struct pstree_item *item)
 {
 	struct cr_clone_arg ca;
@@ -1295,19 +1165,12 @@ static inline int fork_with_pid(struct pstree_item *item)
 		item->pid->state = ca.core->tc->task_state;
 		rsti(item)->cg_set = ca.core->tc->cg_set;
 
+		rsti(item)->has_seccomp = ca.core->tc->seccomp_mode != SECCOMP_MODE_DISABLED;
+
 		if (item->pid->state != TASK_DEAD && !task_alive(item)) {
 			pr_err("Unknown task state %d\n", item->pid->state);
 			return -1;
 		}
-
-		/*
-		 * By default we assume that seccomp is not
-		 * used at all (especially on dead task). Later
-		 * we will walk over all threads and check in
-		 * details if filter is present setting up
-		 * this flag as appropriate.
-		 */
-		rsti(item)->has_seccomp = false;
 
 		if (unlikely(item == root_item))
 			maybe_clone_parent(item, &ca);
@@ -1332,27 +1195,29 @@ static inline int fork_with_pid(struct pstree_item *item)
 	if (!(ca.clone_flags & CLONE_NEWPID)) {
 		char buf[32];
 		int len;
-		int fd;
 
-		fd = open_proc_rw(PROC_GEN, LAST_PID_PATH);
-		if (fd < 0)
+		ca.fd = open_proc_rw(PROC_GEN, LAST_PID_PATH);
+		if (ca.fd < 0)
 			goto err;
 
-		lock_last_pid();
+		if (flock(ca.fd, LOCK_EX)) {
+			close(ca.fd);
+			pr_perror("%d: Can't lock %s", pid, LAST_PID_PATH);
+			goto err;
+		}
 
 		len = snprintf(buf, sizeof(buf), "%d", pid - 1);
-		if (write(fd, buf, len) != len) {
+		if (write(ca.fd, buf, len) != len) {
 			pr_perror("%d: Write %s to %s", pid, buf, LAST_PID_PATH);
-			close(fd);
 			goto err_unlock;
 		}
-		close(fd);
 	} else {
+		ca.fd = -1;
 		BUG_ON(pid != INIT_PID);
 	}
 
 	/*
-	 * Some kernel modules, such as network packet generator
+	 * Some kernel modules, such as netwrok packet generator
 	 * run kernel thread upon net-namespace creattion taking
 	 * the @pid we've been requeting via LAST_PID_PATH interface
 	 * so that we can't restore a take with pid needed.
@@ -1363,7 +1228,6 @@ static inline int fork_with_pid(struct pstree_item *item)
 	 * The cgroup namespace is also unshared explicitly in the
 	 * move_in_cgroup(), so drop this flag here as well.
 	 */
-	close_pid_proc();
 	ret = clone_noasan(restore_task_with_children,
 			(ca.clone_flags & ~(CLONE_NEWNET | CLONE_NEWCGROUP)) | SIGCHLD, &ca);
 	if (ret < 0) {
@@ -1379,8 +1243,12 @@ static inline int fork_with_pid(struct pstree_item *item)
 	}
 
 err_unlock:
-	if (!(ca.clone_flags & CLONE_NEWPID))
-		unlock_last_pid();
+	if (ca.fd >= 0) {
+		if (flock(ca.fd, LOCK_UN))
+			pr_perror("%d: Can't unlock %s", pid, LAST_PID_PATH);
+
+		close(ca.fd);
+	}
 err:
 	if (ca.core)
 		core_entry__free_unpacked(ca.core, NULL);
@@ -1399,8 +1267,7 @@ static void sigchld_handler(int signal, siginfo_t *siginfo, void *data)
 		if (!current && WIFSTOPPED(status) &&
 					WSTOPSIG(status) == SIGCHLD) {
 			/* The root task is ptraced. Allow it to handle SIGCHLD */
-			if (ptrace(PTRACE_CONT, pid, 0, SIGCHLD))
-				pr_perror("Unable to resume %d", pid);
+			ptrace(PTRACE_CONT, siginfo->si_pid, 0, SIGCHLD);
 			return;
 		}
 
@@ -1487,7 +1354,7 @@ static void restore_sid(void)
 			exit(1);
 		}
 	} else {
-		sid = getsid(0);
+		sid = getsid(getpid());
 		if (sid != current->sid) {
 			/* Skip the root task if it's not init */
 			if (current == root_item && vpid(root_item) != INIT_PID)
@@ -1592,7 +1459,7 @@ static int create_children_and_session(void)
 		if (!restore_before_setsid(child))
 			continue;
 
-		BUG_ON(child->born_sid != -1 && getsid(0) != child->born_sid);
+		BUG_ON(child->born_sid != -1 && getsid(getpid()) != child->born_sid);
 
 		ret = fork_with_pid(child);
 		if (ret < 0)
@@ -1644,6 +1511,15 @@ static int restore_task_with_children(void *_arg)
 				current->pid->real, vpid(current));
 	}
 
+	if ( !(ca->clone_flags & CLONE_FILES))
+		close_safe(&ca->fd);
+
+	if (current->pid->state != TASK_HELPER) {
+		ret = clone_service_fd(rsti(current)->service_fd_id);
+		if (ret)
+			goto err;
+	}
+
 	pid = getpid();
 	if (vpid(current) != pid) {
 		pr_err("Pid %d do not match expected %d\n", pid, vpid(current));
@@ -1651,32 +1527,27 @@ static int restore_task_with_children(void *_arg)
 		goto err;
 	}
 
-	if (log_init_by_pid(vpid(current)))
-		return -1;
+	ret = log_init_by_pid();
+	if (ret < 0)
+		goto err;
 
-	if (current->parent == NULL) {
-		/*
-		 * The root task has to be in its namespaces before executing
-		 * ACT_SETUP_NS scripts, so the root netns has to be created here
-		 */
-		if (root_ns_mask & CLONE_NEWNET) {
-			struct ns_id *ns = net_get_root_ns();
-			if (ns->ext_key)
-				ret = net_set_ext(ns);
-			else
-				ret = unshare(CLONE_NEWNET);
-			if (ret) {
-				pr_perror("Can't unshare net-namespace");
-				goto err;
-			}
+	if (ca->clone_flags & CLONE_NEWNET) {
+		ret = unshare(CLONE_NEWNET);
+		if (ret) {
+			pr_perror("Can't unshare net-namespace");
+			goto err;
 		}
+	}
 
-		/* Wait prepare_userns */
-		if (restore_finish_ns_stage(CR_STATE_ROOT_TASK, CR_STATE_PREPARE_NAMESPACES) < 0)
+	if (!(ca->clone_flags & CLONE_FILES)) {
+		ret = close_old_fds();
+		if (ret)
 			goto err;
 	}
 
-	if (needs_prep_creds(current) && (prepare_userns_creds()))
+	/* Wait prepare_userns */
+	if (current->parent == NULL &&
+			restore_finish_ns_stage(CR_STATE_ROOT_TASK, CR_STATE_PREPARE_NAMESPACES) < 0)
 		goto err;
 
 	/*
@@ -1690,6 +1561,9 @@ static int restore_task_with_children(void *_arg)
 
 	/* Restore root task */
 	if (current->parent == NULL) {
+		if (fdstore_init())
+			goto err;
+
 		if (join_namespaces()) {
 			pr_perror("Join namespaces failed");
 			goto err;
@@ -1719,13 +1593,7 @@ static int restore_task_with_children(void *_arg)
 
 		if (root_prepare_shared())
 			goto err;
-
-		if (populate_root_fd_off())
-			goto err;
 	}
-
-	if (setup_newborn_fds(current))
-		goto err;
 
 	if (restore_task_mnt_ns(current))
 		goto err;
@@ -1738,11 +1606,8 @@ static int restore_task_with_children(void *_arg)
 
 	if (fault_injected(FI_RESTORE_ROOT_ONLY)) {
 		pr_info("fault: Restore root task failure!\n");
-		kill(getpid(), SIGKILL);
+		BUG();
 	}
-
-	if (open_transport_socket())
-		goto err;
 
 	timing_start(TIME_FORK);
 
@@ -1751,15 +1616,13 @@ static int restore_task_with_children(void *_arg)
 
 	timing_stop(TIME_FORK);
 
-	if (populate_pid_proc())
-		goto err;
-
-	sfds_protected = true;
-
 	if (unmap_guard_pages(current))
 		goto err;
 
 	restore_pgid();
+
+	if (open_transport_socket())
+		return -1;
 
 	if (current->parent == NULL) {
 		/*
@@ -1949,8 +1812,6 @@ static void finalize_restore_detach(int status)
 				break;
 			}
 
-			if (arch_set_thread_regs_nosigrt(&item->threads[i]))
-				pr_perror("Restoring regs for %d failed", pid);
 			if (ptrace(PTRACE_DETACH, pid, NULL, 0))
 				pr_perror("Unable to execute %d", pid);
 		}
@@ -2038,6 +1899,7 @@ static int restore_root_task(struct pstree_item *init)
 	}
 
 	ret = install_service_fd(CR_PROC_FD_OFF, fd);
+	close(fd);
 	if (ret < 0)
 		return -1;
 
@@ -2127,7 +1989,7 @@ static int restore_root_task(struct pstree_item *init)
 			goto out_kill;
 	}
 
-	if (root_ns_mask & opts.empty_ns & CLONE_NEWNET) {
+	if (opts.empty_ns & CLONE_NEWNET) {
 		/*
 		 * Local TCP connections were locked by network_lock_internal()
 		 * on dump and normally should have been C/R-ed by respectively
@@ -2223,9 +2085,6 @@ skip_ns_bouncing:
 
 	ret = catch_tasks(root_seized, &flag);
 
-	if (lazy_pages_finish_restore())
-		goto out_kill;
-
 	pr_info("Restore finished successfully. Resuming tasks.\n");
 	__restore_switch_stage(CR_STATE_COMPLETE);
 
@@ -2265,7 +2124,7 @@ skip_ns_bouncing:
 out_kill:
 	/*
 	 * The processes can be killed only when all of them have been created,
-	 * otherwise an external processes can be killed.
+	 * otherwise an external proccesses can be killed.
 	 */
 	if (root_ns_mask & CLONE_NEWPID) {
 		int status;
@@ -2275,14 +2134,14 @@ out_kill:
 			kill(root_item->pid->real, SIGKILL);
 
 		if (waitpid(root_item->pid->real, &status, 0) < 0)
-			pr_warn("Unable to wait %d: %s\n",
+			pr_warn("Unable to wait %d: %s",
 				root_item->pid->real, strerror(errno));
 	} else {
 		struct pstree_item *pi;
 
 		for_each_pstree_item(pi)
-			if (pi->pid->real > 0)
-				kill(pi->pid->real, SIGKILL);
+			if (vpid(pi) > 0)
+				kill(vpid(pi), SIGKILL);
 	}
 
 out:
@@ -2308,7 +2167,6 @@ int prepare_task_entries(void)
 	task_entries->nr_helpers = 0;
 	futex_set(&task_entries->start, CR_STATE_FAIL);
 	mutex_init(&task_entries->userns_sync_lock);
-	mutex_init(&task_entries->last_pid_mutex);
 
 	return 0;
 }
@@ -2330,9 +2188,6 @@ int cr_restore_tasks(void)
 {
 	int ret = -1;
 
-	if (init_service_fd())
-		return 1;
-
 	if (cr_plugin_init(CR_PLUGIN_STAGE__RESTORE))
 		return -1;
 
@@ -2353,7 +2208,7 @@ int cr_restore_tasks(void)
 	if (vdso_init_restore())
 		goto err;
 
-	if (opts.cpu_cap & CPU_CAP_IMAGE) {
+	if (opts.cpu_cap & (CPU_CAP_INS | CPU_CAP_CPU)) {
 		if (cpu_validate_cpuinfo())
 			goto err;
 	}
@@ -2362,12 +2217,6 @@ int cr_restore_tasks(void)
 		goto err;
 
 	if (prepare_pstree() < 0)
-		goto err;
-
-	if (fdstore_init())
-		goto err;
-
-	if (inherit_fd_move_to_fdstore())
 		goto err;
 
 	if (crtools_prepare_shared() < 0)
@@ -2554,10 +2403,8 @@ static inline int decode_posix_timer(PosixTimerEntry *pte,
 	}
 
 	if (pte->vsec == 0 && pte->vnsec == 0) {
-		/*
-		 * Remaining time was too short. Set it to
-		 * interval to make the timer armed and work.
-		 */
+		// Remaining time was too short. Set it to
+		// interval to make the timer armed and work.
 		pt->val.it_value.tv_sec = pte->isec;
 		pt->val.it_value.tv_nsec = pte->insec;
 	} else {
@@ -2727,7 +2574,7 @@ static int prepare_restorer_blob(void)
 	restorer_len = pie_size(restorer);
 	restorer = mmap(NULL, restorer_len,
 			PROT_READ | PROT_WRITE | PROT_EXEC,
-			MAP_PRIVATE | MAP_ANONYMOUS, 0, 0);
+			MAP_PRIVATE | MAP_ANON, 0, 0);
 	if (restorer == MAP_FAILED) {
 		pr_perror("Can't map restorer code");
 		return -1;
@@ -3217,15 +3064,6 @@ static int sigreturn_restore(pid_t pid, struct task_restore_args *task_args, uns
 	if (rst_prep_creds(pid, core, &creds_pos))
 		goto err_nv;
 
-	if (current->parent == NULL) {
-		/* Wait when all tasks restored all files */
-		if (restore_wait_other_tasks())
-			goto err_nv;
-		if (root_ns_mask & CLONE_NEWNS &&
-		    remount_readonly_mounts())
-			goto err_nv;
-	}
-
 	/*
 	 * We're about to search for free VM area and inject the restorer blob
 	 * into it. No irrelevant mmaps/mremaps beyond this point, otherwise
@@ -3296,7 +3134,7 @@ static int sigreturn_restore(pid_t pid, struct task_restore_args *task_args, uns
 
 	/* VMA we need for stacks and sigframes for threads */
 	if (mmap(mem, memzone_size, PROT_READ | PROT_WRITE,
-			MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, 0, 0) != mem) {
+			MAP_PRIVATE | MAP_ANON | MAP_FIXED, 0, 0) != mem) {
 		pr_err("Can't mmap section for restore code\n");
 		goto err;
 	}
@@ -3359,9 +3197,6 @@ static int sigreturn_restore(pid_t pid, struct task_restore_args *task_args, uns
 	task_args->premmapped_len = rsti(current)->premmapped_len;
 
 	task_args->task_size = kdat.task_size;
-#ifdef ARCH_HAS_LONG_PAGES
-	task_args->page_size = PAGE_SIZE;
-#endif
 
 	RST_MEM_FIXUP_PPTR(task_args->vmas);
 	RST_MEM_FIXUP_PPTR(task_args->rings);
@@ -3372,7 +3207,11 @@ static int sigreturn_restore(pid_t pid, struct task_restore_args *task_args, uns
 	RST_MEM_FIXUP_PPTR(task_args->rlims);
 	RST_MEM_FIXUP_PPTR(task_args->helpers);
 	RST_MEM_FIXUP_PPTR(task_args->zombies);
+	RST_MEM_FIXUP_PPTR(task_args->seccomp_filters);
 	RST_MEM_FIXUP_PPTR(task_args->vma_ios);
+
+	if (core->tc->has_seccomp_mode)
+		task_args->seccomp_mode = core->tc->seccomp_mode;
 
 	task_args->compatible_mode = core_is_compat(core);
 	/*
@@ -3386,8 +3225,7 @@ static int sigreturn_restore(pid_t pid, struct task_restore_args *task_args, uns
 	log_get_logstart(&task_args->logstart);
 	task_args->sigchld_act	= sigchld_act;
 
-	strncpy(task_args->comm, core->tc->comm, TASK_COMM_LEN - 1);
-	task_args->comm[TASK_COMM_LEN - 1] = 0;
+	strncpy(task_args->comm, core->tc->comm, sizeof(task_args->comm));
 
 	/*
 	 * Fill up per-thread data.
@@ -3447,20 +3285,11 @@ static int sigreturn_restore(pid_t pid, struct task_restore_args *task_args, uns
 		if (ret)
 			goto err;
 
-		seccomp_rst_reloc(&thread_args[i]);
-		thread_args[i].seccomp_force_tsync = rsti(current)->has_old_seccomp_filter;
-
 		thread_args[i].mz = mz + i;
 		sigframe = (struct rt_sigframe *)&mz[i].rt_sigframe;
 
 		if (construct_sigframe(sigframe, sigframe, blkset, tcore))
 			goto err;
-
-		if (tcore->thread_core->comm)
-			strncpy(thread_args[i].comm, tcore->thread_core->comm, TASK_COMM_LEN - 1);
-		else
-			strncpy(thread_args[i].comm, core->tc->comm, TASK_COMM_LEN - 1);
-		thread_args[i].comm[TASK_COMM_LEN - 1] = 0;
 
 		if (thread_args[i].pid != pid)
 			core_entry__free_unpacked(tcore, NULL);
@@ -3496,15 +3325,6 @@ static int sigreturn_restore(pid_t pid, struct task_restore_args *task_args, uns
 	task_args->nr_threads		= current->nr_threads;
 	task_args->thread_args		= thread_args;
 
-	task_args->auto_dedup		= opts.auto_dedup;
-
-	/*
-	 * In the restorer we need to know if it is SELinux or not. For SELinux
-	 * we must change the process context before creating threads. For
-	 * Apparmor we can change each thread after they have been created.
-	 */
-	task_args->lsm_type		= kdat.lsm;
-
 	/*
 	 * Make root and cwd restore _that_ late not to break any
 	 * attempts to open files by paths above (e.g. /proc).
@@ -3513,11 +3333,8 @@ static int sigreturn_restore(pid_t pid, struct task_restore_args *task_args, uns
 	if (restore_fs(current))
 		goto err;
 
-	sfds_protected = false;
 	close_image_dir();
 	close_proc();
-	close_service_fd(TRANSPORT_FD_OFF);
-	close_service_fd(CR_PROC_FD_OFF);
 	close_service_fd(ROOT_FD_OFF);
 	close_service_fd(USERNSD_SK);
 	close_service_fd(FDSTORE_SK_OFF);

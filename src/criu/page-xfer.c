@@ -20,7 +20,6 @@
 #include "pstree.h"
 #include "parasite-syscall.h"
 #include "rst_info.h"
-#include "stats.h"
 
 static int page_server_sk = -1;
 
@@ -61,7 +60,7 @@ static void psi2iovec(struct page_server_iov *ps, struct iovec *iov)
  * numbers that can be met from older CRIUs
  */
 
-static inline u64 encode_pm(int type, unsigned long id)
+static inline u64 encode_pm(int type, long id)
 {
 	if (type == CR_FD_PAGEMAP)
 		type = PS_TYPE_PID;
@@ -75,13 +74,13 @@ static inline u64 encode_pm(int type, unsigned long id)
 	return ((u64)id) << PS_TYPE_BITS | type;
 }
 
-static int decode_pm(u64 dst_id, unsigned long *id)
+static int decode_pm(u64 dst_id, long *id)
 {
 	int type;
 
 	/*
 	 * Magic numbers below came from the older CRIU versions that
-	 * erroneously used the changing CR_FD_* constants. The
+	 * errorneously used the changing CR_FD_* constants. The
 	 * changes were made when we merged images together and moved
 	 * the CR_FD_-s at the tail of the enum
 	 */
@@ -147,19 +146,11 @@ static inline int send_psi(int sk, struct page_server_iov *pi)
 static int write_pages_to_server(struct page_xfer *xfer,
 		int p, unsigned long len)
 {
-	ssize_t ret, left = len;
-
 	pr_debug("Splicing %lu bytes / %lu pages into socket\n", len, len / PAGE_SIZE);
 
-	while (left > 0) {
-		ret = splice(p, NULL, xfer->sk, NULL, left, SPLICE_F_MOVE);
-		if (ret < 0) {
-			pr_perror("Can't write pages to socket");
-			return -1;
-		}
-
-		pr_debug("\tSpliced: %lu bytes sent\n", (unsigned long)ret);
-		left -= ret;
+	if (splice(p, NULL, xfer->sk, NULL, len, SPLICE_F_MOVE) != len) {
+		pr_perror("Can't write pages to socket");
+		return -1;
 	}
 
 	return 0;
@@ -182,7 +173,7 @@ static void close_server_xfer(struct page_xfer *xfer)
 	xfer->sk = -1;
 }
 
-static int open_page_server_xfer(struct page_xfer *xfer, int fd_type, unsigned long img_id)
+static int open_page_server_xfer(struct page_xfer *xfer, int fd_type, long id)
 {
 	char has_parent;
 	struct page_server_iov pi = {
@@ -193,7 +184,7 @@ static int open_page_server_xfer(struct page_xfer *xfer, int fd_type, unsigned l
 	xfer->write_pagemap = write_pagemap_to_server;
 	xfer->write_pages = write_pages_to_server;
 	xfer->close = close_server_xfer;
-	xfer->dst_id = encode_pm(fd_type, img_id);
+	xfer->dst_id = encode_pm(fd_type, id);
 	xfer->parent = NULL;
 
 	pi.dst_id = xfer->dst_id;
@@ -224,13 +215,13 @@ static int write_pages_loc(struct page_xfer *xfer,
 	ssize_t curr = 0;
 
 	while (1) {
-		ret = splice(p, NULL, img_raw_fd(xfer->pi), NULL, len - curr, SPLICE_F_MOVE);
+		ret = splice(p, NULL, img_raw_fd(xfer->pi), NULL, len, SPLICE_F_MOVE);
 		if (ret == -1) {
 			pr_perror("Unable to spice data");
 			return -1;
 		}
 		if (ret == 0) {
-			pr_err("A pipe was closed unexpectedly\n");
+			pr_err("A pipe was closed unexpectedly");
 			return -1;
 		}
 		curr += ret;
@@ -330,11 +321,11 @@ static void close_page_xfer(struct page_xfer *xfer)
 	close_image(xfer->pmi);
 }
 
-static int open_page_local_xfer(struct page_xfer *xfer, int fd_type, unsigned long img_id)
+static int open_page_local_xfer(struct page_xfer *xfer, int fd_type, long id)
 {
 	u32 pages_id;
 
-	xfer->pmi = open_image(fd_type, O_DUMP, img_id);
+	xfer->pmi = open_image(fd_type, O_DUMP, id);
 	if (!xfer->pmi)
 		return -1;
 
@@ -367,7 +358,7 @@ static int open_page_local_xfer(struct page_xfer *xfer, int fd_type, unsigned lo
 			return -1;
 		}
 
-		ret = open_page_read_at(pfd, img_id, xfer->parent, pr_flags);
+		ret = open_page_read_at(pfd, id, xfer->parent, pr_flags);
 		if (ret <= 0) {
 			pr_perror("No parent image found, though parent directory is set");
 			xfree(xfer->parent);
@@ -385,15 +376,15 @@ out:
 	return 0;
 }
 
-int open_page_xfer(struct page_xfer *xfer, int fd_type, unsigned long img_id)
+int open_page_xfer(struct page_xfer *xfer, int fd_type, long id)
 {
 	xfer->offset = 0;
 	xfer->transfer_lazy = true;
 
 	if (opts.use_page_server)
-		return open_page_server_xfer(xfer, fd_type, img_id);
+		return open_page_server_xfer(xfer, fd_type, id);
 	else
-		return open_page_local_xfer(xfer, fd_type, img_id);
+		return open_page_local_xfer(xfer, fd_type, id);
 }
 
 static int page_xfer_dump_hole(struct page_xfer *xfer,
@@ -501,7 +492,7 @@ int page_xfer_dump_pages(struct page_xfer *xfer, struct page_pipe *pp)
  *	 0 - if a parent image doesn't exist
  *	-1 - in error cases
  */
-int check_parent_local_xfer(int fd_type, unsigned long img_id)
+int check_parent_local_xfer(int fd_type, int id)
 {
 	char path[PATH_MAX];
 	struct stat st;
@@ -511,7 +502,7 @@ int check_parent_local_xfer(int fd_type, unsigned long img_id)
 	if (pfd < 0 && errno == ENOENT)
 		return 0;
 
-	snprintf(path, sizeof(path), imgset_template[fd_type].fmt, img_id);
+	snprintf(path, sizeof(path), imgset_template[fd_type].fmt, id);
 	ret = fstatat(pfd, path, &st, 0);
 	if (ret == -1 && errno != ENOENT) {
 		pr_perror("Unable to stat %s", path);
@@ -527,7 +518,7 @@ int check_parent_local_xfer(int fd_type, unsigned long img_id)
 static int page_server_check_parent(int sk, struct page_server_iov *pi)
 {
 	int type, ret;
-	unsigned long id;
+	long id;
 
 	type = decode_pm(pi->dst_id, &id);
 	if (type == -1) {
@@ -547,13 +538,13 @@ static int page_server_check_parent(int sk, struct page_server_iov *pi)
 	return 0;
 }
 
-static int check_parent_server_xfer(int fd_type, unsigned long img_id)
+static int check_parent_server_xfer(int fd_type, long id)
 {
 	struct page_server_iov pi = {};
 	int has_parent;
 
 	pi.cmd = PS_IOV_PARENT;
-	pi.dst_id = encode_pm(fd_type, img_id);
+	pi.dst_id = encode_pm(fd_type, id);
 
 	if (send_psi(page_server_sk, &pi))
 		return -1;
@@ -568,12 +559,12 @@ static int check_parent_server_xfer(int fd_type, unsigned long img_id)
 	return has_parent;
 }
 
-int check_parent_page_xfer(int fd_type, unsigned long img_id)
+int check_parent_page_xfer(int fd_type, long id)
 {
 	if (opts.use_page_server)
-		return check_parent_server_xfer(fd_type, img_id);
+		return check_parent_server_xfer(fd_type, id);
 	else
-		return check_parent_local_xfer(fd_type, img_id);
+		return check_parent_local_xfer(fd_type, id);
 }
 
 struct page_xfer_job {
@@ -605,7 +596,7 @@ static void page_server_close(void)
 static int page_server_open(int sk, struct page_server_iov *pi)
 {
 	int type;
-	unsigned long id;
+	long id;
 
 	type = decode_pm(pi->dst_id, &id);
 	if (type == -1) {
@@ -613,7 +604,7 @@ static int page_server_open(int sk, struct page_server_iov *pi)
 		return -1;
 	}
 
-	pr_info("Opening %d/%lu\n", type, id);
+	pr_info("Opening %d/%ld\n", type, id);
 
 	page_server_close();
 
@@ -673,7 +664,7 @@ static int page_server_add(int sk, struct page_server_iov *pi, u32 flags)
 		/*
 		 * Splicing into a pipe may end up blocking if pipe is "full",
 		 * and we need the SPLICE_F_NONBLOCK flag here. At the same time
-		 * splicing from UNIX socket with this flag aborts splice with
+		 * splcing from UNIX socket with this flag aborts splice with
 		 * the EAGAIN if there's no data in it (TCP looks at the socket
 		 * O_NONBLOCK flag _only_ and waits for data), so before doing
 		 * the non-blocking splice we need to explicitly wait.
@@ -690,7 +681,7 @@ static int page_server_add(int sk, struct page_server_iov *pi, u32 flags)
 			return -1;
 		}
 		if (chunk == 0) {
-			pr_err("A socket was closed unexpectedly\n");
+			pr_err("A socket was closed unexpectedly");
 			return -1;
 		}
 
@@ -975,9 +966,6 @@ int cr_page_server(bool daemon_mode, bool lazy_dump, int cfd)
 	int sk = -1;
 	int ret;
 
-	if (init_stats(DUMP_STATS))
-		return -1;
-
 	if (!opts.lazy_pages)
 		up_page_ids_base();
 	else if (!lazy_dump)
@@ -991,23 +979,10 @@ int cr_page_server(bool daemon_mode, bool lazy_dump, int cfd)
 		goto no_server;
 	}
 
-	sk = setup_tcp_server("page", opts.addr, &opts.port);
+	sk = setup_tcp_server("page");
 	if (sk == -1)
 		return -1;
 no_server:
-
-	if (!daemon_mode && cfd >= 0) {
-		struct ps_info info = {.pid = getpid(), .port = opts.port};
-		int count;
-
-		count = write(cfd, &info, sizeof(info));
-		close_safe(&cfd);
-		if (count != sizeof(info)) {
-			pr_perror("Unable to write ps_info");
-			exit(1);
-		}
-	}
-
 	ret = run_tcp_server(daemon_mode, &ask, cfd, sk);
 	if (ret != 0)
 		return ret > 0 ? 0 : -1;
@@ -1062,7 +1037,8 @@ int disconnect_from_page_server(void)
 	if (page_server_sk == -1)
 		return 0;
 
-	pr_info("Disconnect from the page server\n");
+	pr_info("Disconnect from the page server %s:%u\n",
+			opts.addr, (int)ntohs(opts.port));
 
 	if (opts.ps_socket != -1)
 		/*
@@ -1091,7 +1067,6 @@ out:
 struct ps_async_read {
 	unsigned long rb; /* read bytes */
 	unsigned long goal;
-	unsigned long nr_pages;
 
 	struct page_server_iov pi;
 	void *pages;
@@ -1104,20 +1079,14 @@ struct ps_async_read {
 
 static LIST_HEAD(async_reads);
 
-static inline void async_read_set_goal(struct ps_async_read *ar, int nr_pages)
-{
-	ar->goal = sizeof(ar->pi) + nr_pages * PAGE_SIZE;
-	ar->nr_pages = nr_pages;
-}
-
 static void init_ps_async_read(struct ps_async_read *ar, void *buf,
 		int nr_pages, ps_async_read_complete complete, void *priv)
 {
 	ar->pages = buf;
 	ar->rb = 0;
+	ar->goal = sizeof(ar->pi) + nr_pages * PAGE_SIZE;
 	ar->complete = complete;
 	ar->priv = priv;
-	async_read_set_goal(ar, nr_pages);
 }
 
 static int page_server_start_async_read(void *buf, int nr_pages,
@@ -1153,9 +1122,6 @@ static int page_server_read(struct ps_async_read *ar, int flags)
 		buf = ((void *)&ar->pi) + ar->rb;
 		need = sizeof(ar->pi) - ar->rb;
 	} else {
-		/* page-serer may return less pages than we asked for */
-		if (ar->pi.nr_pages < ar->nr_pages)
-			async_read_set_goal(ar, ar->pi.nr_pages);
 		/* Page(s) data itself */
 		buf = ar->pages + (ar->rb - sizeof(ar->pi));
 		need = ar->goal - ar->rb;
@@ -1198,12 +1164,6 @@ static int page_server_async_read(struct epoll_rfd *f)
 	return ret;
 }
 
-static int page_server_hangup_event(struct epoll_rfd *rfd)
-{
-	pr_err("Remote side closed connection\n");
-	return -1;
-}
-
 static struct epoll_rfd ps_rfd;
 
 int connect_to_page_server_to_recv(int epfd)
@@ -1212,19 +1172,18 @@ int connect_to_page_server_to_recv(int epfd)
 		return -1;
 
 	ps_rfd.fd = page_server_sk;
-	ps_rfd.read_event = page_server_async_read;
-	ps_rfd.hangup_event = page_server_hangup_event;
+	ps_rfd.revent = page_server_async_read;
 
 	return epoll_add_rfd(epfd, &ps_rfd);
 }
 
-int request_remote_pages(unsigned long img_id, unsigned long addr, int nr_pages)
+int request_remote_pages(int pid, unsigned long addr, int nr_pages)
 {
 	struct page_server_iov pi = {
 		.cmd		= PS_IOV_GET,
 		.nr_pages	= nr_pages,
 		.vaddr		= addr,
-		.dst_id		= img_id,
+		.dst_id		= pid,
 	};
 
 	/* XXX: why MSG_DONTWAIT here? */

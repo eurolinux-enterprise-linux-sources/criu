@@ -8,7 +8,7 @@
 #include <stdlib.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>  /* for sockaddr_in and inet_ntoa() */
-#include <sys/wait.h>
+#include <wait.h>
 
 #include "zdtmtst.h"
 

@@ -1,26 +1,22 @@
-%if 0%{?fedora} >= 27 || 0%{?rhel} > 7
-%global py_prefix python3
-%global py_binary %{py_prefix}
+%if 0%{?fedora} > 27
+%global py2_prefix python2
 %else
-%global py_prefix python
-%global py_binary python2
+%global py2_prefix python
 %endif
 
-# With annobin enabled, CRIU does not work anymore. It seems CRIU's
-# parasite code breaks if annobin is enabled.
-%undefine _annotated_build
-
 Name: criu
-Version: 3.12
-Release: 2%{?dist}
+Version: 3.5
+Release: 4%{?dist}
 Provides: crtools = %{version}-%{release}
 Obsoletes: crtools <= 1.0-2
 Summary: Tool for Checkpoint/Restore in User-space
+Group: System Environment/Base
 License: GPLv2
 URL: http://criu.org/
 Source0: http://download.openvz.org/criu/criu-%{version}.tar.bz2
+Patch0: 0001-fix-building-on-newest-glibc-and-kernel.patch
 
-%if 0%{?rhel} && 0%{?rhel} <= 7
+%if ! 0%{?fedora}
 BuildRequires: perl
 # RHEL has no asciidoc; take man-page from Fedora 26
 # zcat /usr/share/man/man8/criu.8.gz > criu.8
@@ -33,19 +29,12 @@ Patch100: aio-fix.patch
 
 Source3: criu-tmpfiles.conf
 
-BuildRequires: gcc
 BuildRequires: systemd
 BuildRequires: libnet-devel
-BuildRequires: protobuf-devel protobuf-c-devel %{py_prefix}-devel libnl3-devel libcap-devel
-%if 0%{?fedora} || 0%{?rhel} > 7
+BuildRequires: protobuf-devel protobuf-c-devel python2-devel libnl3-devel libcap-devel
+%if 0%{?fedora}
 BuildRequires: asciidoc xmlto
 BuildRequires: perl-interpreter
-BuildRequires: libselinux-devel
-# Checkpointing containers with a tmpfs requires tar
-Recommends: tar
-%if 0%{?fedora}
-BuildRequires: libbsd-devel
-%endif
 %endif
 
 # user-space and kernel changes are only available for x86_64, arm,
@@ -58,39 +47,28 @@ criu is the user-space part of Checkpoint/Restore in User-space
 (CRIU), a project to implement checkpoint/restore functionality for
 Linux in user-space.
 
-%if 0%{?fedora} || 0%{?rhel} > 7
+%if 0%{?fedora}
 %package devel
 Summary: Header files and libraries for %{name}
+Group: Development/Libraries
 Requires: %{name} = %{version}-%{release}
 
 %description devel
 This package contains header files and libraries for %{name}.
-
-%package libs
-Summary: Libraries for %{name}
-Requires: %{name} = %{version}-%{release}
-
-%description libs
-This package contains the libraries for %{name}
 %endif
 
-%package -n %{py_prefix}-%{name}
-%{?python_provide:%python_provide %{py_prefix}-%{name}}
+%package -n %{py2_prefix}-%{name}
+%{?python_provide:%python_provide %{py2_prefix}-%{name}}
 Summary: Python bindings for %{name}
-%if 0%{?rhel} && 0%{?rhel} <= 7
-Requires: protobuf-python
-Requires: %{name} = %{version}-%{release} %{py_prefix}-ipaddr
-%else
-Requires: %{py_prefix}-protobuf
-Obsoletes: python2-criu < 3.10-1
-%endif
+Group: Development/Languages
+Requires: %{name} = %{version}-%{release} python-ipaddr protobuf-python
 
-%description -n %{py_prefix}-%{name}
-%{py_prefix}-%{name} contains Python bindings for %{name}.
+%description -n %{py2_prefix}-%{name}
+python-%{name} contains Python bindings for %{name}.
 
 %package -n crit
 Summary: CRIU image tool
-Requires: %{py_prefix}-%{name} = %{version}-%{release}
+Requires: %{py2_prefix}-%{name} = %{version}-%{release}
 
 %description -n crit
 crit is a tool designed to decode CRIU binary dump files and show
@@ -99,24 +77,25 @@ their content in human-readable form.
 
 %prep
 %setup -q
+%patch0 -p1
 
-%if 0%{?rhel} && 0%{?rhel} <= 7
+%if 0%{?rhel}
 %patch100 -p1
 %endif
 
 %build
 # %{?_smp_mflags} does not work
 # -fstack-protector breaks build
-CFLAGS+=`echo %{optflags} | sed -e 's,-fstack-protector\S*,,g'` make V=1 WERROR=0 PREFIX=%{_prefix} RUNDIR=/run/criu PYTHON=%{py_binary}
-%if 0%{?fedora} || 0%{?rhel} > 7
+CFLAGS+=`echo %{optflags} | sed -e 's,-fstack-protector\S*,,g'` make V=1 WERROR=0 PREFIX=%{_prefix} RUNDIR=/run/criu
+%if 0%{?fedora}
 make docs V=1
 %endif
 
 
 %install
 make install-criu DESTDIR=$RPM_BUILD_ROOT PREFIX=%{_prefix} LIBDIR=%{_libdir}
-make install-lib DESTDIR=$RPM_BUILD_ROOT PREFIX=%{_prefix} LIBDIR=%{_libdir} PYTHON=%{py_binary}
-%if 0%{?fedora} || 0%{?rhel} > 7
+make install-lib DESTDIR=$RPM_BUILD_ROOT PREFIX=%{_prefix} LIBDIR=%{_libdir}
+%if 0%{?fedora}
 # only install documentation on Fedora as it requires asciidoc,
 # which is not available on RHEL7
 make install-man DESTDIR=$RPM_BUILD_ROOT PREFIX=%{_prefix} LIBDIR=%{_libdir}
@@ -129,7 +108,7 @@ mkdir -p %{buildroot}%{_tmpfilesdir}
 install -m 0644 %{SOURCE3} %{buildroot}%{_tmpfilesdir}/%{name}.conf
 install -d -m 0755 %{buildroot}/run/%{name}/
 
-%if 0%{?rhel} && 0%{?rhel} <= 7
+%if ! 0%{?fedora}
 # remove devel package
 rm -rf $RPM_BUILD_ROOT%{_includedir}/criu
 rm $RPM_BUILD_ROOT%{_libdir}/*.so*
@@ -137,34 +116,30 @@ rm -rf $RPM_BUILD_ROOT%{_libdir}/pkgconfig
 rm -rf $RPM_BUILD_ROOT%{_libexecdir}/%{name}
 %endif
 
+%post -p /sbin/ldconfig
+%postun -p /sbin/ldconfig
+
 %files
 %{_sbindir}/%{name}
 %doc %{_mandir}/man8/criu.8*
-%if 0%{?fedora} || 0%{?rhel} > 7
+%if 0%{?fedora}
+%{_libdir}/*.so.*
 %{_libexecdir}/%{name}
 %endif
 %dir /run/%{name}
 %{_tmpfilesdir}/%{name}.conf
 %doc README.md COPYING
 
-%if 0%{?fedora} || 0%{?rhel} > 7
+%if 0%{?fedora}
 %files devel
 %{_includedir}/criu
 %{_libdir}/*.so
 %{_libdir}/pkgconfig/*.pc
-
-%files libs
-%{_libdir}/*.so.*
 %endif
 
-%files -n %{py_prefix}-%{name}
-%if 0%{?rhel} && 0%{?rhel} <= 7
+%files -n %{py2_prefix}-%{name}
 %{python2_sitelib}/pycriu/*
 %{python2_sitelib}/*egg-info
-%else
-%{python3_sitelib}/pycriu/*
-%{python3_sitelib}/*egg-info
-%endif
 
 %files -n crit
 %{_bindir}/crit
@@ -172,64 +147,6 @@ rm -rf $RPM_BUILD_ROOT%{_libexecdir}/%{name}
 
 
 %changelog
-* Thu Apr 25 2019 Adrian Reber <adrian@lisas.de> - 3.12-2
-- Updated to official 3.12
-
-* Tue Apr 23 2019 Adrian Reber <adrian@lisas.de> - 3.12-0.1
-- Updated to 3.12 (pre-release)
-- Create libs subpackage
-- Build against SELinux (Fedora and RHEL8)
-- Build against libbsd (Fedora)
-
-* Sun Jul 15 2018 Adrian Reber <areber@redhat.com> - 3.9-5
-- Add patch to fix runc read-only regression (#1598028)
-
-* Tue Jun 19 2018 Adrian Reber <areber@redhat.com> - 3.9-4
-- Add patch to fix cow01 test case on aarch64
-
-* Wed Jun 06 2018 Adrian Reber <adrian@lisas.de> - 3.9-3
-- Simplify ExclusiveArch now that there is no more F26
-
-* Mon Jun 04 2018 Adrian Reber <areber@redhat.com> - 3.9-2
-- Add patches for aarch64 page size errors
-
-* Fri Jun 01 2018 Adrian Reber <adrian@lisas.de> - 3.9-1
-- Update to 3.9
-
-* Tue Apr 03 2018 Adrian Reber <adrian@lisas.de> - 3.8.1-1
-- Update to 3.8.1
-
-* Thu Mar 22 2018 Adrian Reber <adrian@lisas.de> - 3.8-2
-- Bump release for COPR
-
-* Wed Mar 14 2018 Adrian Reber <adrian@lisas.de> - 3.8-1
-- Update to 3.8
-
-* Wed Feb 07 2018 Fedora Release Engineering <releng@fedoraproject.org> - 3.7-5
-- Rebuilt for https://fedoraproject.org/wiki/Fedora_28_Mass_Rebuild
-
-* Sat Feb 03 2018 Igor Gnatenko <ignatenkobrain@fedoraproject.org> - 3.7-4
-- Switch to %%ldconfig_scriptlets
-
-* Fri Jan 12 2018 Adrian Reber <adrian@lisas.de> - 3.7-3
-- Fix python/python2 dependencies accross all branches
-
-* Wed Jan 03 2018 Merlin Mathesius <mmathesi@redhat.com> - 3.7-2
-- Cleanup spec file conditionals
-
-* Sat Dec 30 2017 Adrian Reber <adrian@lisas.de> - 3.7-1
-- Update to 3.7
-
-* Fri Dec 15 2017 Iryna Shcherbina <ishcherb@redhat.com> - 3.6-2
-- Update Python 2 dependency declarations to new packaging standards
-  (See https://fedoraproject.org/wiki/FinalizingFedoraSwitchtoPython3)
-
-* Thu Oct 26 2017 Adrian Reber <adrian@lisas.de> - 3.6-1
-- Update to 3.6
-
-* Wed Oct 18 2017 Adrian Reber <adrian@lisas.de> - 3.5-5
-- Added patch to fix build on Fedora rawhide aarch64
-
 * Tue Oct 10 2017 Adrian Reber <areber@redhat.com> - 3.5-4
 - Upgrade imported manpages to 3.5
 

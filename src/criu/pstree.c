@@ -14,8 +14,6 @@
 #include "mount.h"
 #include "dump.h"
 #include "util.h"
-#include "net.h"
-
 #include "protobuf.h"
 #include "images/pstree.pb-c.h"
 #include "crtools.h"
@@ -229,15 +227,11 @@ struct pstree_item *__alloc_pstree_item(bool rst)
 	return item;
 }
 
-int init_pstree_helper(struct pstree_item *ret)
+void init_pstree_helper(struct pstree_item *ret)
 {
-	BUG_ON(!ret->parent);
 	ret->pid->state = TASK_HELPER;
 	rsti(ret)->clone_flags = CLONE_FILES | CLONE_FS;
-	if (shared_fdt_prepare(ret) < 0)
-		return -1;
 	task_entries->nr_helpers++;
-	return 0;
 }
 
 /* Deep first search on children */
@@ -333,10 +327,10 @@ err:
 	return ret;
 }
 
-static int prepare_pstree_for_shell_job(pid_t pid)
+static int prepare_pstree_for_shell_job(void)
 {
-	pid_t current_sid = getsid(pid);
-	pid_t current_gid = getpgid(pid);
+	pid_t current_sid = getsid(getpid());
+	pid_t current_gid = getpgid(getpid());
 
 	struct pstree_item *pi;
 
@@ -367,31 +361,22 @@ static int prepare_pstree_for_shell_job(pid_t pid)
 	 */
 
 	old_sid = root_item->sid;
+	old_gid = root_item->pgid;
 
-	pr_info("Migrating process tree (SID %d->%d)\n",
-		old_sid, current_sid);
+	pr_info("Migrating process tree (GID %d->%d SID %d->%d)\n",
+		old_gid, current_gid, old_sid, current_sid);
 
 	for_each_pstree_item(pi) {
+		if (pi->pgid == old_gid)
+			pi->pgid = current_gid;
 		if (pi->sid == old_sid)
 			pi->sid = current_sid;
 	}
 
-	old_gid = root_item->pgid;
-	if (old_gid != vpid(root_item)) {
-		if (lookup_create_item(current_sid) == NULL)
-			return -1;
-
-		pr_info("Migrating process tree (GID %d->%d)\n",
-			old_gid, current_gid);
-
-		for_each_pstree_item(pi) {
-			if (pi->pgid == old_gid)
-				pi->pgid = current_gid;
-		}
-
-		if (lookup_create_item(current_gid) == NULL)
-			return -1;
-	}
+	if (lookup_create_item(current_sid) == NULL)
+		return -1;
+	if (lookup_create_item(current_gid) == NULL)
+		return -1;
 
 	return 0;
 }
@@ -444,7 +429,7 @@ void pstree_insert_pid(struct pid *pid_node)
 
 struct pstree_item *lookup_create_item(pid_t pid)
 {
-	struct pid *node;
+	struct pid *node;;
 
 	node = lookup_create_pid(pid, NULL);
 	if (!node)
@@ -488,10 +473,6 @@ static int read_pstree_ids(struct pstree_item *pi)
 
 	if (pi->ids->has_mnt_ns_id) {
 		if (rst_add_ns_id(pi->ids->mnt_ns_id, pi, &mnt_ns_desc))
-			return -1;
-	}
-	if (pi->ids->has_net_ns_id) {
-		if (rst_add_ns_id(pi->ids->net_ns_id, pi, &net_ns_desc))
 			return -1;
 	}
 
@@ -634,12 +615,12 @@ static int get_free_pid()
 	return -1;
 }
 
-static int prepare_pstree_ids(pid_t pid)
+static int prepare_pstree_ids(void)
 {
 	struct pstree_item *item, *child, *helper, *tmp;
 	LIST_HEAD(helpers);
 
-	pid_t current_pgid = getpgid(pid);
+	pid_t current_pgid = getpgid(getpid());
 
 	/*
 	 * Some task can be reparented to init. A helper task should be added
@@ -688,10 +669,7 @@ static int prepare_pstree_ids(pid_t pid)
 			helper->ids = root_item->ids;
 			list_add_tail(&helper->sibling, &helpers);
 		}
-		if (init_pstree_helper(helper)) {
-			pr_err("Can't init helper\n");
-			return -1;
-		}
+		init_pstree_helper(helper);
 
 		pr_info("Add a helper %d for restoring SID %d\n",
 				vpid(helper), helper->sid);
@@ -779,16 +757,13 @@ static int prepare_pstree_ids(pid_t pid)
 			continue;
 
 		helper = pid->item;
+		init_pstree_helper(helper);
 
 		helper->sid = item->sid;
 		helper->pgid = item->pgid;
 		helper->pid->ns[0].virt = item->pgid;
 		helper->parent = item;
 		helper->ids = item->ids;
-		if (init_pstree_helper(helper)) {
-			pr_err("Can't init helper\n");
-			return -1;
-		}
 		list_add(&helper->sibling, &item->children);
 		rsti(item)->pgrp_leader = helper;
 
@@ -919,7 +894,7 @@ static int prepare_pstree_kobj_ids(void)
 int prepare_pstree(void)
 {
 	int ret;
-	pid_t pid_max = 0, kpid_max = 0, pid;
+	pid_t pid_max = 0, kpid_max = 0;
 	int fd;
 	char buf[21];
 
@@ -954,14 +929,12 @@ int prepare_pstree(void)
 		}
 	}
 
-	pid = getpid();
-
 	if (!ret)
 		/*
 		 * Shell job may inherit sid/pgid from the current
 		 * shell, not from image. Set things up for this.
 		 */
-		ret = prepare_pstree_for_shell_job(pid);
+		ret = prepare_pstree_for_shell_job();
 	if (!ret)
 		/*
 		 * Walk the collected tree and prepare for restoring
@@ -973,7 +946,7 @@ int prepare_pstree(void)
 		 * Session/Group leaders might be dead. Need to fix
 		 * pstree with properly injected helper tasks.
 		 */
-		ret = prepare_pstree_ids(pid);
+		ret = prepare_pstree_ids();
 
 	return ret;
 }

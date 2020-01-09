@@ -53,11 +53,11 @@ static int add_to_cg(const char *controller, const char *path)
 	int cgfd, l;
 
 	sprintf(subdir, "%s/%s", dirname, controller);
-	ssprintf(paux, "%s/%s", subdir, path);
+	sprintf(paux, "%s/%s", subdir, path);
 	mkdir(paux, 0600);
 
 	l = sprintf(aux, "%d", getpid());
-	ssprintf(paux, "%s/%s/tasks", subdir, path);
+	sprintf(paux, "%s/%s/tasks", subdir, path);
 
 	cgfd = open(paux, O_WRONLY);
 	if (cgfd < 0) {
@@ -94,7 +94,7 @@ static bool pid_in_cgroup(pid_t pid, const char *controller, const char *path) {
 		/* chop off trailing \n */
 		buf[strlen(buf)-1] = '\0';
 
-		/* skip hierarchy no. */
+		/* skip heirarchy no. */
 		pos = strstr(buf, ":");
 		if (!pos) {
 			pr_err("invalid /proc/pid/cgroups file");

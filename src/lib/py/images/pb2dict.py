@@ -1,10 +1,9 @@
 from google.protobuf.descriptor import FieldDescriptor as FD
 import opts_pb2
-from ipaddress import IPv4Address, ip_address
-from ipaddress import IPv6Address
+import ipaddr
 import socket
 import collections
-import os, six
+import os
 
 # pb2dict and dict2pb are methods to convert pb to/from dict.
 # Inspired by:
@@ -25,14 +24,14 @@ import os, six
 
 
 _basic_cast = {
-	FD.TYPE_FIXED64		: int,
+	FD.TYPE_FIXED64		: long,
 	FD.TYPE_FIXED32		: int,
-	FD.TYPE_SFIXED64	: int,
+	FD.TYPE_SFIXED64	: long,
 	FD.TYPE_SFIXED32	: int,
 
-	FD.TYPE_INT64		: int,
-	FD.TYPE_UINT64		: int,
-	FD.TYPE_SINT64		: int,
+	FD.TYPE_INT64		: long,
+	FD.TYPE_UINT64		: long,
+	FD.TYPE_SINT64		: long,
 
 	FD.TYPE_INT32		: int,
 	FD.TYPE_UINT32		: int,
@@ -40,7 +39,7 @@ _basic_cast = {
 
 	FD.TYPE_BOOL		: bool,
 
-	FD.TYPE_STRING		: str
+	FD.TYPE_STRING		: unicode
 }
 
 def _marked_as_hex(field):
@@ -68,14 +67,14 @@ mmap_prot_map = [
 	('PROT_READ',	0x1),
 	('PROT_WRITE',	0x2),
 	('PROT_EXEC',	0x4),
-]
+];
 
 mmap_flags_map = [
 	('MAP_SHARED',	0x1),
 	('MAP_PRIVATE',	0x2),
 	('MAP_ANON',	0x20),
 	('MAP_GROWSDOWN',	0x0100),
-]
+];
 
 mmap_status_map = [
 	('VMA_AREA_NONE',	0 << 0),
@@ -96,21 +95,21 @@ mmap_status_map = [
 	('VMA_AREA_AIORING',	1 << 13),
 
 	('VMA_UNSUPP',		1 << 31),
-]
+];
 
 rfile_flags_map = [
-	('O_WRONLY',	0o1),
-	('O_RDWR',	0o2),
-	('O_APPEND',	0o2000),
-	('O_DIRECT',	0o40000),
-	('O_LARGEFILE',	0o100000),
-]
+	('O_WRONLY',	01),
+	('O_RDWR',	02),
+	('O_APPEND',	02000),
+	('O_DIRECT',	040000),
+	('O_LARGEFILE',	0100000),
+];
 
 pmap_flags_map = [
 	('PE_PARENT',	1 << 0),
 	('PE_LAZY',	1 << 1),
 	('PE_PRESENT',	1 << 2),
-]
+];
 
 flags_maps = {
 	'mmap.prot' : mmap_prot_map,
@@ -125,34 +124,14 @@ gen_maps = {
 }
 
 sk_maps = {
-	'family'    : {  1: 'UNIX',
-			 2: 'INET',
-			10: 'INET6',
-			16: 'NETLINK',
-			17: 'PACKET' },
-	'type'      : {  1: 'STREAM',
-			 2: 'DGRAM',
-			 3: 'RAW',
-			 5: 'SEQPACKET',
-			10: 'PACKET' },
-	'state'     : {  1: 'ESTABLISHED',
-			 2: 'SYN_SENT',
-			 3: 'SYN_RECV',
-			 4: 'FIN_WAIT1',
-			 5: 'FIN_WAIT2',
-			 6: 'TIME_WAIT',
-			 7: 'CLOSE',
-			 8: 'CLOSE_WAIT',
-			 9: 'LAST_ACK',
-			10: 'LISTEN' },
-	'proto'     : {   0: 'IP',
-			  6: 'TCP',
-			 17: 'UDP',
-			136: 'UDPLITE' },
+	'family'    : { 2: 'INET' },
+	'type'      : { 1: 'STREAM', 2: 'DGRAM' },
+	'state'     : { 1: 'ESTABLISHED', 7: 'CLOSE', 10: 'LISTEN' },
+	'proto'     : { 6: 'TCP' },
 }
 
-gen_rmaps = { k: {v2:k2 for k2,v2 in list(v.items())} for k,v in list(gen_maps.items()) }
-sk_rmaps = { k: {v2:k2 for k2,v2 in list(v.items())} for k,v in list(sk_maps.items()) }
+gen_rmaps = { k: {v2:k2 for k2,v2 in v.items()} for k,v in gen_maps.items() }
+sk_rmaps = { k: {v2:k2 for k2,v2 in v.items()} for k,v in sk_maps.items() }
 
 dict_maps = {
 	'gen' : ( gen_maps, gen_rmaps ),
@@ -160,8 +139,8 @@ dict_maps = {
 }
 
 def map_flags(value, flags_map):
-	bs = [x[0] for x in [x for x in flags_map if value & x[1]]]
-	value &= ~sum([x[1] for x in flags_map])
+	bs = map(lambda x: x[0], filter(lambda x: value & x[1], flags_map))
+	value &= ~sum(map(lambda x: x[1], flags_map))
 	if value:
 		bs.append("0x%x" % value)
 	return " | ".join(bs)
@@ -171,7 +150,7 @@ def unmap_flags(value, flags_map):
 		return 0
 
 	bd = dict(flags_map)
-	return sum([int(str(bd.get(x, x)), 0) for x in [x.strip() for x in value.split('|')]])
+	return sum(map(lambda x: int(str(bd.get(x, x)), 0), map(lambda x: x.strip(), value.split('|'))))
 
 kern_minorbits = 20 # This is how kernel encodes dev_t in new format
 
@@ -182,7 +161,7 @@ def decode_dev(field, value):
 		return "%d:%d" % (value >> kern_minorbits, value & ((1 << kern_minorbits) - 1))
 
 def encode_dev(field, value):
-	dev = [int(x) for x in value.split(':')]
+	dev = map(lambda x: int(x), value.split(':'))
 	if _marked_as_odev(field):
 		return os.makedev(dev[0], dev[1])
 	else:
@@ -216,7 +195,7 @@ def get_bytes_dec(field):
 		return decode_base64
 
 def is_string(value):
-	return isinstance(value, six.string_types)
+	return isinstance(value, unicode) or isinstance(value, str)
 
 def _pb2dict_cast(field, value, pretty = False, is_hex = False):
 	if not is_hex:
@@ -230,7 +209,7 @@ def _pb2dict_cast(field, value, pretty = False, is_hex = False):
 		return field.enum_type.values_by_number.get(value, None).name
 	elif field.type in _basic_cast:
 		cast = _basic_cast[field.type]
-		if pretty and (cast == int):
+		if pretty and (cast == int or cast == long):
 			if is_hex:
 				# Fields that have (criu).hex = true option set
 				# should be stored in hex string format.
@@ -268,13 +247,13 @@ def pb2dict(pb, pretty = False, is_hex = False):
 			if pretty and _marked_as_ip(field):
 				if len(value) == 1:
 					v = socket.ntohl(value[0])
-					addr = IPv4Address(v)
+					addr = ipaddr.IPv4Address(v)
 				else:
 					v = 0 +	(socket.ntohl(value[0]) << (32 * 3)) + \
 						(socket.ntohl(value[1]) << (32 * 2)) + \
 						(socket.ntohl(value[2]) << (32 * 1)) + \
 						(socket.ntohl(value[3]))
-					addr = IPv6Address(v)
+					addr = ipaddr.IPv6Address(v)
 
 				d_val.append(addr.compressed)
 			else:
@@ -296,7 +275,7 @@ def _dict2pb_cast(field, value):
 		return field.enum_type.values_by_name.get(value, None).number
 	elif field.type in _basic_cast:
 		cast = _basic_cast[field.type]
-		if (cast == int) and is_string(value):
+		if (cast == int or cast == long) and is_string(value):
 			if _marked_as_dev(field):
 				return encode_dev(field, value)
 
@@ -336,7 +315,7 @@ def dict2pb(d, pb):
 		if field.label == FD.LABEL_REPEATED:
 			pb_val = getattr(pb, field.name, None)
 			if is_string(value[0]) and _marked_as_ip(field):
-				val = ip_address(value[0])
+				val = ipaddr.IPAddress(value[0])
 				if val.version == 4:
 					pb_val.append(socket.htonl(int(val)))
 				elif val.version == 6:

@@ -19,8 +19,6 @@
 #include "zdtmtst.h"
 #include "ns.h"
 
-int criu_status_in = -1, criu_status_in_peer = -1, criu_status_out = -1;
-
 extern int pivot_root(const char *new_root, const char *put_old);
 static int prepare_mntns(void)
 {
@@ -97,11 +95,6 @@ static int prepare_mntns(void)
 	 */
 	if (mount("proc", "/proc", "proc", MS_MGC_VAL | MS_NOSUID | MS_NOEXEC | MS_NODEV, NULL)) {
 		fprintf(stderr, "mount(/proc) failed: %m\n");
-		return -1;
-	}
-
-	if (mount("zdtm_run", "/run", "tmpfs", 0, NULL)) {
-		fprintf(stderr, "Unable to mount /run: %m\n");
 		return -1;
 	}
 
@@ -253,11 +246,6 @@ int ns_init(int argc, char **argv)
 		exit(1);
 	}
 
-	if (init_notify()) {
-		fprintf(stderr, "Can't init pre-dump notification: %m");
-		exit(1);
-	}
-
 	reap = getenv("ZDTM_NOREAP") == NULL;
 
 	sigemptyset(&sa.sa_mask);
@@ -362,7 +350,7 @@ int ns_init(int argc, char **argv)
 	exit(1);
 }
 
-#define UID_MAP "0 20000 20000\n100000 200000 50000"
+#define UID_MAP "0 100000 100000\n100000 200000 50000"
 #define GID_MAP "0 400000 50000\n50000 500000 100000"
 void ns_create(int argc, char **argv)
 {

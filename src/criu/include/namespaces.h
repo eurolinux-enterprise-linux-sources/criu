@@ -4,7 +4,6 @@
 #include "common/compiler.h"
 #include "files.h"
 #include "common/list.h"
-#include "images/netdev.pb-c.h"
 
 #ifndef CLONE_NEWNS
 #define CLONE_NEWNS	0x00020000
@@ -37,8 +36,7 @@
 #define CLONE_ALLNS	(CLONE_NEWPID | CLONE_NEWNET | CLONE_NEWIPC | CLONE_NEWUTS | CLONE_NEWNS | CLONE_NEWUSER | CLONE_NEWCGROUP)
 
 /* Nested namespaces are supported only for these types */
-#define CLONE_SUBNS	(CLONE_NEWNS | CLONE_NEWNET)
-
+#define CLONE_SUBNS	(CLONE_NEWNS)
 #define EXTRA_SIZE	20
 
 struct ns_desc {
@@ -72,18 +70,6 @@ enum ns_type {
 	NS_OTHER,
 };
 
-struct netns_id {
-	unsigned		target_ns_id;
-	unsigned		netnsid_value;
-	struct list_head	node;
-};
-
-struct net_link {
-	NetDeviceEntry		*nde;
-	bool			created;
-	struct list_head	node;
-};
-
 struct ns_id {
 	unsigned int kid;
 	unsigned int id;
@@ -91,7 +77,6 @@ struct ns_id {
 	struct ns_desc *nd;
 	struct ns_id *next;
 	enum ns_type type;
-	char *ext_key;
 
 	/*
 	 * For mount namespaces on restore -- indicates that
@@ -105,31 +90,13 @@ struct ns_id {
 		struct {
 			struct mount_info *mntinfo_list;
 			struct mount_info *mntinfo_tree;
-			int nsfd_id;
-			int root_fd_id;
+			int ns_fd;
+			int root_fd;
 		} mnt;
 
 		struct {
-
-			/*
-			 * ns_fd is used when network namespaces are being
-			 * restored. On this stage we access these file
-			 * descriptors many times and it is more efficient to
-			 * have them opened rather than to get them from fdstore.
-			 *
-			 * nsfd_id is used to restore sockets. On this stage we
-			 * can't use random file descriptors to not conflict
-			 * with restored file descriptors.
-			 */
-			union {
-				int nsfd_id;	/* a namespace descriptor id in fdstore */
-				int ns_fd;	/* a namespace file descriptor */
-			};
 			int nlsk;	/* for sockets collection */
 			int seqsk;	/* to talk to parasite daemons */
-			struct list_head ids;
-			struct list_head links;
-			NetnsEntry *netns;
 		} net;
 	};
 };
@@ -158,7 +125,6 @@ extern int dump_mnt_namespaces(void);
 extern int dump_namespaces(struct pstree_item *item, unsigned int ns_flags);
 extern int prepare_namespace_before_tasks(void);
 extern int prepare_namespace(struct pstree_item *item, unsigned long clone_flags);
-extern int prepare_userns_creds(void);
 
 extern int switch_ns(int pid, struct ns_desc *nd, int *rst);
 extern int switch_ns_by_fd(int nsfd, struct ns_desc *nd, int *rst);
@@ -198,7 +164,7 @@ typedef int (*uns_call_t)(void *arg, int fd, pid_t pid);
  */
 #define UNS_FDOUT	0x2
 
-#define MAX_UNSFD_MSG_SIZE 8192
+#define MAX_UNSFD_MSG_SIZE 4096
 
 /*
  * When we're restoring inside user namespace, some things are
@@ -217,8 +183,5 @@ extern int __userns_call(const char *func_name, uns_call_t call, int flags,
 		      __arg, __arg_size, __fd)
 
 extern int add_ns_shared_cb(int (*actor)(void *data), void *data);
-
-extern struct ns_id *get_socket_ns(int lfd);
-extern struct ns_id *lookup_ns_by_kid(unsigned int kid, struct ns_desc *nd);
 
 #endif /* __CR_NS_H__ */

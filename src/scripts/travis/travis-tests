@@ -2,9 +2,9 @@
 set -x -e
 
 TRAVIS_PKGS="protobuf-c-compiler libprotobuf-c0-dev libaio-dev
-		libprotobuf-dev protobuf-compiler libcap-dev
+		libprotobuf-dev protobuf-compiler python-ipaddr libcap-dev
 		libnl-3-dev gcc-multilib gdb bash python-protobuf
-		libnet-dev util-linux asciidoc xmlto libnl-route-3-dev"
+		libnet-dev util-linux asciidoc xmlto"
 
 travis_prep () {
 	[ -n "$SKIP_TRAVIS_PREP" ] && return
@@ -19,13 +19,6 @@ travis_prep () {
 		TRAVIS_PKGS="$TRAVIS_PKGS clang"
 		CC=clang
 	fi
-
-	[ -n "$GCOV" ] && {
-		apt-add-repository -y "ppa:ubuntu-toolchain-r/test"
-		apt-get update -yq
-		apt-get -yq --no-install-suggests --no-install-recommends --force-yes install g++-7
-		CC=gcc-7
-	}
 
 	# ccache support, only enable for non-GCOV case
 	if [ "$CCACHE" = "1" -a -z "$GCOV" ]; then
@@ -45,9 +38,6 @@ travis_prep () {
 
 	apt-get update -qq
 	apt-get install -qq --no-install-recommends $TRAVIS_PKGS
-	# travis is based on 14.04 and that does not have python
-	# packages for future and ipaddress (16.04 has those packages)
-	pip install junit-xml future ipaddress
 	chmod a+x $HOME
 }
 
@@ -58,45 +48,16 @@ echo "|`pwd`/test/abrt.sh %P %p %s %e" > /proc/sys/kernel/core_pattern
 
 export GCOV
 time make CC="$CC" -j4
-
-[ -n "$SKIP_TRAVIS_TEST" ] && return
-
-if [ "${COMPAT_TEST}x" = "yx" ] ; then
-	# Dirty hack to keep both ia32 & x86_64 shared libs on a machine:
-	# headers are probably not compatible, so apt-get doesn't allow
-	# installing both versions, while we need one for CRIU and one
-	# for 32-bit tests. A better way would involve launching docker..
-	# But it would require making zdtm.py aware of docker and launching
-	# tests inside the CT.
-	INCOMPATIBLE_LIBS="libaio-dev libcap-dev libnl-3-dev libnl-route-3-dev"
-	IA32_PKGS=""
-	REFUGE=64-refuge
-
-	mkdir "$REFUGE"
-	for i in $INCOMPATIBLE_LIBS ; do
-		for j in $(dpkg --listfiles $i | grep '\.so$') ; do
-			cp "$j" "$REFUGE/"
-		done
-		IA32_PKGS="$IA32_PKGS $i:i386"
-	done
-	apt-get remove $INCOMPATIBLE_LIBS
-	apt-get install --no-install-recommends $IA32_PKGS
-	mkdir -p /usr/lib/x86_64-linux-gnu/
-	mv "$REFUGE"/* /usr/lib/x86_64-linux-gnu/
-fi
-
 time make CC="$CC" -j4 -C test/zdtm
 
 [ -f "$CCACHE_LOGFILE" ] && cat $CCACHE_LOGFILE
 
-# umask has to be called before a first criu run, so that .gcda (coverage data)
-# files are created with read-write permissions for all.
-umask 0000
 ./criu/criu check
 ./criu/criu check --all || echo $?
 ./criu/criu cpuinfo dump
 ./criu/criu cpuinfo check
 
+umask 0000
 export SKIP_PREP=1
 # The 3.19 kernel (from Ubuntu 14.04) has a bug. When /proc/PID/pagemap
 # is read for a few VMAs in one read call, incorrect data is returned.
@@ -108,35 +69,28 @@ chmod 0777 test/
 chmod 0777 test/zdtm/static
 chmod 0777 test/zdtm/transition
 
-./test/zdtm.py run -a -p 2 --keep-going $ZDTM_OPTS
+./test/zdtm.py run -a -p 2
 
 KERN_MAJ=`uname -r | cut -d. -f1`
 KERN_MIN=`uname -r | cut -d. -f2`
-if [ $KERN_MAJ -ge "4" ] && [ $KERN_MIN -ge "18" ]; then
-	LAZY_EXCLUDE="-x cmdlinenv00 -x maps007"
+if [ $KERN_MAJ -ge "4" ] && [ $KERN_MIN -ge "11" ]; then
+	LAZY_EXCLUDE="-x cmdlinenv00"
 else
 	LAZY_EXCLUDE="-x maps007 -x fork -x fork2 -x uffd-events -x cgroupns
 		      -x socket_listen -x socket_listen6 -x cmdlinenv00
-		      -x socket_close_data01 -x file_read -x lazy-thp -x futex"
+		      -x socket_close_data01 -x file_read"
 fi
-LAZY_EXCLUDE="$LAZY_EXCLUDE -x maps04"
-
-LAZY_TESTS=.*\(maps0\|uffd-events\|lazy-thp\|futex\|fork\).*
-
-./test/zdtm.py run -p 2 -T $LAZY_TESTS --lazy-pages $LAZY_EXCLUDE $ZDTM_OPTS
-./test/zdtm.py run -p 2 -T $LAZY_TESTS --remote-lazy-pages $LAZY_EXCLUDE $ZDTM_OPTS
+LAZY_EXCLUDE="$LAZY_EXCLUDE -x futex -x lazy-thp"
+./test/zdtm.py run -a -p 2 --lazy-pages $LAZY_EXCLUDE
+./test/zdtm.py run -a -p 2 --remote-lazy-pages $LAZY_EXCLUDE
 
 bash ./test/jenkins/criu-fault.sh
 bash ./test/jenkins/criu-fcg.sh
 bash ./test/jenkins/criu-inhfd.sh
 
-if [ -z "$SKIP_EXT_DEV_TEST" ]; then
-	make -C test/others/mnt-ext-dev/ run
-fi
+make -C test/others/mnt-ext-dev/ run
 #make -C test/others/exec/ run
-make -C test/others/make/ run CC="$CC"
-make -C test/others/shell-job/ run
-make -C test/others/rpc/ run
+make -C test/others/make/ run
 
 ./test/zdtm.py run -t zdtm/static/env00 --sibling
 
@@ -152,15 +106,9 @@ ip net add test
 
 # RPC testing
 ./test/zdtm.py run -t zdtm/static/env00 --rpc		# Basic
-./test/zdtm.py run -t zdtm/static/env00 --rpc --pre 2 --page-server
 ./test/zdtm.py run -t zdtm/static/ptrace_sig -f h --rpc # Error handling (crfail test)
 
 ./test/zdtm.py run --empty-ns -T zdtm/static/socket-tcp*-local --iter 2
-
-./test/zdtm.py run -t zdtm/static/env00 -k always
-./test/crit-recode.py
-
-make -C test/others/shell-job
 
 pip install flake8
 make lint

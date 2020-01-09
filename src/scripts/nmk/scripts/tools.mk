@@ -4,13 +4,9 @@ ifndef ____nmk_defined__tools
 # System tools shorthands
 RM		:= rm -f
 HOSTLD		?= ld
-ifeq ($(origin LD), default)
 LD		:= $(CROSS_COMPILE)$(HOSTLD)
-endif
 HOSTCC		?= gcc
-ifeq ($(origin CC), default)
 CC		:= $(CROSS_COMPILE)$(HOSTCC)
-endif
 CPP		:= $(CC) -E
 AS		:= $(CROSS_COMPILE)as
 AR		:= $(CROSS_COMPILE)ar
@@ -22,8 +18,7 @@ MAKE		:= make
 MKDIR		:= mkdir -p
 AWK		:= awk
 PERL		:= perl
-FULL_PYTHON	:= $(shell which python2 2>/dev/null || which python3 2>/dev/null)
-PYTHON		?= $(shell basename $(FULL_PYTHON))
+PYTHON		:= python
 FIND		:= find
 SH		:= $(shell if [ -x "$$BASH" ]; then echo $$BASH;        \
                         else if [ -x /bin/bash ]; then echo /bin/bash;  \

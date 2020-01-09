@@ -1,4 +1,3 @@
-#include <stdlib.h>
 #include <sys/ptrace.h>
 #include <sys/types.h>
 #include <compel/plugins/std/syscall-codes.h>
@@ -66,8 +65,7 @@ int sigreturn_prep_fpu_frame_plain(struct rt_sigframe *sigframe,
 }
 
 #define PTRACE_GETVFPREGS 27
-int get_task_regs(pid_t pid, user_regs_struct_t *regs, save_regs_t save,
-		  void *arg, __maybe_unused unsigned long flags)
+int get_task_regs(pid_t pid, user_regs_struct_t *regs, save_regs_t save, void *arg)
 {
 	user_fpregs_struct_t vfp;
 	int ret = -1;

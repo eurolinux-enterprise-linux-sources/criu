@@ -3,6 +3,7 @@
 import socket
 import sys
 import rpc_pb2 as rpc
+import argparse
 import subprocess
 
 print('Connecting to CRIU in swrk mode to check the version:')
@@ -32,8 +33,8 @@ if resp.type != rpc.VERSION:
 else:
 	if resp.success:
 		print('RPC: Success')
-		print('CRIU major %d' % resp.version.major_number)
-		print('CRIU minor %d' % resp.version.minor_number)
+		print('CRIU major %d' % resp.version.major)
+		print('CRIU minor %d' % resp.version.minor)
 		if resp.version.HasField('gitid'):
 			print('CRIU gitid %s' % resp.version.gitid)
 		if resp.version.HasField('sublevel'):
@@ -43,5 +44,5 @@ else:
 		if resp.version.HasField('name'):
 			print('CRIU name %s' % resp.version.name)
 	else:
-		print('Fail')
+		print 'Fail'
 		sys.exit(-1)

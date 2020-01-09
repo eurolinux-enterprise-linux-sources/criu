@@ -9,6 +9,7 @@
 #include <sys/signalfd.h>
 #include <sys/ptrace.h>
 #include <sys/wait.h>
+#include <sys/socket.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <linux/if.h>
@@ -20,8 +21,8 @@
 #include <netinet/in.h>
 #include <sys/prctl.h>
 #include <sched.h>
-#include <sys/mount.h>
 #include <linux/aio_abi.h>
+#include <sys/mount.h>
 
 #include "../soccr/soccr.h"
 
@@ -249,7 +250,7 @@ static int check_fcntl(void)
 		return -1;
 
 	if (fcntl(fd, F_GETOWNER_UIDS, (long)v)) {
-		pr_perror("Can't fetch file owner UIDs");
+		pr_perror("Can'r fetch file owner UIDs");
 		close(fd);
 		return -1;
 	}
@@ -745,7 +746,7 @@ static int check_aio_remap(void)
 	if (!len)
 		return -1;
 
-	naddr = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, 0, 0);
+	naddr = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, 0, 0);
 	if (naddr == MAP_FAILED) {
 		pr_perror("Can't find place for new AIO ring");
 		return -1;
@@ -1025,7 +1026,7 @@ static int check_compat_cr(void)
 		return 0;
 	pr_warn("compat_cr is not supported. Requires kernel >= v4.12\n");
 #else
-	pr_warn("CRIU built without CONFIG_COMPAT - can't C/R compatible tasks\n");
+	pr_warn("CRIU built without CONFIG_COMPAT - can't C/R ia32\n");
 #endif
 	return -1;
 }
@@ -1059,37 +1060,6 @@ static int check_can_map_vdso(void)
 		return 0;
 	pr_warn("Do not have API to map vDSO - will use mremap() to restore vDSO\n");
 	return -1;
-}
-
-static int check_sk_netns(void)
-{
-	if (!kdat.sk_ns)
-		return -1;
-
-	return 0;
-}
-
-static int check_sk_unix_file(void)
-{
-	if (!kdat.sk_unix_file)
-		return -1;
-
-	return 0;
-}
-
-static int check_kcmp_epoll(void)
-{
-	if (!kdat.has_kcmp_epoll_tfd)
-		return -1;
-
-	return 0;
-}
-
-static int check_net_diag_raw(void)
-{
-	check_sock_diag();
-	return (socket_test_collect_bit(AF_INET, IPPROTO_RAW) &&
-		socket_test_collect_bit(AF_INET6, IPPROTO_RAW)) ? 0 : -1;
 }
 
 static int (*chk_feature)(void);
@@ -1196,11 +1166,6 @@ int cr_check(void)
 		ret |= check_userns();
 		ret |= check_loginuid();
 		ret |= check_can_map_vdso();
-		ret |= check_uffd();
-		ret |= check_uffd_noncoop();
-		ret |= check_sk_netns();
-		ret |= check_kcmp_epoll();
-		ret |= check_net_diag_raw();
 	}
 
 	/*
@@ -1230,49 +1195,6 @@ static int check_tun(void)
 	return check_tun_cr(-1);
 }
 
-static int check_tun_netns(void)
-{
-	bool has = false;
-	check_tun_netns_cr(&has);
-	return has ? 0 : -1;
-}
-
-static int check_nsid(void)
-{
-	if (!kdat.has_nsid) {
-		pr_warn("NSID isn't supported\n");
-		return -1;
-	}
-
-	return 0;
-}
-
-static int check_link_nsid(void)
-{
-	if (!kdat.has_link_nsid) {
-		pr_warn("NSID isn't supported\n");
-		return -1;
-	}
-
-	return 0;
-}
-
-static int check_external_net_ns(void)
-{
-	/*
-	 * This is obviously not a real check. This only exists, so that
-	 * CRIU clients/users can check if this CRIU version supports the
-	 * external network namespace feature. Theoretically the CRIU client
-	 * or user could also parse the version, but especially for CLI users
-	 * version comparison in the shell is not easy.
-	 * This feature check does not exist for RPC as RPC has a special
-	 * version call which does not require string parsing and the external
-	 * network namespace feature is available for all CRIU versions newer
-	 * than 3.9.
-	 */
-	return 0;
-}
-
 struct feature_list {
 	char *name;
 	int (*func)();
@@ -1284,7 +1206,6 @@ static struct feature_list feature_list[] = {
 	{ "aio_remap", check_aio_remap },
 	{ "timerfd", check_timerfd },
 	{ "tun", check_tun },
-	{ "tun_ns", check_tun_netns },
 	{ "userns", check_userns },
 	{ "fdinfo_lock", check_fdinfo_lock },
 	{ "seccomp_suspend", check_ptrace_suspend_seccomp },
@@ -1297,13 +1218,6 @@ static struct feature_list feature_list[] = {
 	{ "uffd", check_uffd },
 	{ "uffd-noncoop", check_uffd_noncoop },
 	{ "can_map_vdso", check_can_map_vdso},
-	{ "sk_ns", check_sk_netns },
-	{ "sk_unix_file", check_sk_unix_file },
-	{ "net_diag_raw", check_net_diag_raw },
-	{ "nsid", check_nsid },
-	{ "link_nsid", check_link_nsid},
-	{ "kcmp_epoll", check_kcmp_epoll},
-	{ "external_net_ns", check_external_net_ns},
 	{ NULL, NULL },
 };
 

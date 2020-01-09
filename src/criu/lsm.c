@@ -5,8 +5,8 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-#include "common/config.h"
 #include "kerndat.h"
+#include "config.h"
 #include "pstree.h"
 #include "util.h"
 #include "cr_options.h"
@@ -62,41 +62,45 @@ static int apparmor_get_label(pid_t pid, char **profile_name)
 static int selinux_get_label(pid_t pid, char **output)
 {
 	security_context_t ctx;
-	char *pos;
+	char *pos, *last;
 	int i;
-	int ret = -1;
 
 	if (getpidcon_raw(pid, &ctx) < 0) {
 		pr_perror("getting selinux profile failed");
 		return -1;
 	}
 
-	*output = xstrdup((char *)ctx);
-	if (!*output)
-		goto err;
+	*output = NULL;
 
 	/*
-	 * Make sure it is a valid SELinux label. It should look like this:
+	 * Since SELinux attributes can be finer grained than at the task
+	 * level, and we currently don't try to dump any of these other bits,
+	 * let's only allow unconfined profiles, which look something like:
 	 *
 	 *	unconfined_u:unconfined_r:unconfined_t:s0-s0:c0.c1023
 	 */
 	pos = (char*)ctx;
 	for (i = 0; i < 3; i++) {
+		last = pos;
 		pos = strstr(pos, ":");
 		if (!pos) {
 			pr_err("Invalid selinux context %s\n", (char *)ctx);
-			xfree(*output);
-			goto err;
+			freecon(ctx);
+			return -1;
 		}
 
 		*pos = 0;
+		if (!strstartswith(last, "unconfined_")) {
+			pr_err("Non unconfined selinux contexts not supported %s\n", last);
+			freecon(ctx);
+			return -1;
+		}
+
 		pos++;
 	}
-
-	ret = 0;
-err:
 	freecon(ctx);
-	return ret;
+
+	return 0;
 }
 #endif
 
@@ -226,16 +230,15 @@ int lsm_check_opts(void)
 			return -1;
 		}
 
-		SET_CHAR_OPTS(lsm_profile, aux);
+		opts.lsm_profile = aux;
 	} else if (strcmp(opts.lsm_profile, "selinux") == 0) {
 		if (kdat.lsm != LSMTYPE__SELINUX) {
 			pr_err("selinux LSM specified but selinux not supported by kernel\n");
 			return -1;
 		}
 
-		SET_CHAR_OPTS(lsm_profile, aux);
+		opts.lsm_profile = aux;
 	} else if (strcmp(opts.lsm_profile, "none") == 0) {
-		xfree(opts.lsm_profile);
 		opts.lsm_profile = NULL;
 	} else {
 		pr_err("unknown lsm %s\n", opts.lsm_profile);

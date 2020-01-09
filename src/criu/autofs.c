@@ -149,9 +149,7 @@ static int autofs_find_pipe_read_end(int pgrp, long ino, int *read_fd)
 			goto out;
 		}
 
-		ret = xatoi(de->d_name, &fd);
-		if (ret)
-			goto out;
+		fd = atoi(de->d_name);
 
 		found = autofs_check_fd_stat(&buf, pgrp, fd, ino, &mode);
 		if (found < 0)
@@ -225,20 +223,19 @@ static int parse_options(char *options, AutofsEntry *entry, long *pipe_ino)
 
 	for (i = 0; i < nr_opts; i++) {
 		char *opt = opts[i];
-		int err = 0;
 
 		if (!strncmp(opt, "fd=", strlen("fd=")))
-			err = xatoi(opt + strlen("fd="), &entry->fd);
+			entry->fd = atoi(opt + strlen("fd="));
 		else if (!strncmp(opt, "pipe_ino=", strlen("pipe_ino=")))
-			err = xatol(opt + strlen("pipe_ino="), pipe_ino);
+			*pipe_ino = atoi(opt + strlen("pipe_ino="));
 		else if (!strncmp(opt, "pgrp=", strlen("pgrp=")))
-			err = xatoi(opt + strlen("pgrp="), &entry->pgrp);
+			entry->pgrp = atoi(opt + strlen("pgrp="));
 		else if (!strncmp(opt, "timeout=", strlen("timeout=")))
-			err = xatoi(opt + strlen("timeout="), &entry->timeout);
+			entry->timeout = atoi(opt + strlen("timeout="));
 		else if (!strncmp(opt, "minproto=", strlen("minproto=")))
-			err = xatoi(opt + strlen("minproto="), &entry->minproto);
+			entry->minproto = atoi(opt + strlen("minproto="));
 		else if (!strncmp(opt, "maxproto=", strlen("maxproto=")))
-			err = xatoi(opt + strlen("maxproto="), &entry->maxproto);
+			entry->maxproto = atoi(opt + strlen("maxproto="));
 		else if (!strcmp(opt, "indirect"))
 			entry->mode = AUTOFS_MODE_INDIRECT;
 		else if (!strcmp(opt, "offset"))
@@ -246,12 +243,9 @@ static int parse_options(char *options, AutofsEntry *entry, long *pipe_ino)
 		else if (!strcmp(opt, "direct"))
 			entry->mode = AUTOFS_MODE_DIRECT;
 		else if (!strncmp(opt, "uid=", strlen("uid=")))
-			err = xatoi(opt + strlen("uid="), &entry->uid);
+			entry->uid = atoi(opt + strlen("uid="));
 		else if (!strncmp(opt, "gid=", strlen("gid=")))
-			err = xatoi(opt + strlen("gid="), &entry->gid);
-
-		if (err)
-			return -1;
+			entry->gid = atoi(opt + strlen("gid="));
 	}
 
 	for (i = 0; i < nr_opts; i++)
@@ -314,9 +308,7 @@ static int autofs_revisit_options(struct mount_info *pm)
 
 		while ((token = strsep(&str, " ")) != NULL) {
 			if (mnt_id == -1) {
-				ret = xatoi(token, &mnt_id);
-				if (ret)
-					goto close_proc;
+				mnt_id = atoi(token);
 				if (mnt_id != pm->mnt_id)
 					break;
 			} else if (strstr(token, "pipe_ino=")) {
@@ -345,7 +337,7 @@ free_str:
 
 /*
  * To access the mount point we have to set proper mount namespace.
- * But, unfortunately, we have to set proper pid namespace as well,
+ * But, unfortunatelly, we have to set proper pid namespace as well,
  * because otherwise autofs driver won't find the autofs master.
  */
 static int access_autofs_mount(struct mount_info *pm)
@@ -642,7 +634,7 @@ static int autofs_mnt_set_pipefd(const autofs_info_t *i, int mnt_fd)
 {
 	struct autofs_dev_ioctl param;
 
-	/* Restore pipe and pgrp only for non-catatonic mounts */
+	/* Restore pipe and pgrp only for non-cataonic mounts */
 	if (i->entry->fd == AUTOFS_CATATONIC_FD)
 		return 0;
 
@@ -828,7 +820,7 @@ static autofs_info_t *autofs_create_info(const struct mount_info *mi,
 	memcpy(i->entry, info->entry, sizeof(*info->entry));
 	i->mnt_dev = info->mnt_dev;
 
-	/* We need mountpoint to be able to open mount in autofs_post_open()
+	/* We need mountpoint to be able to opne mount in autofs_post_open()
 	 * callback. And this have to be internal path, because process cwd
 	 * will be changed already. That's why ns_mountpoint is used. */
 	strcpy(i->mnt_path, mi->ns_mountpoint);
@@ -857,6 +849,29 @@ static struct fdinfo_list_entry *autofs_pipe_le(struct pstree_item *master,
 		return NULL;
 	}
 	return ple;
+}
+
+static int autofs_create_fle(struct pstree_item *task, FdinfoEntry *fe,
+			     struct file_desc *desc)
+{
+	struct fdinfo_list_entry *le;
+	struct rst_info *rst_info = rsti(task);
+
+	le = shmalloc(sizeof(*le) + sizeof(int));
+	if (!le)
+		return -1;
+	le = (void *)ALIGN((long)le, sizeof(int));
+
+	fle_init(le, vpid(task), fe);
+
+	collect_task_fd(le, rst_info);
+
+	list_add_tail(&le->desc_list, &desc->fd_info_head);
+	le->desc = desc;
+
+	pr_info("autofs: added pipe fd %d, flags %#x to %d (with post_open)\n",
+			le->fe->fd, le->fe->flags, le->pid);
+	return 0;
 }
 
 static int autofs_open_pipefd(struct file_desc *d, int *new_fd)
@@ -892,7 +907,6 @@ static int autofs_create_pipe(struct pstree_item *task, autofs_info_t *i,
 		return -1;
 	memcpy(ops, pi->d.ops, sizeof(*ops));
 	ops->open = autofs_open_pipefd;
-	ops->type = FD_TYPES__AUTOFS_PIPE;
 
 	pe = shmalloc(sizeof(*pe));
 	if (!pe)
@@ -911,11 +925,8 @@ static int autofs_create_pipe(struct pstree_item *task, autofs_info_t *i,
 	fe = dup_fdinfo(ple->fe, fd, flags);
 	if (!fe)
 		return -1;
-	fe->type = FD_TYPES__AUTOFS_PIPE;
 
-	pr_info("autofs: adding pipe fd %d, flags %#x to %d (with post_open)\n",
-		fe->fd, fe->flags, vpid(task));
-	return collect_fd(vpid(task), fe, rsti(task), false);
+	return autofs_create_fle(task, fe, &i->pi.d);
 }
 
 static int autofs_add_mount_info(struct pprep_head *ph)

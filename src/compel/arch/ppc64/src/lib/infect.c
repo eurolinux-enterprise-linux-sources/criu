@@ -22,9 +22,6 @@
 #define NT_PPC_TM_SPR   0x10c           /* TM Special Purpose Registers */
 #endif
 
-unsigned __page_size = 0;
-unsigned __page_shift = 0;
-
 /*
  * Injected syscall instruction
  */
@@ -374,8 +371,7 @@ static int __get_task_regs(pid_t pid, user_regs_struct_t *regs,
 	return 0;
 }
 
-int get_task_regs(pid_t pid, user_regs_struct_t *regs, save_regs_t save,
-		  void *arg, __maybe_unused unsigned long flags)
+int get_task_regs(pid_t pid, user_regs_struct_t *regs, save_regs_t save, void *arg)
 {
 	user_fpregs_struct_t fpregs;
 	int ret;

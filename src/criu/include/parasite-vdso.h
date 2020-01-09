@@ -1,7 +1,7 @@
 #ifndef __CR_PARASITE_VDSO_H__
 #define __CR_PARASITE_VDSO_H__
 
-#include "common/config.h"
+#include "config.h"
 
 #ifdef CONFIG_VDSO
 

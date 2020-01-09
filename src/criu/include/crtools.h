@@ -12,8 +12,6 @@
 
 extern int check_img_inventory(void);
 extern int write_img_inventory(InventoryEntry *he);
-extern int inventory_save_uptime(InventoryEntry *he);
-extern InventoryEntry *get_parent_inventory(void);
 extern int prepare_inventory(InventoryEntry *he);
 struct pprep_head {
 	int (*actor)(struct pprep_head *);

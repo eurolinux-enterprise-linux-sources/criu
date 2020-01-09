@@ -3,7 +3,7 @@
 
 #include <compel/ptrace.h>
 #include <linux/types.h>
-#include "common/config.h"
+#include "config.h"
 
 #ifndef CONFIG_HAS_PTRACE_PEEKSIGINFO
 struct ptrace_peeksiginfo_args {

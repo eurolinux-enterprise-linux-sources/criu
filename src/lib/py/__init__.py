@@ -1,3 +1,3 @@
-from . import rpc_pb2 as rpc
-from . import images
-from .criu import *
+import rpc_pb2 as rpc
+import images
+from criu import *

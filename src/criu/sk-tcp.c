@@ -8,7 +8,6 @@
 
 #include "../soccr/soccr.h"
 
-#include "common/config.h"
 #include "cr_options.h"
 #include "util.h"
 #include "common/list.h"
@@ -20,6 +19,7 @@
 #include "image.h"
 #include "namespaces.h"
 #include "xmalloc.h"
+#include "config.h"
 #include "kerndat.h"
 #include "restorer.h"
 #include "rst-malloc.h"
@@ -27,13 +27,11 @@
 #include "protobuf.h"
 #include "images/tcp-stream.pb-c.h"
 
-#undef  LOG_PREFIX
-#define LOG_PREFIX "tcp: "
 
 static LIST_HEAD(cpt_tcp_repair_sockets);
 static LIST_HEAD(rst_tcp_repair_sockets);
 
-static int tcp_repair_established(int fd, struct inet_sk_desc *sk)
+static int tcp_repair_establised(int fd, struct inet_sk_desc *sk)
 {
 	int ret;
 	struct libsoccr_sk *socr;
@@ -225,7 +223,7 @@ int dump_one_tcp(int fd, struct inet_sk_desc *sk)
 
 	pr_info("Dumping TCP connection\n");
 
-	if (tcp_repair_established(fd, sk))
+	if (tcp_repair_establised(fd, sk))
 		return -1;
 
 	if (dump_tcp_conn_state(sk))
@@ -294,7 +292,7 @@ static int restore_tcp_conn_state(int sk, struct libsoccr_sk *socr, struct inet_
 		goto err_c;
 	}
 
-	data.state = ii->ie->state;
+	data.state = ii->ie->state;;
 	data.inq_len = tse->inq_len;
 	data.inq_seq = tse->inq_seq;
 	data.outq_len = tse->outq_len;
@@ -389,7 +387,7 @@ int prepare_tcp_socks(struct task_restore_args *ta)
 
 		/*
 		 * rst_tcp_repair_sockets contains all sockets, so we need to
-		 * select sockets which restored in a current process.
+		 * select sockets which restored in a current porcess.
 		 */
 		if (ii->sk_fd == -1)
 			continue;
@@ -421,10 +419,8 @@ int restore_one_tcp(int fd, struct inet_sk_info *ii)
 	if (!sk)
 		return -1;
 
-	if (restore_tcp_conn_state(fd, sk, ii)) {
-		libsoccr_release(sk);
+	if (restore_tcp_conn_state(fd, sk, ii))
 		return -1;
-	}
 
 	return 0;
 }

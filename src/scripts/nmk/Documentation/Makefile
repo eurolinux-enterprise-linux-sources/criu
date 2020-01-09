@@ -1,10 +1,6 @@
-ifneq ($(USE_ASCIIDOCTOR),)
-ASCIIDOC       := asciidoctor
-XMLTO          :=
-else
 ASCIIDOC	:= asciidoc
+A2X		:= a2x
 XMLTO		:= xmlto
-endif
 PS2PDF		:= ps2pdf
 
 SRC		+= nmk.txt
@@ -24,18 +20,14 @@ all: check $(MANS)
 .PHONY: all ps pdf check clean
 
 check:
-	$(Q) for B in $(ASCIIDOC) $(XMLTO); do	\
+	$(Q) for B in $(ASCIIDOC) $(A2X) $(XMLTO); do	\
 		$$B --version > /dev/null || exit 1;	\
 	done
 
 %.8: %.txt
 	$(call msg-gen, $@)
-ifneq ($(USE_ASCIIDOCTOR),)
-	$(Q) $(ASCIIDOC) -b manpage -d manpage -o $@ $<
-else
 	$(Q) $(ASCIIDOC) -b docbook -d manpage -o $(patsubst %.8,%.xml,$@) $<
 	$(Q) $(XMLTO) man --skip-validation $(patsubst %.8,%.xml,$@) 2>/dev/null
-endif
 
 %.ps: %.8
 	$(call msg-gen, $@)

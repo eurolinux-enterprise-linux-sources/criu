@@ -33,10 +33,8 @@
 #include "common/scm.h"
 #include "common/scm-code.c"
 
-#ifndef UNIX_PATH_MAX
 #define UNIX_PATH_MAX (sizeof(struct sockaddr_un) - \
 			(size_t)((struct sockaddr_un *) 0)->sun_path)
-#endif
 
 #define PARASITE_STACK_SIZE	(16 << 10)
 
@@ -139,7 +137,7 @@ int compel_interrupt_task(int pid)
 	 */
 	ret = ptrace(PTRACE_INTERRUPT, pid, NULL, NULL);
 	if (ret < 0) {
-		pr_warn("SEIZE %d: can't interrupt task: %s\n", pid, strerror(errno));
+		pr_warn("SEIZE %d: can't interrupt task: %s", pid, strerror(errno));
 		if (ptrace(PTRACE_DETACH, pid, NULL, NULL))
 			pr_perror("Unable to detach from %d", pid);
 	}
@@ -615,9 +613,6 @@ static int parasite_init_daemon(struct parasite_ctl *ctl)
 
 	args->sigframe = (uintptr_t)ctl->rsigframe;
 	args->log_level = compel_log_get_loglevel();
-#ifdef ARCH_HAS_LONG_PAGES
-	args->page_size = PAGE_SIZE;
-#endif
 
 	futex_set(&args->daemon_connected, 0);
 
@@ -672,8 +667,7 @@ static int parasite_start_daemon(struct parasite_ctl *ctl)
 	 * while in daemon it is not such.
 	 */
 
-	if (get_task_regs(pid, &ctl->orig.regs, ictx->save_regs,
-			ictx->regs_arg, ictx->flags)) {
+	if (get_task_regs(pid, &ctl->orig.regs, ictx->save_regs, ictx->regs_arg)) {
 		pr_err("Can't obtain regs for thread %d\n", pid);
 		return -1;
 	}
@@ -701,8 +695,8 @@ static int parasite_mmap_exchange(struct parasite_ctl *ctl, unsigned long size)
 
 	ctl->map_length = round_up(size, page_size());
 
-	fd = ctl->ictx.open_proc(ctl->rpid, O_RDWR, "map_files/%lx-%lx",
-		 (long)ctl->remote_map, (long)ctl->remote_map + ctl->map_length);
+	fd = ctl->ictx.open_proc(ctl->rpid, O_RDWR, "map_files/%p-%p",
+		 ctl->remote_map, ctl->remote_map + ctl->map_length);
 	if (fd < 0)
 		return -1;
 
@@ -1130,9 +1124,15 @@ static int save_regs_plain(void *to, user_regs_struct_t *r, user_fpregs_struct_t
 	return 0;
 }
 
+#ifndef RT_SIGFRAME_UC_SIGMASK
+#define RT_SIGFRAME_UC_SIGMASK(sigframe)				\
+	(k_rtsigset_t*)&RT_SIGFRAME_UC(sigframe)->uc_sigmask
+#endif
+
 static int make_sigframe_plain(void *from, struct rt_sigframe *f, struct rt_sigframe *rtf, k_rtsigset_t *b)
 {
 	struct plain_regs_struct *prs = from;
+	k_rtsigset_t *blk_sigset;
 
 	/*
 	 * Make sure it's zeroified.
@@ -1142,8 +1142,11 @@ static int make_sigframe_plain(void *from, struct rt_sigframe *f, struct rt_sigf
 	if (sigreturn_prep_regs_plain(f, &prs->regs, &prs->fpregs))
 		return -1;
 
+	blk_sigset = RT_SIGFRAME_UC_SIGMASK(f);
 	if (b)
-		rt_sigframe_copy_sigset(f, b);
+		memcpy(blk_sigset, b, sizeof(k_rtsigset_t));
+	else
+		memset(blk_sigset, 0, sizeof(k_rtsigset_t));
 
 	if (RT_SIGFRAME_HAS_FPU(f)) {
 		if (sigreturn_prep_fpu_frame_plain(f, rtf))
@@ -1344,7 +1347,7 @@ void *compel_parasite_args_p(struct parasite_ctl *ctl)
 	return ctl->addr_args;
 }
 
-void *compel_parasite_args_s(struct parasite_ctl *ctl, unsigned long args_size)
+void *compel_parasite_args_s(struct parasite_ctl *ctl, int args_size)
 {
 	BUG_ON(args_size > ctl->args_size);
 	return compel_parasite_args_p(ctl);
@@ -1566,7 +1569,7 @@ k_rtsigset_t *compel_task_sigmask(struct parasite_ctl *ctl)
 
 int compel_get_thread_regs(struct parasite_thread_ctl *tctl, save_regs_t save, void * arg)
 {
-	return get_task_regs(tctl->tid, &tctl->th.regs, save, arg, tctl->ctl->ictx.flags);
+	return get_task_regs(tctl->tid, &tctl->th.regs, save, arg);
 }
 
 struct infect_ctx *compel_infect_ctx(struct parasite_ctl *ctl)
@@ -1577,14 +1580,4 @@ struct infect_ctx *compel_infect_ctx(struct parasite_ctl *ctl)
 struct parasite_blob_desc *compel_parasite_blob_desc(struct parasite_ctl *ctl)
 {
 	return &ctl->pblob;
-}
-
-uint64_t compel_get_leader_sp(struct parasite_ctl *ctl)
-{
-	return REG_SP(ctl->orig.regs);
-}
-
-uint64_t compel_get_thread_sp(struct parasite_thread_ctl *tctl)
-{
-	return REG_SP(tctl->th.regs);
 }

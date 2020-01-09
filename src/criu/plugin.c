@@ -10,7 +10,6 @@
 #include "common/compiler.h"
 #include "xmalloc.h"
 #include "plugin.h"
-#include "servicefd.h"
 #include "common/list.h"
 #include "log.h"
 
@@ -89,11 +88,6 @@ static int verify_plugin(cr_plugin_desc_t *d)
 	}
 
 	return 0;
-}
-
-int criu_get_image_dir(void)
-{
-	return get_service_fd(IMG_FD_OFF);
 }
 
 static int cr_lib_load(int stage, char *path)
@@ -209,12 +203,12 @@ int cr_plugin_init(int stage)
 	if (opts.libdir == NULL) {
 		path = getenv("CRIU_LIBS_DIR");
 		if (path)
-			SET_CHAR_OPTS(libdir, path);
+			opts.libdir = path;
 		else {
 			if (access(CR_PLUGIN_DEFAULT, F_OK))
 				return 0;
 
-			SET_CHAR_OPTS(libdir, CR_PLUGIN_DEFAULT);
+			opts.libdir = CR_PLUGIN_DEFAULT;
 		}
 	}
 

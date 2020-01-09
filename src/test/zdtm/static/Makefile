@@ -10,10 +10,8 @@ TST_NOFILE	:=				\
 		caps00				\
 		wait00				\
 		zombie00			\
-		zombie01			\
 		fpu00				\
 		fpu01				\
-		fpu02				\
 		arm-neon00			\
 		futex				\
 		futex-rl			\
@@ -28,9 +26,7 @@ TST_NOFILE	:=				\
 		sched_policy00			\
 		socket_listen			\
 		socket_listen6			\
-		socket_listen4v6		\
 		socket_udp			\
-		socket_udp-corked		\
 		socket6_udp			\
 		socket_udp_shutdown		\
 		sk-freebind			\
@@ -66,45 +62,33 @@ TST_NOFILE	:=				\
 		sockets02			\
 		sockets_spair			\
 		socket_queues			\
-		socket-raw			\
 		socket-tcp			\
-		socket-tcp-reseted		\
 		socket-tcp6			\
-		socket-tcp4v6			\
 		socket-tcp-local		\
-		socket-tcp-reuseport		\
 		socket-tcp-nfconntrack		\
 		socket-tcp6-local		\
-		socket-tcp4v6-local		\
 		socket-tcpbuf			\
 		socket-tcpbuf-local		\
 		socket-tcpbuf6-local		\
 		socket-tcpbuf6			\
 		socket-tcp-fin-wait1		\
 		socket-tcp6-fin-wait1		\
-		socket-tcp4v6-fin-wait1		\
 		socket-tcp-fin-wait2		\
 		socket-tcp6-fin-wait2		\
-		socket-tcp4v6-fin-wait2		\
 		socket-tcp-close-wait		\
 		socket-tcp6-close-wait		\
-		socket-tcp4v6-close-wait		\
 		socket-tcp-last-ack		\
 		socket-tcp6-last-ack		\
-		socket-tcp4v6-last-ack		\
 		socket-tcp-closing		\
 		socket-tcp6-closing		\
-		socket-tcp4v6-closing		\
 		socket-tcp-closed		\
 		socket-tcp-closed-last-ack	\
 		socket-tcp6-closed		\
-		socket-tcp4v6-closed		\
 		socket-tcp-close0 		\
 		socket-tcp-close1 		\
 		socket-tcp-unconn		\
 		socket-tcp6-unconn		\
 		socket-tcp-syn-sent		\
-		socket-tcp-skip-in-flight       \
 		sock_opts00			\
 		sock_opts01			\
 		sk-unix-unconn			\
@@ -122,7 +106,6 @@ TST_NOFILE	:=				\
 		file_fown			\
 		proc-self			\
 		eventfs00			\
-		epoll				\
 		signalfd00			\
 		inotify_irmap			\
 		fanotify00			\
@@ -158,7 +141,6 @@ TST_NOFILE	:=				\
 		grow_map02			\
 		grow_map03			\
 		tun				\
-		tun_ns				\
 		stopped				\
 		stopped01			\
 		stopped02			\
@@ -171,21 +153,13 @@ TST_NOFILE	:=				\
 		remap_dead_pid			\
 		remap_dead_pid_root			\
 		scm00				\
-		scm01				\
-		scm02				\
-		scm03				\
-		scm04				\
-		scm05				\
-		scm06				\
 		aio00				\
 		aio01				\
 		fd				\
-		fd01				\
 		apparmor				\
 		seccomp_strict			\
 		seccomp_filter			\
 		seccomp_filter_tsync			\
-		seccomp_filter_threads			\
 		seccomp_filter_inheritance		\
 		different_creds			\
 		vsx				\
@@ -197,21 +171,13 @@ TST_NOFILE	:=				\
 		helper_zombie_child		\
 		clone_fs			\
 		macvlan			\
-		sit				\
 		cr_veth				\
 		sock_peercred			\
 		s390x_mmap_high			\
 		uffd-events			\
-		thread_different_uid_gid	\
-		pipe03				\
-		netns_sub			\
-		netns_sub_veth			\
-		unlink_multiple_largefiles	\
-		config_inotify_irmap		\
-		thp_disable			\
-		pid_file			\
-		selinux00			\
 #		jobctl00			\
+
+include ../Makefile.inc
 
 ifneq ($(SRCARCH),arm)
 ifneq ($(COMPAT_TEST),y)
@@ -220,9 +186,7 @@ endif
 endif
 
 ifeq ($(SRCARCH),s390)
-        TST_NOFILE +=	s390x_regs_check	\
-			s390x_gs_threads	\
-			s390x_runtime_instr
+        TST_NOFILE += s390x_regs_check
 endif
 
 TST_FILE	=				\
@@ -265,11 +229,6 @@ TST_FILE	=				\
 		sockets00			\
 		sockets03			\
 		sockets_dgram			\
-		file_lease00			\
-		file_lease01			\
-		file_lease02			\
-		file_lease03			\
-		file_lease04			\
 		file_locks00			\
 		file_locks01			\
 		file_locks02			\
@@ -300,8 +259,6 @@ TST_DIR		=				\
 		mnt_ro_bind			\
 		mount_paths			\
 		bind-mount			\
-		shared_mount_propagation	\
-		overmount_with_shared_parent	\
 		inotify00			\
 		inotify01			\
 		inotify02			\
@@ -311,15 +268,12 @@ TST_DIR		=				\
 		cgroup02			\
 		cgroup03			\
 		cgroup04			\
-		cgroup_ifpriomap		\
 		cgroup_stray		\
 		unlink_fstat04			\
-		unlink_fstat041			\
 		mntns_remap			\
 		mntns_open			\
 		mntns_link_remap		\
 		mntns_ghost			\
-		mntns_ghost01			\
 		mntns_ro_root			\
 		mntns_link_ghost		\
 		mntns_shared_bind		\
@@ -339,14 +293,6 @@ TST_DIR		=				\
 		mnt_enablefs			\
 		autofs				\
 		del_standalone_un		\
-		sk-unix-mntns			\
-		sk-unix01			\
-		unsupported_children_collision  \
-		shared_slave_mount_children	\
-		non_uniform_share_propagation	\
-		private_bind_propagation	\
-		ghost_on_rofs			\
-		overmounted_file		\
 
 TST_DIR_FILE	=				\
 		chroot				\
@@ -377,8 +323,6 @@ PID	= $(TST:%=%.pid)
 OUT	= $(TST:%=%.out)
 STATE	= $(TST_STATE:%=%.state)
 STATE_OUT	= $(TST_STATE:%=%.out)
-
-include ../Makefile.inc
 
 all:	$(TST) criu-rtc.so
 install: all
@@ -472,44 +416,32 @@ different_creds:	LDLIBS += -pthread
 sigpending:		LDLIBS += -pthread
 sigaltstack:		LDLIBS += -pthread
 seccomp_filter_tsync:	LDLIBS += -pthread
-seccomp_filter_threads:	LDLIBS += -pthread
 shm:			CFLAGS += -DNEW_IPC_NS
 msgque:			CFLAGS += -DNEW_IPC_NS
 sem:			CFLAGS += -DNEW_IPC_NS
 posix_timers:		LDLIBS += -lrt -pthread
 remap_dead_pid_root:	CFLAGS += -DREMAP_PID_ROOT
 socket-tcp6:		CFLAGS += -D ZDTM_IPV6
-socket-tcp4v6:		CFLAGS += -D ZDTM_IPV4V6
 socket-tcpbuf6:		CFLAGS += -D ZDTM_IPV6
 socket-tcpbuf-local:	CFLAGS += -D ZDTM_TCP_LOCAL
 socket-tcpbuf6-local:	CFLAGS += -D ZDTM_TCP_LOCAL -D ZDTM_IPV6
 socket-tcp6-local:	CFLAGS += -D ZDTM_TCP_LOCAL -D ZDTM_IPV6
-socket-tcp4v6-local:	CFLAGS += -D ZDTM_TCP_LOCAL -D ZDTM_IPV4V6
 socket-tcp-local:	CFLAGS += -D ZDTM_TCP_LOCAL
 socket-tcp-nfconntrack: CFLAGS += -D ZDTM_TCP_LOCAL -DZDTM_CONNTRACK
 socket_listen6:		CFLAGS += -D ZDTM_IPV6
-socket_listen4v6:	CFLAGS += -D ZDTM_IPV4V6
 socket-tcp6-closed:	CFLAGS += -D ZDTM_IPV6
-socket-tcp6-closed:	CFLAGS += -D ZDTM_IPV4V6
 socket-tcp-closed-last-ack:	CFLAGS += -D ZDTM_TCP_LAST_ACK
-socket-tcp-skip-in-flight:	CFLAGS += -D ZDTM_IPV4V6
-tun_ns:			CFLAGS += -DTUN_NS
 mnt_ext_manual:		CFLAGS += -D ZDTM_EXTMAP_MANUAL
 sigpending:		LDLIBS += -lrt
 vdso01:			LDLIBS += -lrt
-scm01:			CFLAGS += -DKEEP_SENT_FD
-scm02:			CFLAGS += -DSEND_BOTH
-scm04:			CFLAGS += -DSEPARATE
 mntns_link_remap:	CFLAGS += -DZDTM_LINK_REMAP
 mntns_shared_bind02:	CFLAGS += -DSHARED_BIND02
 mntns_root_bind02:	CFLAGS += -DROOT_BIND02
 maps02: get_smaps_bits.o
 mlock_setuid: get_smaps_bits.o
-thp_disable: get_smaps_bits.o
 inotify01:		CFLAGS += -DINOTIFY01
 unlink_fstat01+:	CFLAGS += -DUNLINK_OVER
 unlink_fstat04:		CFLAGS += -DUNLINK_FSTAT04
-unlink_fstat041:		CFLAGS += -DUNLINK_FSTAT041 -DUNLINK_FSTAT04
 ghost_holes01:		CFLAGS += -DTAIL_HOLE
 ghost_holes02:		CFLAGS += -DHEAD_HOLE
 sk-freebind-false:	CFLAGS += -DZDTM_FREEBIND_FALSE
@@ -526,26 +458,18 @@ socket-tcp-fin-wait1:	CFLAGS += -D ZDTM_TCP_FIN_WAIT1
 socket-tcp-fin-wait2:	CFLAGS += -D ZDTM_TCP_FIN_WAIT2
 socket-tcp6-fin-wait1:	CFLAGS += -D ZDTM_TCP_FIN_WAIT1 -D ZDTM_IPV6
 socket-tcp6-fin-wait2:	CFLAGS += -D ZDTM_TCP_FIN_WAIT2 -D ZDTM_IPV6
-socket-tcp4v6-fin-wait1:	CFLAGS += -D ZDTM_TCP_FIN_WAIT1 -D ZDTM_IPV4V6
-socket-tcp4v6-fin-wait2:	CFLAGS += -D ZDTM_TCP_FIN_WAIT2 -D ZDTM_IPV4V6
 socket-tcp-close-wait:	CFLAGS += -D ZDTM_TCP_CLOSE_WAIT
 socket-tcp6-close-wait:	CFLAGS += -D ZDTM_TCP_CLOSE_WAIT -D ZDTM_IPV6
-socket-tcp4v6-close-wait:	CFLAGS += -D ZDTM_TCP_CLOSE_WAIT -D ZDTM_IPV4V6
 socket-tcp-last-ack:	CFLAGS += -D ZDTM_TCP_LAST_ACK
 socket-tcp6-last-ack:	CFLAGS += -D ZDTM_TCP_LAST_ACK -D ZDTM_IPV6
 socket-tcp6-closing:	CFLAGS += -D ZDTM_IPV6
 socket-tcp6-unconn:	CFLAGS += -D ZDTM_IPV6
-socket-tcp4v6-last-ack:	CFLAGS += -D ZDTM_TCP_LAST_ACK -D ZDTM_IPV4V6
-socket-tcp4v6-closing:	CFLAGS += -D ZDTM_IPV4V6
 
 pty-console:		CFLAGS += -D ZDTM_DEV_CONSOLE
 
 shm-unaligned:		CFLAGS += -DZDTM_SHM_UNALIGNED
 
 s390x_regs_check:	LDFLAGS += -pthread
-s390x_gs_threads:	LDFLAGS += -pthread
-
-thread_different_uid_gid:	LDLIBS += -pthread -lcap
 
 $(LIB):	force
 	$(Q) $(MAKE) -C $(LIBDIR)

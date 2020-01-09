@@ -20,10 +20,6 @@
 #include "xmalloc.h"
 #include "images/packet-sock.pb-c.h"
 #include "images/fdinfo.pb-c.h"
-#include "namespaces.h"
-
-#undef  LOG_PREFIX
-#define LOG_PREFIX "packet: "
 
 struct packet_sock_info {
 	PacketSockEntry *pse;
@@ -167,8 +163,6 @@ static int dump_one_packet_fd(int lfd, u32 id, const struct fd_parms *p)
 	sd->sd.already_dumped = 1;
 
 	psk.id = sd->file_id = id;
-	psk.ns_id = sd->sd.sk_ns->id;
-	psk.has_ns_id = true;
 	psk.type = sd->type;
 	psk.flags = p->flags;
 	psk.fown = (FownEntry *)&p->fown;
@@ -253,7 +247,7 @@ static int packet_save_mreqs(struct packet_sock_desc *sd, struct nlattr *mc)
 	return 0;
 }
 
-int packet_receive_one(struct nlmsghdr *hdr, struct ns_id *ns, void *arg)
+int packet_receive_one(struct nlmsghdr *hdr, void *arg)
 {
 	struct packet_diag_msg *m;
 	struct nlattr *tb[PACKET_DIAG_MAX + 1];
@@ -307,7 +301,7 @@ int packet_receive_one(struct nlmsghdr *hdr, struct ns_id *ns, void *arg)
 		memcpy(sd->tx, RTA_DATA(tb[PACKET_DIAG_TX_RING]), sizeof(*sd->tx));
 	}
 
-	return sk_collect_one(m->pdiag_ino, PF_PACKET, &sd->sd, ns);
+	return sk_collect_one(m->pdiag_ino, PF_PACKET, &sd->sd);
 err:
 	xfree(sd->tx);
 	xfree(sd->rx);
@@ -443,7 +437,7 @@ static int open_packet_sk_spkt(PacketSockEntry *pse, int *new_fd)
 			goto err;
 		}
 
-		memcpy(addr_spkt.sa_data, req.ifr_name, sa_data_size);
+		strncpy(addr_spkt.sa_data, req.ifr_name, sa_data_size);
 		addr_spkt.sa_data[sa_data_size - 1] = 0;
 
 		if (bind(sk, &addr_spkt, sizeof(addr_spkt)) < 0) {
@@ -477,9 +471,6 @@ static int open_packet_sk(struct file_desc *d, int *new_fd)
 	pse = psi->pse;
 
 	pr_info("Opening packet socket id %#x\n", pse->id);
-
-	if (set_netns(pse->ns_id))
-		return -1;
 
 	if (pse->type == SOCK_PACKET)
 		return open_packet_sk_spkt(pse, new_fd);

@@ -21,7 +21,6 @@ TST_NOFILE	=	\
 		socket-tcp6     \
 		shmem		\
 		lazy-thp	\
-		pid_reuse	\
 
 
 TST_FILE	=	\

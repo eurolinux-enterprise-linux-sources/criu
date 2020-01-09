@@ -117,7 +117,7 @@ int main(int argc, char ** argv)
 	}
 
 	/*
-	 * Wait for child to signal us that it has dropped caps.
+	 * Wait for child to signal us that it has droped caps.
 	 */
 	if (read(pipefd[1], &c, 1) != 1) {
 		pr_perror("read");

@@ -69,9 +69,8 @@ static void sbuf_log_init(struct simple_buf *b)
 		n = std_vprint_num(pbuf, sizeof(pbuf), (unsigned)now.tv_usec, &s);
 		pad_num(&s, &n, 6);
 		memcpy(b->bp, s, n);
-		b->bp[n++] = ')';
-		b->bp[n++] = ' ';
-		b->bp += n;
+		b->bp[n] = ')';
+		b->bp += n + 1;
 	}
 
 	n = std_vprint_num(pbuf, sizeof(pbuf), sys_gettid(), &s);
@@ -144,7 +143,6 @@ int std_vprint_num(char *buf, int blen, int num, char **ps)
 	char *s;
 
 	s = &buf[blen - 1];
-	*s-- = 0; /* make sure the returned string is NULL terminated */
 
 	if (num < 0) {
 		neg = 1;
@@ -168,14 +166,15 @@ int std_vprint_num(char *buf, int blen, int num, char **ps)
 done:
 	s++;
 	*ps = s;
-	return blen - (s - buf) - 1;
+	return blen - (s - buf);
 }
 
 static void print_num(int num, struct simple_buf *b)
 {
 	char buf[12], *s;
 
-	std_vprint_num(buf, sizeof(buf), num, &s);
+	buf[11] = '\0';
+	std_vprint_num(buf, sizeof(buf) - 1, num, &s);
 	print_string(s, b);
 }
 

@@ -1,6 +1,6 @@
 #include <unistd.h>
 #include <stdlib.h>
-#include <linux/limits.h>
+#include <dirent.h>
 
 #include "zdtmtst.h"
 

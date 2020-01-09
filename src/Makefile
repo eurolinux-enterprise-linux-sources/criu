@@ -91,7 +91,7 @@ DEFINES			+= -D_GNU_SOURCE
 
 WARNINGS		:= -Wall -Wformat-security
 
-CFLAGS-GCOV		:= --coverage -fno-exceptions -fno-inline -fprofile-update=atomic
+CFLAGS-GCOV		:= --coverage -fno-exceptions -fno-inline
 export CFLAGS-GCOV
 
 ifneq ($(GCOV),)
@@ -127,7 +127,7 @@ HOSTCFLAGS		+= $(WARNINGS) $(DEFINES) -iquote include/
 export CFLAGS USERCLFAGS HOSTCFLAGS
 
 # Default target
-all: criu lib crit
+all: criu lib
 .PHONY: all
 
 #
@@ -181,7 +181,7 @@ criu-deps	+= include/common/asm
 
 #
 # Configure variables.
-export CONFIG_HEADER := include/common/config.h
+export CONFIG_HEADER := criu/include/config.h
 ifeq ($(filter tags etags cscope clean mrproper,$(MAKECMDGOALS)),)
 include Makefile.config
 else
@@ -195,6 +195,8 @@ endif
 $(eval $(call gen-built-in,images))
 criu-deps	+= images/built-in.o
 
+.PHONY: .FORCE
+
 #
 # Compel get used by CRIU, build it earlier
 include Makefile.compel
@@ -203,10 +205,13 @@ include Makefile.compel
 # Next the socket CR library
 #
 SOCCR_A := soccr/libsoccr.a
+SOCCR_CONFIG := soccr/config.h
+$(SOCCR_CONFIG): $(CONFIG_HEADER)
+	$(Q) test -f $@ || ln -s ../$(CONFIG_HEADER) $@
 soccr/Makefile: ;
-soccr/%: $(CONFIG_HEADER) .FORCE
+soccr/%: $(SOCCR_CONFIG) .FORCE
 	$(Q) $(MAKE) $(build)=soccr $@
-soccr/built-in.o: $(CONFIG_HEADER) .FORCE
+soccr/built-in.o: $(SOCCR_CONFIG) .FORCE
 	$(Q) $(MAKE) $(build)=soccr all
 $(SOCCR_A): |soccr/built-in.o
 criu-deps	+= $(SOCCR_A)
@@ -228,22 +233,14 @@ criu: $(criu-deps)
 	$(Q) $(MAKE) $(build)=criu all
 .PHONY: criu
 
-crit/Makefile: ;
-crit/%: criu .FORCE
-	$(Q) $(MAKE) $(build)=crit $@
-crit: criu
-	$(Q) $(MAKE) $(build)=crit all
-.PHONY: crit
-
-
 #
-# Libraries next once crit it ready
+# Libraries next once criu it ready
 # (we might generate headers and such
 # when building criu itself).
 lib/Makefile: ;
-lib/%: crit .FORCE
+lib/%: criu .FORCE
 	$(Q) $(MAKE) $(build)=lib $@
-lib: crit
+lib: criu
 	$(Q) $(MAKE) $(build)=lib all
 .PHONY: lib
 
@@ -255,7 +252,6 @@ clean mrproper:
 	$(Q) $(MAKE) $(build)=compel $@
 	$(Q) $(MAKE) $(build)=compel/plugins $@
 	$(Q) $(MAKE) $(build)=lib $@
-	$(Q) $(MAKE) $(build)=crit $@
 .PHONY: clean mrproper
 
 clean-top:
@@ -268,6 +264,7 @@ clean: clean-top
 
 mrproper-top: clean-top
 	$(Q) $(RM) $(CONFIG_HEADER)
+	$(Q) $(RM) $(SOCCR_CONFIG)
 	$(Q) $(RM) $(VERSION_HEADER)
 	$(Q) $(RM) $(COMPEL_VERSION_HEADER)
 	$(Q) $(RM) include/common/asm
@@ -287,11 +284,11 @@ docs:
 .PHONY: docs
 
 zdtm: all
-	$(Q) $(MAKE) -C test/zdtm all
+	$(Q) MAKEFLAGS= $(MAKE) -C test/zdtm all
 .PHONY: zdtm
 
 test: zdtm
-	$(Q) $(MAKE) -C test
+	$(Q) MAKEFLAGS= $(MAKE) -C test
 .PHONY: test
 
 #
@@ -374,8 +371,6 @@ help:
 
 lint:
 	flake8 --config=scripts/flake8.cfg test/zdtm.py
-	flake8 --config=scripts/flake8.cfg test/inhfd/*.py
-	flake8 --config=scripts/flake8.cfg test/others/rpc/config_file.py
 
 include Makefile.install
 

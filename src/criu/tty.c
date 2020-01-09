@@ -125,7 +125,6 @@ struct tty_dump_info {
 static bool stdin_isatty = false;
 static LIST_HEAD(collected_ttys);
 static LIST_HEAD(all_ttys);
-static int self_stdin_fdid = -1;
 
 /*
  * Usually an application has not that many ttys opened.
@@ -136,7 +135,7 @@ static int self_stdin_fdid = -1;
  * Pretty acceptable trade off in a sake of simplicity.
  */
 
-#define MAX_TTYS	1088
+#define MAX_TTYS	1024
 
 /*
  * Custom indices should be even numbers just in case if we
@@ -147,9 +146,8 @@ static int self_stdin_fdid = -1;
 #define CONSOLE_INDEX	1002
 #define VT_INDEX	1004
 #define CTTY_INDEX	1006
+#define ETTY_INDEX	1008
 #define STTY_INDEX	1010
-#define ETTY_INDEX	1012
-#define ETTY_INDEX_MAX	1076
 #define INDEX_ERR	(MAX_TTYS + 1)
 
 static DECLARE_BITMAP(tty_bitmap, (MAX_TTYS << 1));
@@ -188,20 +186,6 @@ static int ptm_fd_get_index(int fd, const struct fd_parms *p)
 static int pty_get_index(struct tty_info *ti)
 {
 	return ti->tie->pty->index;
-}
-
-static int ext_fd_get_index(int fd, const struct fd_parms *p)
-{
-	static int index;
-
-	index++;
-
-	if (index + ETTY_INDEX > ETTY_INDEX_MAX) {
-		pr_err("Too many external terminals\n");
-		return INDEX_ERR;
-	}
-
-	return index + ETTY_INDEX;
 }
 
 static int pty_open_ptmx(struct tty_info *info);
@@ -244,7 +228,6 @@ static struct tty_driver ext_driver = {
 	.name			= "ext",
 	.index			= ETTY_INDEX,
 	.open			= open_ext_tty,
-	.fd_get_index		= ext_fd_get_index,
 };
 
 static struct tty_driver serial_driver = {
@@ -562,7 +545,7 @@ static int do_open_tty_reg(int ns_root_fd, struct reg_file_info *rfi, void *arg)
 	fd = do_open_reg_noseek_flags(ns_root_fd, rfi, arg);
 	if (fd >= 0) {
 		/*
-		 * Peers might have different modes set
+		 * Peers might have differend modes set
 		 * after creation before we've dumped
 		 * them. So simply setup mode from image
 		 * the regular file engine will check
@@ -703,13 +686,15 @@ static int tty_set_prgp(int fd, int group)
 	return 0;
 }
 
-static int tty_restore_ctl_terminal(struct file_desc *d)
+int tty_restore_ctl_terminal(struct file_desc *d, int fd)
 {
 	struct tty_info *info = container_of(d, struct tty_info, d);
 	struct tty_driver *driver = info->driver;
 	struct reg_file_info *fake = NULL;
 	struct file_desc *slave_d;
 	int slave = -1, ret = -1, index = -1;
+
+	BUG_ON(!is_service_fd(fd, CTL_TTY_OFF));
 
 	if (driver->type == TTY_TYPE__EXT_TTY) {
 		slave = -1;
@@ -748,6 +733,7 @@ out:
 	close(slave);
 err:
 	pty_free_fake_reg(&fake);
+	close(fd);
 	return ret ? -1 : 0;
 }
 
@@ -894,12 +880,12 @@ static int restore_tty_params(int fd, struct tty_info *info)
 		}
 	}
 
-	return userns_call(do_restore_tty_parms, 0, &p, sizeof(p), fd);
+	return userns_call(do_restore_tty_parms, UNS_ASYNC, &p, sizeof(p), fd);
 }
 
 /*
  * When we restore queued data we don't exit if error happened:
- * the terminals never was a transport with guaranteed delivery,
+ * the terminals never was a transport with guaranted delivery,
  * it's up to application which uses it to guaratee the data
  * integrity.
  */
@@ -997,8 +983,7 @@ static int pty_open_unpaired_slave(struct file_desc *d, struct tty_info *slave)
 				goto err;
 			}
 
-			if (unlock_pty(master))
-				goto err;
+			unlock_pty(master);
 
 			if (opts.orphan_pts_master &&
 			    rpc_send_fd(ACT_ORPHAN_PTS_MASTER, master) == 0) {
@@ -1018,9 +1003,9 @@ static int pty_open_unpaired_slave(struct file_desc *d, struct tty_info *slave)
 			return -1;
 		}
 
-		fd = fdstore_get(self_stdin_fdid);
+		fd = dup(get_service_fd(SELF_STDIN_OFF));
 		if (fd < 0) {
-			pr_err("Can't get self_stdin_fdid\n");
+			pr_perror("Can't dup SELF_STDIN_OFF");
 			return -1;
 		}
 
@@ -1037,8 +1022,7 @@ static int pty_open_unpaired_slave(struct file_desc *d, struct tty_info *slave)
 			goto err;
 		}
 
-		if (unlock_pty(master))
-			goto err;
+		unlock_pty(master);
 
 		fd = open_tty_reg(slave->reg_d, slave->tfe->flags);
 		if (fd < 0) {
@@ -1070,15 +1054,10 @@ out:
 		 * the process which keeps the master peer.
 		 */
 		if (root_item->sid != vpid(root_item)) {
-			if (root_item->pgid == vpid(root_item)) {
-				if (tty_set_prgp(fd, root_item->pgid))
-					goto err;
-			} else {
-				pr_debug("Restore inherited group %d\n",
-					getpgid(getppid()));
-				if (tty_set_prgp(fd, getpgid(getppid())))
-					goto err;
-			}
+			pr_debug("Restore inherited group %d\n",
+				 getpgid(getppid()));
+			if (tty_set_prgp(fd, getpgid(getppid())))
+				goto err;
 		}
 	}
 
@@ -1105,8 +1084,7 @@ static int pty_open_ptmx(struct tty_info *info)
 		return -1;
 	}
 
-	if (unlock_pty(master))
-		goto err;
+	unlock_pty(master);
 
 	if (restore_tty_params(master, info))
 		goto err;
@@ -1252,124 +1230,6 @@ static struct pstree_item *find_first_sid(int sid)
 	return NULL;
 }
 
-static int add_fake_fle(struct pstree_item *item, u32 desc_id)
-{
-	FdinfoEntry *e;
-
-	e = xmalloc(sizeof(*e));
-	if (!e)
-		return -1;
-
-	fdinfo_entry__init(e);
-
-	e->id		= desc_id;
-	e->fd		= find_unused_fd(item, -1);
-	e->type		= FD_TYPES__TTY;
-
-	if (collect_fd(vpid(item), e, rsti(item), true)) {
-		xfree(e);
-		return -1;
-	}
-
-	return e->fd;
-}
-
-struct ctl_tty {
-	struct file_desc desc;
-	struct fdinfo_list_entry *real_tty;
-};
-
-static int ctl_tty_open(struct file_desc *d, int *new_fd)
-{
-	struct fdinfo_list_entry *fle;
-	int ret;
-
-	fle = container_of(d, struct ctl_tty, desc)->real_tty;
-	if (fle->stage != FLE_RESTORED)
-		return 1;
-
-	ret = tty_restore_ctl_terminal(fle->desc);
-	if (!ret) {
-		/*
-		 * Generic engine expects we return a new_fd.
-		 * Return this one just to return something.
-		 */
-		*new_fd = dup(fle->fe->fd);
-		if (*new_fd < 0) {
-			pr_perror("dup() failed");
-			ret = -1;
-		} else
-			ret = 0;
-	}
-	return ret;
-}
-
-/*
- * This is a fake type to handle ctl tty. The problem
- * is sometimes we need to do tty_set_sid() from slave
- * fle, while generic file engine allows to call open
- * method for file masters only. So, this type allows
- * to add fake masters, which will call open for slave
- * fles of type FD_TYPES__TTY indirectly.
- */
-static struct file_desc_ops ctl_tty_desc_ops = {
-	.type		= FD_TYPES__CTL_TTY,
-	.open		= ctl_tty_open,
-};
-
-static int prepare_ctl_tty(struct pstree_item *item, u32 ctl_tty_id)
-{
-	struct fdinfo_list_entry *fle;
-	struct ctl_tty *ctl_tty;
-	FdinfoEntry *e;
-	int fd;
-
-	if (!ctl_tty_id)
-		return 0;
-
-	pr_info("Requesting for ctl tty %#x into service fd\n", ctl_tty_id);
-
-	/* Add a fake fle to make generic engine deliver real tty desc to task */
-	fd = add_fake_fle(item, ctl_tty_id);
-	if (fd < 0)
-		return -1;
-
-	fle = find_used_fd(item, fd);
-	BUG_ON(!fle);
-	/*
-	 * Add a fake ctl_tty depending on the above fake fle, which will
-	 * actually restore the session.
-	 */
-	ctl_tty	= xmalloc(sizeof(*ctl_tty));
-	e	= xmalloc(sizeof(*e));
-
-	if (!ctl_tty || !e)
-		goto err;
-
-	ctl_tty->real_tty = fle;
-
-	/*
-	 * Use the same ctl_tty_id id for ctl_tty as it's unique among
-	 * FD_TYPES__CTL_TTY (as it's unique for FD_TYPES__TTY type).
-	 */
-	file_desc_add(&ctl_tty->desc, ctl_tty_id, &ctl_tty_desc_ops);
-
-	fdinfo_entry__init(e);
-
-	e->id		= ctl_tty_id;
-	e->fd		= find_unused_fd(item, -1);
-	e->type		= FD_TYPES__CTL_TTY;
-
-	if (collect_fd(vpid(item), e, rsti(item), true))
-		goto err;
-
-	return 0;
-err:
-	xfree(ctl_tty);
-	xfree(e);
-	return -1;
-}
-
 static int tty_find_restoring_task(struct tty_info *info)
 {
 	struct pstree_item *item;
@@ -1447,7 +1307,9 @@ static int tty_find_restoring_task(struct tty_info *info)
 		if (item && vpid(item) == item->sid) {
 			pr_info("Set a control terminal %#x to %d\n",
 				info->tfe->id, info->tie->sid);
-			return prepare_ctl_tty(item, info->tfe->id);
+			return prepare_ctl_tty(vpid(item),
+					       rsti(item),
+					       info->tfe->id);
 		}
 
 		goto notask;
@@ -1764,8 +1626,7 @@ static int tty_info_setup(struct tty_info *info)
 	 * reg file rectord because they are inherited from
 	 * command line on restore.
 	 */
-	info->reg_d = try_collect_special_file( info->tfe->has_regf_id ?
-			info->tfe->regf_id : info->tfe->id, 1);
+	info->reg_d = try_collect_special_file(info->tfe->id, 1);
 	if (!info->reg_d) {
 		if (info->driver->type != TTY_TYPE__EXT_TTY) {
 			if (!deprecated_ok("TTY w/o regfile"))
@@ -1898,11 +1759,6 @@ static int dump_tty_info(int lfd, u32 id, const struct fd_parms *p, struct tty_d
 	struct winsize w;
 
 	int ret = -1;
-
-	if (!p->fd_ctl) {
-		pr_err("No CTL for TTY dump, likely SCM case\n");
-		return -1;
-	}
 
 	/*
 	 * Make sure the structures the system provides us
@@ -2043,22 +1899,13 @@ static int dump_one_tty(int lfd, u32 id, const struct fd_parms *p)
 		return -1;
 	}
 
+	if (driver->type != TTY_TYPE__EXT_TTY && dump_one_reg_file(lfd, id, p))
+		return -1;
+
 	e.id		= id;
 	e.tty_info_id	= tty_gen_id(driver, index);
 	e.flags		= p->flags;
 	e.fown		= (FownEntry *)&p->fown;
-
-	if (driver->type != TTY_TYPE__EXT_TTY) {
-		u32 rf_id;
-
-		fd_id_generate_special(NULL, &rf_id);
-		if (dump_one_reg_file(lfd, rf_id, p))
-			return -1;
-
-		e.has_regf_id = true;
-		e.regf_id = rf_id;
-	}
-
 
 	/*
 	 * FIXME
@@ -2174,7 +2021,7 @@ static int tty_do_dump_queued_data(struct tty_dump_info *dinfo)
 			 ret, (int)off, dinfo->driver->name, dinfo->id);
 
 		if (off >= size) {
-			pr_err("The tty (%s %#x) queued data overflow %zu bytes limit\n",
+			pr_err("The tty (%s %#x) queued data overrflow %zu bytes limit\n",
 			       dinfo->driver->name, dinfo->id, size);
 			off = size;
 			break;
@@ -2232,7 +2079,7 @@ static void tty_dinfo_free(struct tty_dump_info *dinfo)
  * checkpoint procedure -- it's tail optimization, we trying
  * to defer this procedure until everything else passed
  * successfully because in real it is time consuming on
- * its own which might require writing data back to the
+ * its own which might require writting data back to the
  * former peers if case something go wrong.
  *
  * Moreover when we gather PTYs peers into own list we
@@ -2355,13 +2202,17 @@ int tty_prep_fds(void)
 	else
 		stdin_isatty = true;
 
-	self_stdin_fdid = fdstore_add(STDIN_FILENO);
-	if (self_stdin_fdid < 0) {
-		pr_err("Can't place stdin fd to fdstore\n");
+	if (install_service_fd(SELF_STDIN_OFF, STDIN_FILENO) < 0) {
+		pr_err("Can't dup stdin to SELF_STDIN_OFF\n");
 		return -1;
 	}
 
 	return 0;
+}
+
+void tty_fini_fds(void)
+{
+	close_service_fd(SELF_STDIN_OFF);
 }
 
 static int open_pty(void *arg, int flags)

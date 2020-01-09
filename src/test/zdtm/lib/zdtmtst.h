@@ -3,8 +3,6 @@
 
 #include <sys/types.h>
 #include <unistd.h>
-#include <stdbool.h>
-#include <stdlib.h>
 
 #define INPROGRESS ".inprogress"
 
@@ -41,10 +39,6 @@ extern void test_msg(const char *format, ...)
 extern int test_go(void);
 /* sleep until SIGTERM is delivered */
 extern void test_waitsig(void);
-/* sleep until zdtm notifies about predump */
-extern int test_wait_pre_dump(void);
-/* notify zdtm that we finished action after predump */
-extern int test_wait_pre_dump_ack(void);
 
 #include <stdint.h>
 
@@ -60,8 +54,6 @@ extern int datasum(const uint8_t *buffer, unsigned length, uint32_t *crc);
 /* streaming helpers */
 extern int set_nonblock(int fd, int on);
 extern int pipe_in2out(int infd, int outfd, uint8_t *buffer, int length);
-extern int read_data(int fd, unsigned char *buf, int len);
-extern int write_data(int fd, const unsigned char *buf, int len);
 
 /* command line args */
 struct long_opt {
@@ -148,24 +140,5 @@ extern void task_waiter_complete_current(task_waiter_t *t);
 extern int tcp_init_server(int family, int *port);
 extern int tcp_accept_server(int sock);
 extern int tcp_init_client(int family, char *servIP, unsigned short servPort);
-
-struct zdtm_tcp_opts {
-	bool reuseaddr;
-	bool reuseport;
-	int flags;
-};
-
-extern int tcp_init_server_with_opts(int family, int *port, struct zdtm_tcp_opts *opts);
-extern pid_t sys_clone_unified(unsigned long flags, void *child_stack, void *parent_tid,
-			       void *child_tid, unsigned long newtls);
-
-#define ssprintf(s, fmt, ...) ({ 						\
-	int ___ret;								\
-										\
-	___ret = snprintf(s, sizeof(s), fmt, ##__VA_ARGS__);			\
-	if (___ret >= sizeof(s))						\
-		abort();								\
-	___ret;									\
-})
 
 #endif /* _VIMITESU_H_ */

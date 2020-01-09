@@ -1,36 +1,19 @@
 #ifndef __CR_OPTIONS_H__
 #define __CR_OPTIONS_H__
 
-#include <sys/types.h>
 #include <stdbool.h>
-#include "common/config.h"
+#include "config.h"
 #include "common/list.h"
-
-/* Configuration and CLI parsing order defines */
-#define PARSING_GLOBAL_CONF	1
-#define PARSING_USER_CONF	2
-#define PARSING_ENV_CONF	3
-#define PARSING_CMDLINE_CONF	4
-#define PARSING_ARGV		5
-#define PARSING_RPC_CONF	6
-#define PARSING_LAST		7
-
-#define SET_CHAR_OPTS(__dest, __src) \
-	do { \
-		free(opts.__dest); \
-		opts.__dest = xstrdup(__src); \
-	} while(0)
 
 /*
  * CPU capability options.
  */
-#define CPU_CAP_NONE		(0u << 0)	/* Don't check capability at all */
-#define CPU_CAP_FPU		(1u << 0)	/* Only FPU capability required */
-#define CPU_CAP_CPU		(1u << 1)	/* Strict CPU capability required */
-#define CPU_CAP_INS		(1u << 2)	/* Instructions CPU capability */
-#define CPU_CAP_IMAGE		(1u << 3)	/* Write capability on dump and read on restore*/
-#define CPU_CAP_ALL		(CPU_CAP_FPU | CPU_CAP_CPU | CPU_CAP_INS)
-#define CPU_CAP_DEFAULT		(CPU_CAP_FPU | CPU_CAP_INS)
+#define CPU_CAP_NONE		(0u)
+#define CPU_CAP_ALL		(-1u)
+#define CPU_CAP_FPU		(1u)		/* Only FPU capability required */
+#define CPU_CAP_CPU		(2u)		/* Strict CPU capability required */
+#define CPU_CAP_INS		(4u)		/* Instructions CPU capatibility */
+#define CPU_CAP_DEFAULT		(CPU_CAP_FPU)
 
 struct cg_root_opt {
 	struct list_head node;
@@ -66,8 +49,11 @@ struct irmap_path_opt {
 
 struct cr_options {
 	int			final_state;
+	char			*show_dump_file;
+	char			*show_fmt;
 	int			check_extra_features;
 	int			check_experimental_features;
+	bool			show_pages_content;
 	union {
 		int		restore_detach;
 		bool		daemon_mode;
@@ -109,7 +95,7 @@ struct cr_options {
 	bool			autodetect_ext_mounts;
 	int			enable_external_sharing;
 	int			enable_external_masters;
-	bool			aufs;		/* auto-detected, not via cli */
+	bool			aufs;		/* auto-deteced, not via cli */
 	bool			overlayfs;
 #ifdef CONFIG_BINFMT_MISC_VIRTUALIZED
 	bool			has_binfmt_misc; /* auto-detected */
@@ -135,16 +121,10 @@ struct cr_options {
 	int			weak_sysctls;
 	int			status_fd;
 	bool			orphan_pts_master;
-	pid_t			tree_id;
-	int			log_level;
-	char			*imgs_dir;
 };
 
 extern struct cr_options opts;
-char *rpc_cfg_file;
 
-extern int parse_options(int argc, char **argv, bool *usage_error, bool *has_exec_cmd, int state);
-extern int check_options();
-extern void init_opts();
+extern void init_opts(void);
 
 #endif /* __CR_OPTIONS_H__ */

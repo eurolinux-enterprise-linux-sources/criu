@@ -11,6 +11,7 @@
 #include <sys/inotify.h>
 #include <unistd.h>
 #include <stdlib.h>
+#include <dirent.h>
 #include <signal.h>
 #include <sched.h>
 #include <sys/mount.h>

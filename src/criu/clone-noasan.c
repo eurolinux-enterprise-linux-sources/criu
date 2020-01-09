@@ -1,7 +1,5 @@
 #include <sched.h>
 #include "common/compiler.h"
-#include "log.h"
-#include "common/bug.h"
 
 /*
  * ASan doesn't play nicely with clone if we use current stack for
@@ -13,7 +11,7 @@
  * We need a real stack for clone().
  *
  * To workaround this we add clone_noasan() not-instrumented wrapper for
- * clone(). Unfortunately we can't use __attribute__((no_sanitize_address))
+ * clone(). Unfortunately we can't use __attrbute__((no_sanitize_addresss))
  * for this because of bug in GCC > 6:
  *         https://gcc.gnu.org/bugzilla/show_bug.cgi?id=69863
  *
@@ -21,11 +19,15 @@
  */
 int clone_noasan(int (*fn)(void *), int flags, void *arg)
 {
-	void *stack_ptr = (void *)round_down((unsigned long)&stack_ptr - 256, 16);
-	BUG_ON((flags & CLONE_VM) && !(flags & CLONE_VFORK));
 	/*
-	 * Reserve some bytes for clone() internal needs
-	 * and use as stack the address above this area.
+	 * Reserve some space for clone() to locate arguments
+	 * and retcode in this place
 	 */
-	return clone(fn, stack_ptr, flags, arg);
+	char stack[128] __stack_aligned__;
+	char *stack_ptr = &stack[sizeof(stack)];
+	int ret;
+
+	ret = clone(fn, stack_ptr, flags, arg);
+	return ret;
 }
+

@@ -6,6 +6,8 @@
 #include <string.h>
 #include <signal.h>
 
+#include <bits/signum.h>
+
 #include <sys/wait.h>
 #include <sys/vfs.h>
 #include <sys/mount.h>
