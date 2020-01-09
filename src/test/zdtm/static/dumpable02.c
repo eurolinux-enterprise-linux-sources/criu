@@ -36,12 +36,11 @@ int get_dumpable_from_pipes(int pipe_input, int pipe_output) {
 	/* input and output are from the child's point of view. */
 
 	write(pipe_input, "GET\n", 4);
-	len = read(pipe_output, buf, sizeof(buf) - 1);
+	len = read(pipe_output, buf, sizeof(buf));
 	if (len < 0) {
 		pr_perror("error in parent reading from pipe");
 		return -1;
 	}
-	buf[len] = 0;
 
 	if (memcmp(buf, "DUMPABLE:", 9) != 0) {
 		pr_perror("child returned [%s]", buf);

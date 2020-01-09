@@ -1,3 +1,4 @@
+#define _GNU_SOURCE         /* See feature_test_macros(7) */
 #include <unistd.h>
 #include <limits.h>
 
@@ -25,9 +26,6 @@
 #elif __aarch64__
 # define __NR_fanotify_init     262
 # define __NR_fanotify_mark     263
-#elif __s390x__
-# define __NR_fanotify_init     332
-# define __NR_fanotify_mark     333
 #else
 # define __NR_fanotify_init	338
 # define __NR_fanotify_mark	339

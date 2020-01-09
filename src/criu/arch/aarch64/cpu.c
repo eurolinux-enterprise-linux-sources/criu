@@ -4,6 +4,11 @@
 #include <errno.h>
 #include "cpu.h"
 
+bool cpu_has_feature(unsigned int feature)
+{
+	return false;
+}
+
 int cpu_init(void)
 {
 	return 0;

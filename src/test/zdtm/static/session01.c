@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
@@ -202,7 +203,7 @@ int main(int argc, char ** argv)
 
 	test_init(argc, argv);
 
-	testcases[0].master.pid = getpid();
+	testcases[0].master.pid = getpid();;
 	if (child(0))
 		goto err;
 

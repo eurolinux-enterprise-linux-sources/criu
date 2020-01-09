@@ -1,6 +1,5 @@
 #include <sys/mman.h>
 #include "zdtmtst.h"
-#include "get_smaps_bits.h"
 
 #ifndef MADV_DONTDUMP
 #define MADV_DONTDUMP   16

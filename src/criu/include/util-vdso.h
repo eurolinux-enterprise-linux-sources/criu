@@ -28,39 +28,28 @@ struct vdso_symbol {
 };
 
 struct vdso_symtable {
-	unsigned long		vdso_size;
-	unsigned long		vvar_size;
-	struct vdso_symbol	symbols[VDSO_SYMBOL_MAX];
-	bool			vdso_before_vvar; /* order of vdso/vvar pair */
-};
-
-struct vdso_maps {
-	unsigned long		vdso_start;
+	unsigned long		vma_start;
+	unsigned long		vma_end;
 	unsigned long		vvar_start;
-	struct vdso_symtable	sym;
+	unsigned long		vvar_end;
+	struct vdso_symbol	symbols[VDSO_SYMBOL_MAX];
 };
 
 #define VDSO_SYMBOL_INIT	{ .offset = VDSO_BAD_ADDR, }
 
 #define VDSO_SYMTABLE_INIT						\
 	{								\
-		.vdso_size	= VDSO_BAD_SIZE,			\
-		.vvar_size	= VVAR_BAD_SIZE,			\
+		.vma_start	= VDSO_BAD_ADDR,			\
+		.vma_end	= VDSO_BAD_ADDR,			\
+		.vvar_start	= VVAR_BAD_ADDR,			\
+		.vvar_end	= VVAR_BAD_ADDR,			\
 		.symbols		= {				\
 			[0 ... VDSO_SYMBOL_MAX - 1] =			\
 				(struct vdso_symbol)VDSO_SYMBOL_INIT,	\
 			},						\
-		.vdso_before_vvar	= false,			\
 	}
 
-#define VDSO_MAPS_INIT							\
-	{								\
-		.vdso_start	= VDSO_BAD_ADDR,			\
-		.vvar_start	= VVAR_BAD_ADDR,			\
-		.sym		= VDSO_SYMTABLE_INIT,			\
-	}
-
-#ifdef CONFIG_VDSO_32
+#ifdef CONFIG_X86_32
 
 #define Ehdr_t		Elf32_Ehdr
 #define Sym_t		Elf32_Sym
@@ -71,7 +60,7 @@ struct vdso_maps {
 #define ELF_ST_TYPE	ELF32_ST_TYPE
 #define ELF_ST_BIND	ELF32_ST_BIND
 
-#else /* CONFIG_VDSO_32 */
+#else /* !CONFIG_X86_32 */
 
 #define Ehdr_t		Elf64_Ehdr
 #define Sym_t		Elf64_Sym
@@ -86,19 +75,19 @@ struct vdso_maps {
 #define ELF_ST_BIND	ELF64_ST_BIND
 #endif
 
-#endif /* CONFIG_VDSO_32 */
+#endif /* !CONFIG_X86_32 */
 
-#if defined(CONFIG_VDSO_32)
-# define vdso_fill_symtable vdso_fill_symtable_compat
-#endif
+/* Size of VMA associated with vdso */
+static inline unsigned long vdso_vma_size(struct vdso_symtable *t)
+{
+	return t->vma_end - t->vma_start;
+}
+
+static inline unsigned long vvar_vma_size(struct vdso_symtable *t)
+{
+	return t->vvar_end - t->vvar_start;
+}
 
 extern int vdso_fill_symtable(uintptr_t mem, size_t size, struct vdso_symtable *t);
-#if defined(CONFIG_X86_64) && defined(CONFIG_COMPAT)
-#ifndef ARCH_MAP_VDSO_32
-# define ARCH_MAP_VDSO_32	0x2002
-#endif
-extern int vdso_fill_symtable_compat(uintptr_t mem, size_t size,
-		struct vdso_symtable *t);
-#endif
 
 #endif /* __CR_UTIL_VDSO_H__ */

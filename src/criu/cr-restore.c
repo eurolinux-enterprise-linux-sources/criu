@@ -24,10 +24,9 @@
 #include <sys/sendfile.h>
 
 #include "types.h"
-#include <compel/ptrace.h>
+#include "ptrace.h"
 #include "common/compiler.h"
 
-#include "clone-noasan.h"
 #include "cr_options.h"
 #include "servicefd.h"
 #include "image.h"
@@ -47,9 +46,8 @@
 #include "eventpoll.h"
 #include "signalfd.h"
 #include "proc_parse.h"
-#include "pie/restorer-blob.h"
+#include "restorer-blob.h"
 #include "crtools.h"
-#include "uffd.h"
 #include "namespaces.h"
 #include "mem.h"
 #include "mount.h"
@@ -71,7 +69,6 @@
 #include "file-lock.h"
 #include "action-scripts.h"
 #include "shmem.h"
-#include <compel/compel.h>
 #include "aio.h"
 #include "lsm.h"
 #include "seccomp.h"
@@ -82,8 +79,6 @@
 
 #include "parasite-syscall.h"
 #include "files-reg.h"
-#include <compel/plugins/std/syscall-codes.h>
-#include "compel/include/asm/syscall.h"
 
 #include "protobuf.h"
 #include "images/sa.pb-c.h"
@@ -109,7 +104,6 @@
 
 #ifndef arch_export_unmap
 #define arch_export_unmap		__export_unmap
-#define arch_export_unmap_compat	__export_unmap_compat
 #endif
 
 struct pstree_item *current;
@@ -121,130 +115,23 @@ static int prepare_rlimits(int pid, struct task_restore_args *, CoreEntry *core)
 static int prepare_posix_timers(int pid, struct task_restore_args *ta, CoreEntry *core);
 static int prepare_signals(int pid, struct task_restore_args *, CoreEntry *core);
 
-/*
- * Architectures can overwrite this function to restore registers that are not
- * present in the sigreturn signal frame.
- */
-int __attribute__((weak)) arch_set_thread_regs_nosigrt(struct pid *pid)
-{
-	return 0;
-}
-
-static inline int stage_participants(int next_stage)
-{
-	switch (next_stage) {
-	case CR_STATE_FAIL:
-		return 0;
-	case CR_STATE_ROOT_TASK:
-	case CR_STATE_PREPARE_NAMESPACES:
-		return 1;
-	case CR_STATE_FORKING:
-		return task_entries->nr_tasks + task_entries->nr_helpers;
-	case CR_STATE_RESTORE:
-		return task_entries->nr_threads + task_entries->nr_helpers;
-	case CR_STATE_RESTORE_SIGCHLD:
-		return task_entries->nr_threads;
-	case CR_STATE_RESTORE_CREDS:
-		return task_entries->nr_threads;
-	}
-
-	BUG();
-	return -1;
-}
-
-static inline int stage_current_participants(int next_stage)
-{
-	switch (next_stage) {
-	case CR_STATE_FORKING:
-		return 1;
-	case CR_STATE_RESTORE:
-		/*
-		 * Each thread has to be reported about this stage,
-		 * so if we want to wait all other tasks, we have to
-		 * exclude all threads of the current process.
-		 * It is supposed that we will wait other tasks,
-		 * before creating threads of the current task.
-		 */
-		return current->nr_threads;
-	}
-
-	BUG();
-	return -1;
-}
-
-static int __restore_wait_inprogress_tasks(int participants)
-{
-	int ret;
-	futex_t *np = &task_entries->nr_in_progress;
-
-	futex_wait_while_gt(np, participants);
-	ret = (int)futex_get(np);
-	if (ret < 0) {
-		set_cr_errno(get_task_cr_err());
-		return ret;
-	}
-
-	return 0;
-}
-
-static int restore_wait_inprogress_tasks()
-{
-	return __restore_wait_inprogress_tasks(0);
-}
-
-/* Wait all tasks except the current one */
-static int restore_wait_other_tasks()
-{
-	int participants, stage;
-
-	stage = futex_get(&task_entries->start);
-	participants = stage_current_participants(stage);
-
-	return __restore_wait_inprogress_tasks(participants);
-}
-
-static inline void __restore_switch_stage_nw(int next_stage)
-{
-	futex_set(&task_entries->nr_in_progress,
-			stage_participants(next_stage));
-	futex_set(&task_entries->start, next_stage);
-}
-
-static inline void __restore_switch_stage(int next_stage)
-{
-	if (next_stage != CR_STATE_COMPLETE)
-		futex_set(&task_entries->nr_in_progress,
-				stage_participants(next_stage));
-	futex_set_and_wake(&task_entries->start, next_stage);
-}
-
-static int restore_switch_stage(int next_stage)
-{
-	__restore_switch_stage(next_stage);
-	return restore_wait_inprogress_tasks();
-}
-
-static int restore_finish_ns_stage(int from, int to)
-{
-	if (root_ns_mask)
-		return restore_finish_stage(task_entries, from);
-
-	/* Nobody waits for this stage change, just go ahead */
-	__restore_switch_stage_nw(to);
-	return 0;
-}
 
 static int crtools_prepare_shared(void)
 {
-	if (prepare_files())
+	if (prepare_shared_fdinfo())
 		return -1;
 
 	/* We might want to remove ghost files on failed restore */
 	if (collect_remaps_and_regfiles())
 		return -1;
 
+	/* dead pid remap needs to allocate task helpers which all tasks need
+	 * to see */
+	if (prepare_procfs_remaps())
+		return -1;
+
 	/* Connections are unlocked from criu */
-	if (!files_collected() && collect_image(&inet_sk_cinfo))
+	if (collect_inet_sockets())
 		return -1;
 
 	if (collect_binfmt_misc())
@@ -269,63 +156,78 @@ static int crtools_prepare_shared(void)
  */
 
 static struct collect_image_info *cinfos[] = {
+	&nsfile_cinfo,
+	&pipe_cinfo,
+	&fifo_cinfo,
+	&unix_sk_cinfo,
+	&packet_sk_cinfo,
+	&netlink_sk_cinfo,
+	&eventfd_cinfo,
+	&epoll_tfd_cinfo,
+	&epoll_cinfo,
+	&signalfd_cinfo,
+	&inotify_cinfo,
+	&inotify_mark_cinfo,
+	&fanotify_cinfo,
+	&fanotify_mark_cinfo,
+	&tunfile_cinfo,
+	&ext_file_cinfo,
+	&timerfd_cinfo,
 	&file_locks_cinfo,
 	&pipe_data_cinfo,
 	&fifo_data_cinfo,
 	&sk_queues_cinfo,
 };
 
-static struct collect_image_info *cinfos_files[] = {
-	&unix_sk_cinfo,
-	&fifo_cinfo,
-	&pipe_cinfo,
-	&nsfile_cinfo,
-	&packet_sk_cinfo,
-	&netlink_sk_cinfo,
-	&eventfd_cinfo,
-	&epoll_cinfo,
-	&epoll_tfd_cinfo,
-	&signalfd_cinfo,
-	&tunfile_cinfo,
-	&timerfd_cinfo,
-	&inotify_cinfo,
-	&inotify_mark_cinfo,
-	&fanotify_cinfo,
-	&fanotify_mark_cinfo,
-	&ext_file_cinfo,
-};
-
-/* These images are required to restore namespaces */
+/* These images are requered to restore namespaces */
 static struct collect_image_info *before_ns_cinfos[] = {
 	&tty_info_cinfo, /* Restore devpts content */
+	&tty_cinfo,
 	&tty_cdata,
 };
 
-static struct pprep_head *post_prepare_heads = NULL;
+struct post_prepare_cb {
+	struct list_head list;
+	int (*actor)(void *data);
+	void *data;
+};
 
-void add_post_prepare_cb(struct pprep_head *ph)
+static struct list_head post_prepare_cbs = LIST_HEAD_INIT(post_prepare_cbs);
+
+int add_post_prepare_cb(int (*actor)(void *data), void *data)
 {
-	ph->next = post_prepare_heads;
-	post_prepare_heads = ph;
+	struct post_prepare_cb *cb;
+
+	cb = xmalloc(sizeof(*cb));
+	if (!cb)
+		return -1;
+
+	cb->actor = actor;
+	cb->data = data;
+	list_add(&cb->list, &post_prepare_cbs);
+	return 0;
 }
 
 static int run_post_prepare(void)
 {
-	struct pprep_head *ph;
+	struct post_prepare_cb *o;
 
-	for (ph = post_prepare_heads; ph != NULL; ph = ph->next)
-		if (ph->actor(ph))
+	list_for_each_entry(o, &post_prepare_cbs, list) {
+		if (o->actor(o->data))
 			return -1;
-
+	}
 	return 0;
 }
 
 static int root_prepare_shared(void)
 {
-	int ret = 0;
+	int ret = 0, i;
 	struct pstree_item *pi;
 
 	pr_info("Preparing info about shared resources\n");
+
+	if (prepare_shared_reg_files())
+		return -1;
 
 	if (prepare_remaps())
 		return -1;
@@ -333,12 +235,11 @@ static int root_prepare_shared(void)
 	if (prepare_seccomp_filters())
 		return -1;
 
-	if (collect_images(cinfos, ARRAY_SIZE(cinfos)))
-		return -1;
-
-	if (!files_collected() &&
-			collect_images(cinfos_files, ARRAY_SIZE(cinfos_files)))
-		return -1;
+	for (i = 0; i < ARRAY_SIZE(cinfos); i++) {
+		ret = collect_image(cinfos[i]);
+		if (ret)
+			return -1;
+	}
 
 	for_each_pstree_item(pi) {
 		if (pi->pid->state == TASK_HELPER)
@@ -360,25 +261,11 @@ static int root_prepare_shared(void)
 	if (ret < 0)
 		goto err;
 
-	prepare_cow_vmas();
-
 	ret = prepare_restorer_blob();
 	if (ret)
 		goto err;
 
-	/*
-	 * This should be called with all packets collected AND all
-	 * fdescs and fles prepared BUT post-prep-s not run.
-	 */
-	ret = prepare_scms();
-	if (ret)
-		goto err;
-
 	ret = run_post_prepare();
-	if (ret)
-		goto err;
-
-	ret = add_fake_unix_queuers();
 	if (ret)
 		goto err;
 
@@ -387,42 +274,8 @@ err:
 	return ret;
 }
 
-/* This actually populates and occupies ROOT_FD_OFF sfd */
-static int populate_root_fd_off(void)
-{
-	struct ns_id *mntns = NULL;
-	int ret;
-
-        if (root_ns_mask & CLONE_NEWNS) {
-                mntns = lookup_ns_by_id(root_item->ids->mnt_ns_id, &mnt_ns_desc);
-                BUG_ON(!mntns);
-        }
-
-	ret = mntns_get_root_fd(mntns);
-	if (ret < 0)
-		pr_err("Can't get root fd\n");
-	return ret >= 0 ? 0 : -1;
-}
-
-static int populate_pid_proc(void)
-{
-	if (open_pid_proc(vpid(current)) < 0) {
-		pr_err("Can't open PROC_SELF\n");
-		return -1;
-	}
-	return 0;
-}
-
 static rt_sigaction_t sigchld_act;
-/*
- * If parent's sigaction has blocked SIGKILL (which is non-sense),
- * this parent action is non-valid and shouldn't be inherited.
- * Used to mark parent_act* no more valid.
- */
 static rt_sigaction_t parent_act[SIGMAX];
-#ifdef CONFIG_COMPAT
-static rt_sigaction_t_compat parent_act_compat[SIGMAX];
-#endif
 
 static bool sa_inherited(int sig, rt_sigaction_t *sa)
 {
@@ -434,10 +287,6 @@ static bool sa_inherited(int sig, rt_sigaction_t *sa)
 
 	pa = &parent_act[sig];
 
-	/* Omitting non-valid sigaction */
-	if (pa->rt_sa_mask.sig[0] & (1 << SIGKILL))
-		return false;
-
 	for (i = 0; i < _KNSIG_WORDS; i++)
 		if (pa->rt_sa_mask.sig[i] != sa->rt_sa_mask.sig[i])
 			return false;
@@ -447,16 +296,34 @@ static bool sa_inherited(int sig, rt_sigaction_t *sa)
 		pa->rt_sa_restorer == sa->rt_sa_restorer;
 }
 
-static int restore_native_sigaction(int sig, SaEntry *e)
+/* Returns number of restored signals, -1 or negative errno on fail */
+static int restore_one_sigaction(int sig, struct cr_img *img, int pid)
 {
 	rt_sigaction_t act;
-	int ret;
+	SaEntry *e;
+	int ret = 0;
+
+	BUG_ON(sig == SIGKILL || sig == SIGSTOP);
+
+	ret = pb_read_one_eof(img, &e, PB_SIGACT);
+	if (ret == 0) {
+		if (sig != SIGMAX_OLD + 1) { /* backward compatibility */
+			pr_err("Unexpected EOF %d\n", sig);
+			return -1;
+		}
+		pr_warn("This format of sigacts-%d.img is deprecated\n", pid);
+		return -1;
+	}
+	if (ret < 0)
+		return ret;
 
 	ASSIGN_TYPED(act.rt_sa_handler, decode_pointer(e->sigaction));
 	ASSIGN_TYPED(act.rt_sa_flags, e->flags);
 	ASSIGN_TYPED(act.rt_sa_restorer, decode_pointer(e->restorer));
 	BUILD_BUG_ON(sizeof(e->mask) != sizeof(act.rt_sa_mask.sig));
 	memcpy(act.rt_sa_mask.sig, &e->mask, sizeof(act.rt_sa_mask.sig));
+
+	sa_entry__free_unpacked(e, NULL);
 
 	if (sig == SIGCHLD) {
 		sigchld_act = act;
@@ -477,156 +344,19 @@ static int restore_native_sigaction(int sig, SaEntry *e)
 	}
 
 	parent_act[sig - 1] = act;
-	/* Mark SIGKILL blocked which makes compat sigaction non-valid */
-#ifdef CONFIG_COMPAT
-	parent_act_compat[sig - 1].rt_sa_mask.sig[0] |= 1 << SIGKILL;
-#endif
 
 	return 1;
 }
 
-static void *stack32;
-
-#ifdef CONFIG_COMPAT
-static bool sa_compat_inherited(int sig, rt_sigaction_t_compat *sa)
-{
-	rt_sigaction_t_compat *pa;
-	int i;
-
-	if (current == root_item)
-		return false;
-
-	pa = &parent_act_compat[sig];
-
-	/* Omitting non-valid sigaction */
-	if (pa->rt_sa_mask.sig[0] & (1 << SIGKILL))
-		return false;
-
-	for (i = 0; i < _KNSIG_WORDS; i++)
-		if (pa->rt_sa_mask.sig[i] != sa->rt_sa_mask.sig[i])
-			return false;
-
-	return pa->rt_sa_handler == sa->rt_sa_handler &&
-		pa->rt_sa_flags == sa->rt_sa_flags &&
-		pa->rt_sa_restorer == sa->rt_sa_restorer;
-}
-
-static int restore_compat_sigaction(int sig, SaEntry *e)
-{
-	rt_sigaction_t_compat act;
-	int ret;
-
-	ASSIGN_TYPED(act.rt_sa_handler, (u32)e->sigaction);
-	ASSIGN_TYPED(act.rt_sa_flags, e->flags);
-	ASSIGN_TYPED(act.rt_sa_restorer, (u32)e->restorer);
-	BUILD_BUG_ON(sizeof(e->mask) != sizeof(act.rt_sa_mask.sig));
-	memcpy(act.rt_sa_mask.sig, &e->mask, sizeof(act.rt_sa_mask.sig));
-
-	if (sig == SIGCHLD) {
-		memcpy(&sigchld_act, &act, sizeof(rt_sigaction_t_compat));
-		return 0;
-	}
-
-	if (sa_compat_inherited(sig - 1, &act))
-		return 1;
-
-	if (!stack32) {
-		stack32 = alloc_compat_syscall_stack();
-		if (!stack32)
-			return -1;
-	}
-
-	ret = arch_compat_rt_sigaction(stack32, sig, &act);
-	if (ret < 0) {
-		pr_err("Can't restore compat sigaction: %d\n", ret);
-		return ret;
-	}
-
-	parent_act_compat[sig - 1] = act;
-	/* Mark SIGKILL blocked which makes native sigaction non-valid */
-	parent_act[sig - 1].rt_sa_mask.sig[0] |= 1 << SIGKILL;
-
-	return 1;
-}
-#else
-static int restore_compat_sigaction(int sig, SaEntry *e)
-{
-	return -1;
-}
-#endif
-
-static int prepare_sigactions_from_core(TaskCoreEntry *tc)
-{
-	int sig, i;
-
-	if (tc->n_sigactions != SIGMAX - 2) {
-		pr_err("Bad number of sigactions in the image (%d, want %d)\n",
-				(int)tc->n_sigactions, SIGMAX - 2);
-		return -1;
-	}
-
-	pr_info("Restore on-core sigactions for %d\n", vpid(current));
-
-	for (sig = 1, i = 0; sig <= SIGMAX; sig++) {
-		int ret;
-		SaEntry *e;
-		bool sigaction_is_compat;
-
-		if (sig == SIGKILL || sig == SIGSTOP)
-			continue;
-
-		e = tc->sigactions[i++];
-		sigaction_is_compat = e->has_compat_sigaction && e->compat_sigaction;
-		if (sigaction_is_compat)
-			ret = restore_compat_sigaction(sig, e);
-		else
-			ret = restore_native_sigaction(sig, e);
-
-		if (ret < 0)
-			return ret;
-	}
-
-	return 0;
-}
-
-/* Returns number of restored signals, -1 or negative errno on fail */
-static int restore_one_sigaction(int sig, struct cr_img *img, int pid)
-{
-	bool sigaction_is_compat;
-	SaEntry *e;
-	int ret = 0;
-
-	BUG_ON(sig == SIGKILL || sig == SIGSTOP);
-
-	ret = pb_read_one_eof(img, &e, PB_SIGACT);
-	if (ret == 0) {
-		if (sig != SIGMAX_OLD + 1) { /* backward compatibility */
-			pr_err("Unexpected EOF %d\n", sig);
-			return -1;
-		}
-		pr_warn("This format of sigacts-%d.img is deprecated\n", pid);
-		return -1;
-	}
-	if (ret < 0)
-		return ret;
-
-	sigaction_is_compat = e->has_compat_sigaction && e->compat_sigaction;
-	if (sigaction_is_compat)
-		ret = restore_compat_sigaction(sig, e);
-	else
-		ret = restore_native_sigaction(sig, e);
-
-	sa_entry__free_unpacked(e, NULL);
-
-	return ret;
-}
-
-static int prepare_sigactions_from_image(void)
+static int prepare_sigactions(void)
 {
 	int pid = vpid(current);
 	struct cr_img *img;
 	int sig, rst = 0;
 	int ret = 0;
+
+	if (!task_alive(current))
+		return 0;
 
 	pr_info("Restore sigacts for %d\n", pid);
 
@@ -649,26 +379,6 @@ static int prepare_sigactions_from_image(void)
 			SIGMAX - 3 /* KILL, STOP and CHLD */);
 
 	close_image(img);
-	return ret;
-}
-
-static int prepare_sigactions(CoreEntry *core)
-{
-	int ret;
-
-	if (!task_alive(current))
-		return 0;
-
-	if (core->tc->n_sigactions != 0)
-		ret = prepare_sigactions_from_core(core->tc);
-	else
-		ret = prepare_sigactions_from_image();
-
-	if (stack32) {
-		free_compat_syscall_stack(stack32);
-		stack32 = NULL;
-	}
-
 	return ret;
 }
 
@@ -736,7 +446,7 @@ static int open_core(int pid, CoreEntry **pcore)
 
 	img = open_image(CR_FD_CORE, O_RSTR, pid);
 	if (!img) {
-		pr_err("Can't open core data for %d\n", pid);
+		pr_err("Can't open core data for %d", pid);
 		return -1;
 	}
 
@@ -797,7 +507,7 @@ static int prepare_proc_misc(pid_t pid, TaskCoreEntry *tc)
 	int ret;
 
 	/* loginuid value is critical to restore */
-	if (kdat.luid == LUID_FULL && tc->has_loginuid &&
+	if (kdat.has_loginuid && tc->has_loginuid &&
 			tc->loginuid != INVALID_UID) {
 		ret = prepare_loginuid(tc->loginuid, LOG_ERROR);
 		if (ret < 0)
@@ -895,16 +605,6 @@ static int restore_one_alive_task(int pid, CoreEntry *core)
 	if (prepare_vmas(current, ta))
 		return -1;
 
-	/*
-	 * Sockets have to be restored in their network namespaces,
-	 * so a task namespace has to be restored after sockets.
-	 */
-	if (restore_task_net_ns(current))
-		return -1;
-
-	if (setup_uffd(pid, ta))
-		return -1;
-
 	return sigreturn_restore(pid, ta, args_len, core);
 }
 
@@ -948,6 +648,7 @@ static void zombie_prepare_signals(void)
 		(1 << SIGPOLL)	|\
 		(1 << SIGIO)	|\
 		(1 << SIGSYS)	|\
+		(1 << SIGUNUSED)|\
 		(1 << SIGSTKFLT)|\
 		(1 << SIGPWR)	 \
 	)
@@ -987,27 +688,19 @@ static int wait_on_helpers_zombies(void)
 	return 0;
 }
 
-static int wait_exiting_children(void);
-
 static int restore_one_zombie(CoreEntry *core)
 {
 	int exit_code = core->tc->exit_code;
 
 	pr_info("Restoring zombie with %d code\n", exit_code);
 
-	if (prepare_fds(current))
-		return -1;
-
 	if (inherit_fd_fini() < 0)
-		return -1;
-
-	if (lazy_pages_setup_zombie(vpid(current)))
 		return -1;
 
 	prctl(PR_SET_NAME, (long)(void *)core->tc->comm, 0, 0, 0);
 
 	if (task_entries != NULL) {
-		wait_exiting_children();
+		restore_finish_stage(task_entries, CR_STATE_RESTORE);
 		zombie_prepare_signals();
 	}
 
@@ -1035,27 +728,6 @@ static int restore_one_zombie(CoreEntry *core)
 	/* never reached */
 	BUG_ON(1);
 	return -1;
-}
-
-static int setup_newborn_fds(struct pstree_item *me)
-{
-	if (clone_service_fd(me))
-		return -1;
-
-	if (!me->parent ||
-	    (rsti(me->parent)->fdt && !(rsti(me)->clone_flags & CLONE_FILES))) {
-		/*
-		 * When our parent has shared fd table, some of the table owners
-		 * may be already created. Files, they open, will be inherited
-		 * by current process, and here we close them. Also, service fds
-		 * of parent are closed here. And root_item closes the files,
-		 * that were inherited from criu process.
-		 */
-		if (close_old_fds())
-			return -1;
-	}
-
-	return 0;
 }
 
 static int check_core(CoreEntry *core, struct pstree_item *me)
@@ -1089,98 +761,6 @@ out:
 	return ret;
 }
 
-/*
- * Find if there are children which are zombies or helpers - processes
- * which are expected to die during the restore.
- */
-static bool child_death_expected(void)
-{
-	struct pstree_item *pi;
-
-	list_for_each_entry(pi, &current->children, sibling) {
-		switch (pi->pid->state) {
-		case TASK_DEAD:
-		case TASK_HELPER:
-			return true;
-		}
-	}
-
-	return false;
-}
-
-static int wait_exiting_children(void)
-{
-	siginfo_t info;
-
-	if (!child_death_expected()) {
-		/*
-		 * Restoree has no children that should die, during restore,
-		 * wait for the next stage on futex.
-		 * The default SIGCHLD handler will handle an unexpected
-		 * child's death and abort the restore if someone dies.
-		 */
-		restore_finish_stage(task_entries, CR_STATE_RESTORE);
-		return 0;
-	}
-
-	/*
-	 * The restoree has children which will die - decrement itself from
-	 * nr. of tasks processing the stage and wait for anyone to die.
-	 * Tasks may die only when they're on the following stage.
-	 * If one dies earlier - that's unexpected - treat it as an error
-	 * and abort the restore.
-	 */
-	if (block_sigmask(NULL, SIGCHLD))
-		return -1;
-
-	/* Finish CR_STATE_RESTORE, but do not wait for the next stage. */
-	futex_dec_and_wake(&task_entries->nr_in_progress);
-
-	if (waitid(P_ALL, 0, &info, WEXITED | WNOWAIT)) {
-		pr_perror("Failed to wait\n");
-		return -1;
-	}
-
-	if (futex_get(&task_entries->start) == CR_STATE_RESTORE) {
-		pr_err("Child %d died too early\n", info.si_pid);
-		return -1;
-	}
-
-	if (wait_on_helpers_zombies()) {
-		pr_err("Failed to wait on helpers and zombies\n");
-		return -1;
-	}
-
-	return 0;
-}
-
-/*
- * Restore a helper process - artificially created by criu
- * to restore attributes of process tree.
- * - sessions for each leaders are dead
- * - process groups with dead leaders
- * - dead tasks for which /proc/<pid>/... is opened by restoring task
- * - whatnot
- */
-static int restore_one_helper(void)
-{
-	int i;
-
-	if (prepare_fds(current))
-		return -1;
-
-	if (wait_exiting_children())
-		return -1;
-
-	sfds_protected = false;
-	close_image_dir();
-	close_proc();
-	for (i = SERVICE_FD_MIN + 1; i < SERVICE_FD_MAX; i++)
-		close_service_fd(i);
-
-	return 0;
-}
-
 static int restore_one_task(int pid, CoreEntry *core)
 {
 	int ret;
@@ -1192,7 +772,23 @@ static int restore_one_task(int pid, CoreEntry *core)
 	else if (current->pid->state == TASK_DEAD)
 		ret = restore_one_zombie(core);
 	else if (current->pid->state == TASK_HELPER) {
-		ret = restore_one_helper();
+		sigset_t blockmask, oldmask;
+
+		sigemptyset(&blockmask);
+		sigaddset(&blockmask, SIGCHLD);
+
+		if (sigprocmask(SIG_BLOCK, &blockmask, &oldmask) == -1) {
+			pr_perror("Can not set mask of blocked signals");
+			return -1;
+		}
+
+		restore_finish_stage(task_entries, CR_STATE_RESTORE);
+		if (wait_on_helpers_zombies()) {
+			pr_err("failed to wait on helpers and zombies\n");
+			ret = -1;
+		} else {
+			ret = 0;
+		}
 	} else {
 		pr_err("Unknown state in code %d\n", (int)core->tc->task_state);
 		ret = -1;
@@ -1205,6 +801,12 @@ static int restore_one_task(int pid, CoreEntry *core)
 
 /* All arguments should be above stack, because it grows down */
 struct cr_clone_arg {
+	/*
+	 * Reserve some space for clone() to locate arguments
+	 * and retcode in this place
+	 */
+	char stack[128] __stack_aligned__;
+	char stack_ptr[0];
 	struct pstree_item *item;
 	unsigned long clone_flags;
 	int fd;
@@ -1246,11 +848,6 @@ static void maybe_clone_parent(struct pstree_item *item,
 			pr_warn("Root task has pdeath_sig configured, so it will receive one _right_"
 				"after restore on CRIU exit\n");
 	}
-}
-
-static bool needs_prep_creds(struct pstree_item *item)
-{
-	return (!item->parent && (root_ns_mask & CLONE_NEWUSER));
 }
 
 static inline int fork_with_pid(struct pstree_item *item)
@@ -1332,9 +929,9 @@ static inline int fork_with_pid(struct pstree_item *item)
 	 * The cgroup namespace is also unshared explicitly in the
 	 * move_in_cgroup(), so drop this flag here as well.
 	 */
-	close_pid_proc();
-	ret = clone_noasan(restore_task_with_children,
-			(ca.clone_flags & ~(CLONE_NEWNET | CLONE_NEWCGROUP)) | SIGCHLD, &ca);
+	ret = clone(restore_task_with_children, ca.stack_ptr,
+		    (ca.clone_flags & ~(CLONE_NEWNET | CLONE_NEWCGROUP)) | SIGCHLD, &ca);
+
 	if (ret < 0) {
 		pr_perror("Can't fork for %d", pid);
 		goto err_unlock;
@@ -1362,27 +959,54 @@ err:
 
 static void sigchld_handler(int signal, siginfo_t *siginfo, void *data)
 {
-	int status, pid, exit;
+	struct pstree_item *pi;
+	pid_t pid = siginfo->si_pid;
+	int status;
+	int exit;
 
-	while (1) {
+	exit = (siginfo->si_code == CLD_EXITED);
+	status = siginfo->si_status;
+
+	/* skip scripts */
+	if (!current && root_item->pid->real != pid) {
+		pid = waitpid(root_item->pid->real, &status, WNOHANG);
+		if (pid <= 0)
+			return;
+		exit = WIFEXITED(status);
+		status = exit ? WEXITSTATUS(status) : WTERMSIG(status);
+	}
+
+	if (!current && siginfo->si_code == CLD_TRAPPED &&
+				siginfo->si_status == SIGCHLD) {
+		/* The root task is ptraced. Allow it to handle SIGCHLD */
+		ptrace(PTRACE_CONT, siginfo->si_pid, 0, SIGCHLD);
+		return;
+	}
+
+	if (!current || status)
+		goto err;
+
+	while (pid) {
 		pid = waitpid(-1, &status, WNOHANG);
 		if (pid <= 0)
 			return;
 
-		if (!current && WIFSTOPPED(status) &&
-					WSTOPSIG(status) == SIGCHLD) {
-			/* The root task is ptraced. Allow it to handle SIGCHLD */
-			if (ptrace(PTRACE_CONT, pid, 0, SIGCHLD))
-				pr_perror("Unable to resume %d", pid);
-			return;
-		}
-
 		exit = WIFEXITED(status);
 		status = exit ? WEXITSTATUS(status) : WTERMSIG(status);
+		if (status)
+			break;
 
-		break;
+		/* Exited (with zero code) helpers are OK */
+		list_for_each_entry(pi, &current->children, sibling)
+			if (vpid(pi) == siginfo->si_pid)
+				break;
+
+		BUG_ON(&pi->sibling == &current->children);
+		if (pi->pid->state != TASK_HELPER)
+			break;
 	}
 
+err:
 	if (exit)
 		pr_err("%d exited, status=%d\n", pid, status);
 	else
@@ -1523,24 +1147,19 @@ static int mount_proc(void)
 	int fd, ret;
 	char proc_mountpoint[] = "crtools-proc.XXXXXX";
 
-	if (root_ns_mask == 0)
-		fd = ret = open("/proc", O_DIRECTORY);
-	else {
-		if (mkdtemp(proc_mountpoint) == NULL) {
-			pr_perror("mkdtemp failed %s", proc_mountpoint);
-			return -1;
-		}
-
-		pr_info("Mount procfs in %s\n", proc_mountpoint);
-		if (mount("proc", proc_mountpoint, "proc", MS_MGC_VAL | MS_NOSUID | MS_NOEXEC | MS_NODEV, NULL)) {
-			pr_perror("mount failed");
-			rmdir(proc_mountpoint);
-			return -1;
-		}
-
-		ret = fd = open_detach_mount(proc_mountpoint);
+	if (mkdtemp(proc_mountpoint) == NULL) {
+		pr_perror("mkdtemp failed %s", proc_mountpoint);
+		return -1;
 	}
 
+	pr_info("Mount procfs in %s\n", proc_mountpoint);
+	if (mount("proc", proc_mountpoint, "proc", MS_MGC_VAL | MS_NOSUID | MS_NOEXEC | MS_NODEV, NULL)) {
+		pr_perror("mount failed");
+		rmdir(proc_mountpoint);
+		return -1;
+	}
+
+	ret = fd = open_detach_mount(proc_mountpoint);
 	if (fd >= 0) {
 		ret = set_proc_fd(fd);
 		close(fd);
@@ -1620,6 +1239,12 @@ static int restore_task_with_children(void *_arg)
 	if ( !(ca->clone_flags & CLONE_FILES))
 		close_safe(&ca->fd);
 
+	if (current->pid->state != TASK_HELPER) {
+		ret = clone_service_fd(rsti(current)->service_fd_id);
+		if (ret)
+			goto err;
+	}
+
 	pid = getpid();
 	if (vpid(current) != pid) {
 		pr_err("Pid %d do not match expected %d\n", pid, vpid(current));
@@ -1627,29 +1252,28 @@ static int restore_task_with_children(void *_arg)
 		goto err;
 	}
 
-	if (log_init_by_pid(vpid(current)))
-		return -1;
+	ret = log_init_by_pid();
+	if (ret < 0)
+		goto err;
 
-	if (current->parent == NULL) {
-		/*
-		 * The root task has to be in its namespaces before executing
-		 * ACT_SETUP_NS scripts, so the root netns has to be created here
-		 */
-		if (root_ns_mask & CLONE_NEWNET) {
-			ret = unshare(CLONE_NEWNET);
-			if (ret) {
-				pr_perror("Can't unshare net-namespace");
-				goto err;
-			}
+	if (ca->clone_flags & CLONE_NEWNET) {
+		ret = unshare(CLONE_NEWNET);
+		if (ret) {
+			pr_perror("Can't unshare net-namespace");
+			goto err;
 		}
+	}
 
-		/* Wait prepare_userns */
-		if (restore_finish_ns_stage(CR_STATE_ROOT_TASK, CR_STATE_PREPARE_NAMESPACES) < 0)
+	if (!(ca->clone_flags & CLONE_FILES)) {
+		ret = close_old_fds();
+		if (ret)
 			goto err;
 	}
 
-	if (needs_prep_creds(current) && (prepare_userns_creds()))
-		goto err;
+	/* Wait prepare_userns */
+	if (current->parent == NULL &&
+            restore_finish_stage(task_entries, CR_STATE_RESTORE_NS) < 0)
+			goto err;
 
 	/*
 	 * Call this _before_ forking to optimize cgroups
@@ -1662,6 +1286,13 @@ static int restore_task_with_children(void *_arg)
 
 	/* Restore root task */
 	if (current->parent == NULL) {
+		int i;
+
+		if (prepare_shared_tty())
+			goto err;
+
+		if (fdstore_init())
+			goto err;
 		if (join_namespaces()) {
 			pr_perror("Join namespaces failed");
 			goto err;
@@ -1678,26 +1309,25 @@ static int restore_task_with_children(void *_arg)
 		if (mount_proc())
 			goto err;
 
-		if (!files_collected() && collect_image(&tty_cinfo))
-			goto err;
-		if (collect_images(before_ns_cinfos, ARRAY_SIZE(before_ns_cinfos)))
-			goto err;
+		for (i = 0; i < ARRAY_SIZE(before_ns_cinfos); i++) {
+			ret = collect_image(before_ns_cinfos[i]);
+			if (ret)
+				return -1;
+		}
+
 
 		if (prepare_namespace(current, ca->clone_flags))
 			goto err;
 
-		if (restore_finish_ns_stage(CR_STATE_PREPARE_NAMESPACES, CR_STATE_FORKING) < 0)
+		if (restore_finish_stage(task_entries, CR_STATE_POST_RESTORE_NS) < 0)
 			goto err;
 
 		if (root_prepare_shared())
 			goto err;
 
-		if (populate_root_fd_off())
+		if (restore_finish_stage(task_entries, CR_STATE_RESTORE_SHARED) < 0)
 			goto err;
 	}
-
-	if (setup_newborn_fds(current))
-		goto err;
 
 	if (restore_task_mnt_ns(current))
 		goto err;
@@ -1705,28 +1335,17 @@ static int restore_task_with_children(void *_arg)
 	if (prepare_mappings(current))
 		goto err;
 
-	if (prepare_sigactions(ca->core) < 0)
+	if (prepare_sigactions() < 0)
 		goto err;
 
 	if (fault_injected(FI_RESTORE_ROOT_ONLY)) {
 		pr_info("fault: Restore root task failure!\n");
-		kill(getpid(), SIGKILL);
+		BUG();
 	}
-
-	if (open_transport_socket())
-		goto err;
-
-	timing_start(TIME_FORK);
 
 	if (create_children_and_session())
 		goto err;
 
-	timing_stop(TIME_FORK);
-
-	if (populate_pid_proc())
-		goto err;
-
-	sfds_protected = true;
 
 	if (unmap_guard_pages(current))
 		goto err;
@@ -1736,20 +1355,18 @@ static int restore_task_with_children(void *_arg)
 	if (current->parent == NULL) {
 		/*
 		 * Wait when all tasks passed the CR_STATE_FORKING stage.
-		 * The stage was started by criu, but now it waits for
-		 * the CR_STATE_RESTORE to finish. See comment near the
-		 * CR_STATE_FORKING macro for details.
-		 *
 		 * It means that all tasks entered into their namespaces.
 		 */
-		if (restore_wait_other_tasks())
-			goto err;
+		futex_wait_while_gt(&task_entries->nr_in_progress, 1);
+
 		fini_restore_mntns();
-		__restore_switch_stage(CR_STATE_RESTORE);
-	} else {
-		if (restore_finish_stage(task_entries, CR_STATE_FORKING) < 0)
-			goto err;
 	}
+
+	if (open_transport_socket())
+		return -1;
+
+	if (restore_finish_stage(task_entries, CR_STATE_FORKING) < 0)
+		goto err;
 
 	if (restore_one_task(vpid(current), ca->core))
 		goto err;
@@ -1762,6 +1379,57 @@ err:
 	exit(1);
 }
 
+static inline int stage_participants(int next_stage)
+{
+	switch (next_stage) {
+	case CR_STATE_FAIL:
+		return 0;
+	case CR_STATE_RESTORE_NS:
+	case CR_STATE_POST_RESTORE_NS:
+	case CR_STATE_RESTORE_SHARED:
+		return 1;
+	case CR_STATE_FORKING:
+		return task_entries->nr_tasks + task_entries->nr_helpers;
+	case CR_STATE_RESTORE:
+		return task_entries->nr_threads + task_entries->nr_helpers;
+	case CR_STATE_RESTORE_SIGCHLD:
+		return task_entries->nr_threads;
+	case CR_STATE_RESTORE_CREDS:
+		return task_entries->nr_threads;
+	}
+
+	BUG();
+	return -1;
+}
+
+static int restore_wait_inprogress_tasks()
+{
+	int ret;
+	futex_t *np = &task_entries->nr_in_progress;
+
+	futex_wait_while_gt(np, 0);
+	ret = (int)futex_get(np);
+	if (ret < 0) {
+		set_cr_errno(get_task_cr_err());
+		return ret;
+	}
+
+	return 0;
+}
+
+static void __restore_switch_stage(int next_stage)
+{
+	futex_set(&task_entries->nr_in_progress,
+			stage_participants(next_stage));
+	futex_set_and_wake(&task_entries->start, next_stage);
+}
+
+static int restore_switch_stage(int next_stage)
+{
+	__restore_switch_stage(next_stage);
+	return restore_wait_inprogress_tasks();
+}
+
 static int attach_to_tasks(bool root_seized)
 {
 	struct pstree_item *item;
@@ -1772,12 +1440,8 @@ static int attach_to_tasks(bool root_seized)
 		if (!task_alive(item))
 			continue;
 
-		if (item->nr_threads == 1) {
-			item->threads[0].real = item->pid->real;
-		} else {
-			if (parse_threads(item->pid->real, &item->threads, &item->nr_threads))
-				return -1;
-		}
+		if (parse_threads(item->pid->real, &item->threads, &item->nr_threads))
+			return -1;
 
 		for (i = 0; i < item->nr_threads; i++) {
 			pid_t pid = item->threads[i].real;
@@ -1806,7 +1470,7 @@ static int attach_to_tasks(bool root_seized)
 			 * doing an munmap in the process, which may be blocked by
 			 * seccomp and cause the task to be killed.
 			 */
-			if (rsti(item)->has_seccomp && ptrace_suspend_seccomp(pid) < 0)
+			if (rsti(item)->has_seccomp && suspend_seccomp(pid) < 0)
 				pr_err("failed to suspend seccomp, restore will probably fail...\n");
 
 			if (ptrace(PTRACE_CONT, pid, NULL, NULL) ) {
@@ -1829,12 +1493,8 @@ static int catch_tasks(bool root_seized, enum trace_flags *flag)
 		if (!task_alive(item))
 			continue;
 
-		if (item->nr_threads == 1) {
-			item->threads[0].real = item->pid->real;
-		} else {
-			if (parse_threads(item->pid->real, &item->threads, &item->nr_threads))
-				return -1;
-		}
+		if (parse_threads(item->pid->real, &item->threads, &item->nr_threads))
+			return -1;
 
 		for (i = 0; i < item->nr_threads; i++) {
 			pid_t pid = item->threads[i].real;
@@ -1849,8 +1509,7 @@ static int catch_tasks(bool root_seized, enum trace_flags *flag)
 				return -1;
 			}
 
-			ret = compel_stop_pie(pid, rsti(item)->breakpoint,
-					flag, fault_injected(FI_NO_BREAKPOINTS));
+			ret = ptrace_stop_pie(pid, rsti(item)->breakpoint, flag);
 			if (ret < 0)
 				return -1;
 		}
@@ -1889,11 +1548,11 @@ static void finalize_restore(void)
 			continue;
 
 		/* Unmap the restorer blob */
-		ctl = compel_prepare_noctx(pid);
+		ctl = parasite_prep_ctl(pid, 0);
 		if (ctl == NULL)
 			continue;
 
-		compel_unmap(ctl, (unsigned long)rsti(item)->munmap_restorer);
+		parasite_unmap(ctl, (unsigned long)rsti(item)->munmap_restorer);
 
 		xfree(ctl);
 
@@ -1921,8 +1580,6 @@ static void finalize_restore_detach(int status)
 				break;
 			}
 
-			if (arch_set_thread_regs_nosigrt(&item->threads[i]))
-				pr_perror("Restoring regs for %d failed", pid);
 			if (ptrace(PTRACE_DETACH, pid, NULL, 0))
 				pr_perror("Unable to execute %d", pid);
 		}
@@ -1943,7 +1600,7 @@ static int prepare_userns_hook(void)
 {
 	int ret;
 
-	if (kdat.luid != LUID_FULL)
+	if (!kdat.has_loginuid)
 		return 0;
 	/*
 	 * Save old loginuid and set it to INVALID_UID:
@@ -1957,7 +1614,7 @@ static int prepare_userns_hook(void)
 		return -1;
 
 	if (prepare_loginuid(INVALID_UID, LOG_ERROR) < 0) {
-		pr_err("Setting loginuid for CT init task failed, CAP_AUDIT_CONTROL?\n");
+		pr_err("Setting loginuid for CT init task failed, CAP_AUDIT_CONTROL?");
 		return -1;
 	}
 	return 0;
@@ -1965,12 +1622,12 @@ static int prepare_userns_hook(void)
 
 static void restore_origin_ns_hook(void)
 {
-	if (kdat.luid != LUID_FULL)
+	if (!kdat.has_loginuid)
 		return;
 
 	/* not critical: it does not affect CT in any way */
 	if (prepare_loginuid(saved_loginuid, LOG_ERROR) < 0)
-		pr_err("Restore original /proc/self/loginuid failed\n");
+		pr_err("Restore original /proc/self/loginuid failed");
 }
 
 static int write_restored_pid(void)
@@ -2040,7 +1697,8 @@ static int restore_root_task(struct pstree_item *init)
 	if (prepare_namespace_before_tasks())
 		return -1;
 
-	__restore_switch_stage_nw(CR_STATE_ROOT_TASK);
+	futex_set(&task_entries->nr_in_progress,
+			stage_participants(CR_STATE_RESTORE_NS));
 
 	ret = fork_with_pid(init);
 	if (ret < 0)
@@ -2071,9 +1729,6 @@ static int restore_root_task(struct pstree_item *init)
 		}
 	}
 
-	if (!root_ns_mask)
-		goto skip_ns_bouncing;
-
 	/*
 	 * uid_map and gid_map must be filled from a parent user namespace.
 	 * prepare_userns_creds() must be called after filling mappings.
@@ -2090,7 +1745,12 @@ static int restore_root_task(struct pstree_item *init)
 	if (ret)
 		goto out_kill;
 
-	ret = restore_switch_stage(CR_STATE_PREPARE_NAMESPACES);
+	ret = restore_switch_stage(CR_STATE_POST_RESTORE_NS);
+	if (ret < 0)
+		goto out_kill;
+
+	pr_info("Wait until namespaces are created\n");
+	ret = restore_wait_inprogress_tasks();
 	if (ret)
 		goto out_kill;
 
@@ -2113,23 +1773,26 @@ static int restore_root_task(struct pstree_item *init)
 			goto out_kill;
 	}
 
+	timing_start(TIME_FORK);
+	ret = restore_switch_stage(CR_STATE_RESTORE_SHARED);
+	if (ret < 0)
+		goto out_kill;
+
 	ret = run_scripts(ACT_POST_SETUP_NS);
 	if (ret)
 		goto out_kill;
 
-	__restore_switch_stage(CR_STATE_FORKING);
-
-skip_ns_bouncing:
-
-	ret = restore_wait_inprogress_tasks();
+	ret = restore_switch_stage(CR_STATE_FORKING);
 	if (ret < 0)
 		goto out_kill;
 
-	/*
-	 * Zombies die after CR_STATE_RESTORE which is switched
-	 * by root task, not by us. See comment before CR_STATE_FORKING
-	 * in the header for details.
-	 */
+	timing_stop(TIME_FORK);
+
+	ret = restore_switch_stage(CR_STATE_RESTORE);
+	if (ret < 0)
+		goto out_kill;
+
+	/* Zombies die after CR_STATE_RESTORE */
 	for_each_pstree_item(item) {
 		if (item->pid->state == TASK_DEAD)
 			task_entries->nr_threads--;
@@ -2196,15 +1859,12 @@ skip_ns_bouncing:
 
 	ret = catch_tasks(root_seized, &flag);
 
-	if (lazy_pages_finish_restore())
-		goto out_kill;
-
 	pr_info("Restore finished successfully. Resuming tasks.\n");
-	__restore_switch_stage(CR_STATE_COMPLETE);
+	futex_set_and_wake(&task_entries->start, CR_STATE_COMPLETE);
 
 	if (ret == 0)
-		ret = compel_stop_on_syscall(task_entries->nr_threads,
-			__NR(rt_sigreturn, 0), __NR(rt_sigreturn, 1), flag);
+		ret = parasite_stop_on_syscall(task_entries->nr_threads,
+						__NR_rt_sigreturn, flag);
 
 	if (clear_breakpoints())
 		pr_err("Unable to flush breakpoints\n");
@@ -2267,7 +1927,7 @@ out:
 	return -1;
 }
 
-int prepare_task_entries(void)
+static int prepare_task_entries(void)
 {
 	task_entries_pos = rst_mem_align_cpos(RM_SHREMAP);
 	task_entries = rst_mem_alloc(sizeof(*task_entries), RM_SHREMAP);
@@ -2279,21 +1939,8 @@ int prepare_task_entries(void)
 	task_entries->nr_threads = 0;
 	task_entries->nr_tasks = 0;
 	task_entries->nr_helpers = 0;
-	futex_set(&task_entries->start, CR_STATE_FAIL);
+	futex_set(&task_entries->start, CR_STATE_RESTORE_NS);
 	mutex_init(&task_entries->userns_sync_lock);
-
-	return 0;
-}
-
-int prepare_dummy_task_state(struct pstree_item *pi)
-{
-	CoreEntry *core;
-
-	if (open_core(vpid(pi), &core))
-		return -1;
-
-	pi->pid->state = core->tc->task_state;
-	core_entry__free_unpacked(core, NULL);
 
 	return 0;
 }
@@ -2311,7 +1958,7 @@ int cr_restore_tasks(void)
 	if (init_stats(RESTORE_STATS))
 		goto err;
 
-	if (lsm_check_opts())
+	if (kerndat_init_rst())
 		goto err;
 
 	timing_start(TIME_RESTORE);
@@ -2319,7 +1966,7 @@ int cr_restore_tasks(void)
 	if (cpu_init() < 0)
 		goto err;
 
-	if (vdso_init_restore())
+	if (vdso_init())
 		goto err;
 
 	if (opts.cpu_cap & (CPU_CAP_INS | CPU_CAP_CPU)) {
@@ -2333,16 +1980,10 @@ int cr_restore_tasks(void)
 	if (prepare_pstree() < 0)
 		goto err;
 
-	if (fdstore_init())
-		goto err;
-
 	if (crtools_prepare_shared() < 0)
 		goto err;
 
 	if (criu_signals_setup() < 0)
-		goto err;
-
-	if (prepare_lazy_pages_socket() < 0)
 		goto err;
 
 	ret = restore_root_task(root_item);
@@ -2376,7 +2017,7 @@ static long restorer_get_vma_hint(struct list_head *tgt_vma_list,
 				break;
 			if (prev_vma_end < s_vma->e->end)
 				prev_vma_end = s_vma->e->end;
-			s_vma = vma_next(s_vma);
+			s_vma = list_entry(s_vma->list.next, struct vma_area, list);
 			continue;
 		}
 
@@ -2389,7 +2030,7 @@ static long restorer_get_vma_hint(struct list_head *tgt_vma_list,
 				break;
 			if (prev_vma_end < t_vma->e->end)
 				prev_vma_end = t_vma->e->end;
-			t_vma = vma_next(t_vma);
+			t_vma = list_entry(t_vma->list.next, struct vma_area, list);
 			continue;
 		}
 
@@ -2520,10 +2161,8 @@ static inline int decode_posix_timer(PosixTimerEntry *pte,
 	}
 
 	if (pte->vsec == 0 && pte->vnsec == 0) {
-		/*
-		 * Remaining time was too short. Set it to
-		 * interval to make the timer armed and work.
-		 */
+		// Remaining time was too short. Set it to
+		// interval to make the timer armed and work.
 		pt->val.it_value.tv_sec = pte->isec;
 		pt->val.it_value.tv_nsec = pte->insec;
 	} else {
@@ -2671,9 +2310,6 @@ static int prepare_mm(pid_t pid, struct task_restore_args *args)
 		goto out;
 
 	args->fd_exe_link = exe_fd;
-
-	args->has_thp_enabled = rsti(current)->has_thp_enabled;
-
 	ret = 0;
 out:
 	return ret;
@@ -2690,7 +2326,7 @@ static int prepare_restorer_blob(void)
 	 * in turn will lead to set-exe-file prctl to fail with EBUSY.
 	 */
 
-	restorer_len = pie_size(restorer);
+	restorer_len = pie_size(restorer_blob);
 	restorer = mmap(NULL, restorer_len,
 			PROT_READ | PROT_WRITE | PROT_EXEC,
 			MAP_PRIVATE | MAP_ANON, 0, 0);
@@ -2714,9 +2350,7 @@ static int remap_restorer_blob(void *addr)
 		return -1;
 	}
 
-	compel_relocs_apply(addr, addr, sizeof(restorer_blob),
-			restorer_relocs, ARRAY_SIZE(restorer_relocs));
-
+	ELF_RELOCS_APPLY_RESTORER(addr, addr);
 	return 0;
 }
 
@@ -3132,15 +2766,6 @@ static int rst_prep_creds(pid_t pid, CoreEntry *core, unsigned long *creds_pos)
 	return 0;
 }
 
-static void *restorer_munmap_addr(CoreEntry *core, void *restorer_blob)
-{
-#ifdef CONFIG_COMPAT
-	if (core_is_compat(core))
-		return restorer_sym(restorer_blob, arch_export_unmap_compat);
-#endif
-	return restorer_sym(restorer_blob, arch_export_unmap);
-}
-
 static int sigreturn_restore(pid_t pid, struct task_restore_args *task_args, unsigned long alen, CoreEntry *core)
 {
 	void *mem = MAP_FAILED;
@@ -3156,7 +2781,6 @@ static int sigreturn_restore(pid_t pid, struct task_restore_args *task_args, uns
 	struct restore_mem_zone *mz;
 
 #ifdef CONFIG_VDSO
-	struct vdso_maps vdso_maps_rt;
 	unsigned long vdso_rt_size = 0;
 #endif
 
@@ -3183,11 +2807,6 @@ static int sigreturn_restore(pid_t pid, struct task_restore_args *task_args, uns
 	if (rst_prep_creds(pid, core, &creds_pos))
 		goto err_nv;
 
-	if (current->parent == NULL) {
-		/* Wait when all tasks restored all files */
-		restore_wait_other_tasks();
-	}
-
 	/*
 	 * We're about to search for free VM area and inject the restorer blob
 	 * into it. No irrelevant mmaps/mremaps beyond this point, otherwise
@@ -3206,16 +2825,12 @@ static int sigreturn_restore(pid_t pid, struct task_restore_args *task_args, uns
 			current->nr_threads, KBYTES(task_args->bootstrap_len));
 
 #ifdef CONFIG_VDSO
-	if (core_is_compat(core))
-		vdso_maps_rt = vdso_maps_compat;
-	else
-		vdso_maps_rt = vdso_maps;
 	/*
 	 * Figure out how much memory runtime vdso and vvar will need.
 	 */
-	vdso_rt_size = vdso_maps_rt.sym.vdso_size;
-	if (vdso_rt_size && vdso_maps_rt.sym.vvar_size)
-		vdso_rt_size += ALIGN(vdso_maps_rt.sym.vvar_size, PAGE_SIZE);
+	vdso_rt_size = vdso_vma_size(&vdso_sym_rt);
+	if (vdso_rt_size && vvar_vma_size(&vdso_sym_rt))
+		vdso_rt_size += ALIGN(vvar_vma_size(&vdso_sym_rt), PAGE_SIZE);
 	task_args->bootstrap_len += vdso_rt_size;
 #endif
 
@@ -3251,7 +2866,7 @@ static int sigreturn_restore(pid_t pid, struct task_restore_args *task_args, uns
 	 */
 	task_args->clone_restore_fn	= restorer_sym(mem, arch_export_restore_thread);
 	restore_task_exec_start		= restorer_sym(mem, arch_export_restore_task);
-	rsti(current)->munmap_restorer	= restorer_munmap_addr(core, mem);
+	rsti(current)->munmap_restorer	= restorer_sym(mem, arch_export_unmap);
 
 	task_args->bootstrap_start = mem;
 	mem += restorer_len;
@@ -3305,7 +2920,6 @@ static int sigreturn_restore(pid_t pid, struct task_restore_args *task_args, uns
 	}
 
 	task_args->breakpoint = &rsti(current)->breakpoint;
-	task_args->fault_strategy = fi_strategy;
 
 	sigemptyset(&blockmask);
 	sigaddset(&blockmask, SIGCHLD);
@@ -3332,12 +2946,10 @@ static int sigreturn_restore(pid_t pid, struct task_restore_args *task_args, uns
 	RST_MEM_FIXUP_PPTR(task_args->helpers);
 	RST_MEM_FIXUP_PPTR(task_args->zombies);
 	RST_MEM_FIXUP_PPTR(task_args->seccomp_filters);
-	RST_MEM_FIXUP_PPTR(task_args->vma_ios);
 
 	if (core->tc->has_seccomp_mode)
 		task_args->seccomp_mode = core->tc->seccomp_mode;
 
-	task_args->compatible_mode = core_is_compat(core);
 	/*
 	 * Arguments for task restoration.
 	 */
@@ -3349,8 +2961,8 @@ static int sigreturn_restore(pid_t pid, struct task_restore_args *task_args, uns
 	log_get_logstart(&task_args->logstart);
 	task_args->sigchld_act	= sigchld_act;
 
-	strncpy(task_args->comm, core->tc->comm, TASK_COMM_LEN - 1);
-	task_args->comm[TASK_COMM_LEN - 1] = 0;
+	strncpy(task_args->comm, core->tc->comm, sizeof(task_args->comm));
+
 
 	/*
 	 * Fill up per-thread data.
@@ -3398,6 +3010,7 @@ static int sigreturn_restore(pid_t pid, struct task_restore_args *task_args, uns
 
 		rst_reloc_creds(&thread_args[i], &creds_pos_next);
 
+		thread_args[i].has_futex	= true;
 		thread_args[i].futex_rla	= tcore->thread_core->futex_rla;
 		thread_args[i].futex_rla_len	= tcore->thread_core->futex_rla_len;
 		thread_args[i].pdeath_sig	= tcore->thread_core->pdeath_sig;
@@ -3433,9 +3046,8 @@ static int sigreturn_restore(pid_t pid, struct task_restore_args *task_args, uns
 	 */
 	mem += rst_mem_size;
 	task_args->vdso_rt_parked_at = (unsigned long)mem;
-	task_args->vdso_maps_rt = vdso_maps_rt;
+	task_args->vdso_sym_rt = vdso_sym_rt;
 	task_args->vdso_rt_size = vdso_rt_size;
-	task_args->can_map_vdso = kdat.can_map_vdso;
 #endif
 
 	new_sp = restorer_stack(task_args->t->mz);
@@ -3458,11 +3070,8 @@ static int sigreturn_restore(pid_t pid, struct task_restore_args *task_args, uns
 	if (restore_fs(current))
 		goto err;
 
-	sfds_protected = false;
 	close_image_dir();
 	close_proc();
-	close_service_fd(TRANSPORT_FD_OFF);
-	close_service_fd(CR_PROC_FD_OFF);
 	close_service_fd(ROOT_FD_OFF);
 	close_service_fd(USERNSD_SK);
 	close_service_fd(FDSTORE_SK_OFF);

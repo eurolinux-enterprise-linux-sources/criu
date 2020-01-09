@@ -108,7 +108,6 @@ message criu_opts {
 	optional uint32			timeout			= 45;
 	optional bool			tcp_skip_in_flight	= 46;
 	optional bool			weak_sysctls		= 47;
-	optional bool			lazy_pages		= 48;
 	optional int32			status_fd		= 49;
 	optional bool			orphan_pts_master	= 50;
 }
@@ -140,11 +139,6 @@ enum criu_req_type {
 	CPUINFO_CHECK	= 8;
 
 	FEATURE_CHECK	= 9;
-
-	VERSION		= 10;
-
-	WAIT_PID	= 11;
-	PAGE_SERVER_CHLD = 12;
 }
 
 /*
@@ -153,7 +147,6 @@ enum criu_req_type {
  */
 message criu_features {
 	optional bool			mem_track	= 1;
-	optional bool			lazy_pages	= 2;
 }
 
 /*
@@ -179,9 +172,6 @@ message criu_req {
 	 * via RPC.
 	 */
 	optional criu_features		features	= 5;
-
-	/* 'pid' is used for WAIT_PID */
-	optional uint32			pid		= 6;
 }
 
 /*
@@ -201,17 +191,4 @@ message criu_resp {
 	optional int32			cr_errno	= 7;
 	optional criu_features		features	= 8;
 	optional string			cr_errmsg	= 9;
-	optional criu_version		version		= 10;
-
-	optional int32			status		= 11;
-}
-
-/* Answer for criu_req_type.VERSION requests */
-message criu_version {
-	required int32			major		= 1;
-	required int32			minor		= 2;
-	optional string			gitid		= 3;
-	optional int32			sublevel	= 4;
-	optional int32			extra		= 5;
-	optional string			name		= 6;
 }

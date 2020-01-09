@@ -59,8 +59,8 @@ int main(int argc, char ** argv)
 {
 	int ret, status = 0;
 	pid_t pid, spid, cpid;
+	int signal_pipe[2];
 	int child_pipe[2];
-	siginfo_t siginfo;
 
 	test_init(argc, argv);
 
@@ -81,10 +81,9 @@ int main(int argc, char ** argv)
 	}
 
 	close(child_pipe[1]);
-	test_msg("wait while child initialized");
-	ret = read(child_pipe[0], &status, sizeof(status));
-	if  (ret != sizeof(status)) {
-		pr_perror("read from child process failed");
+	ret = pipe(signal_pipe);
+	if (ret < 0) {
+		pr_perror("pipe failed");
 		return 1;
 	}
 
@@ -93,6 +92,12 @@ int main(int argc, char ** argv)
 		pr_perror("Can't fork signal process");
 		return 1;
 	} else if (spid == 0) {
+		close(signal_pipe[1]);
+		ret = read(signal_pipe[0], &status, sizeof(status));
+		if (ret != sizeof(status)) {
+			pr_perror("read");
+			return 1;
+		}
 		test_msg("send signal to %d\n", cpid);
 		ret = kill(cpid, SIGUSR2);
 		if (ret < 0) {
@@ -100,15 +105,20 @@ int main(int argc, char ** argv)
 		}
 		return 0;
 	}
+	close(signal_pipe[0]);
 
-	if (waitid(P_PID, spid, &siginfo, WEXITED | WNOWAIT)) {
-		pr_perror("Unable to wait spid");
+	test_msg("wait while child initialized");
+	ret = read(child_pipe[0], &status, sizeof(status));
+	if  (ret != sizeof(status)) {
+		pr_perror("read from child process failed");
 		return 1;
 	}
-	if (waitid(P_PID, cpid, &siginfo, WSTOPPED | WNOWAIT)) {
-		pr_perror("Unable to wait cpid");
-		return 1;
+
+	ret = write(signal_pipe[1], &status, sizeof(status));
+	if (ret != sizeof(status)) {
+		pr_perror("write to signal process failed");
 	}
+	close(signal_pipe[1]);
 
 	test_daemon();
 	test_waitsig();
@@ -123,6 +133,7 @@ int main(int argc, char ** argv)
 		}
 
 		if (WIFSTOPPED(status)) {
+			siginfo_t siginfo;
 
 			test_msg("pid=%d stopsig=%d\n", pid, WSTOPSIG(status));
 

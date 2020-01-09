@@ -25,7 +25,6 @@
 #include "namespaces.h"
 #include "net.h"
 #include "cgroup.h"
-#include "fdstore.h"
 
 #include "protobuf.h"
 #include "util.h"
@@ -48,7 +47,7 @@ int check_namespace_opts(void)
 {
 	errno = 22;
 	if (join_ns_flags & opts.empty_ns) {
-		pr_err("Conflicting flags: --join-ns and --empty-ns\n");
+		pr_perror("Conflict flags: -join-ns and -empty-ns");
 		return -1;
 	}
 	if (join_ns_flags & CLONE_NEWUSER)
@@ -91,13 +90,12 @@ static int check_ns_file(char *ns_file)
 	if (!check_int_str(ns_file)) {
 		pid = atoi(ns_file);
 		if (pid <= 0) {
-			pr_err("Invalid join_ns pid %s\n", ns_file);
+			pr_perror("Invalid join_ns pid %s", ns_file);
 			return -1;
 		}
 		proc_dir = open_pid_proc(pid);
 		if (proc_dir < 0) {
-			pr_err("Invalid join_ns pid: /proc/%s not found\n",
-					ns_file);
+			pr_perror("Invalid join_ns pid: /proc/%s not found", ns_file);
 			return -1;
 		}
 		return 0;
@@ -105,7 +103,7 @@ static int check_ns_file(char *ns_file)
 
 	ret = access(ns_file, 0);
 	if (ret < 0) {
-		pr_perror("Can't access join-ns file %s", ns_file);
+		pr_perror("Can't access join-ns file: %s", ns_file);
 		return -1;
 	}
 	return 0;
@@ -239,12 +237,16 @@ int switch_ns(int pid, struct ns_desc *nd, int *rst)
 
 int switch_ns_by_fd(int nsfd, struct ns_desc *nd, int *rst)
 {
+	char buf[32];
 	int ret = -1;
 
 	if (rst) {
-		*rst = open_proc(PROC_SELF, "ns/%s", nd->str);
-		if (*rst < 0)
+		snprintf(buf, sizeof(buf), "/proc/self/ns/%s", nd->str);
+		*rst = open(buf, O_RDONLY);
+		if (*rst < 0) {
+			pr_perror("Can't open ns file");
 			goto err_ns;
+		}
 	}
 
 	ret = setns(nsfd, nd->cflag);
@@ -300,12 +302,6 @@ struct ns_id *rst_new_ns_id(unsigned int id, pid_t pid,
 		nsid->type = type;
 		nsid_add(nsid, nd, id, pid);
 		nsid->ns_populated = false;
-
-		if (nd == &net_ns_desc) {
-			INIT_LIST_HEAD(&nsid->net.ids);
-			INIT_LIST_HEAD(&nsid->net.links);
-			nsid->net.netns = NULL;
-		}
 	}
 
 	return nsid;
@@ -331,7 +327,7 @@ int rst_add_ns_id(unsigned int id, struct pstree_item *i, struct ns_desc *nd)
 	return 0;
 }
 
-struct ns_id *lookup_ns_by_kid(unsigned int kid, struct ns_desc *nd)
+static struct ns_id *lookup_ns_by_kid(unsigned int kid, struct ns_desc *nd)
 {
 	struct ns_id *nsid;
 
@@ -427,11 +423,6 @@ static unsigned int generate_ns_id(int pid, unsigned int kid, struct ns_desc *nd
 	nsid->ns_populated = true;
 	nsid_add(nsid, nd, ns_next_id++, pid);
 
-	if (nd == &net_ns_desc) {
-		INIT_LIST_HEAD(&nsid->net.ids);
-		INIT_LIST_HEAD(&nsid->net.links);
-	}
-
 found:
 	if (ns_ret)
 		*ns_ret = nsid;
@@ -449,7 +440,7 @@ static unsigned int __get_ns_id(int pid, struct ns_desc *nd, protobuf_c_boolean 
 	if (proc_dir < 0)
 		return 0;
 
-	snprintf(ns_path, sizeof(ns_path), "ns/%s", nd->str);
+	sprintf(ns_path, "ns/%s", nd->str);
 
 	if (fstatat(proc_dir, ns_path, &st, 0)) {
 		if (errno == ENOENT) {
@@ -476,8 +467,7 @@ static unsigned int get_ns_id(int pid, struct ns_desc *nd, protobuf_c_boolean *s
 
 int dump_one_ns_file(int lfd, u32 id, const struct fd_parms *p)
 {
-	struct cr_img *img;
-	FileEntry fe = FILE_ENTRY__INIT;
+	struct cr_img *img = img_from_set(glob_imgset, CR_FD_NS_FILES);
 	NsFileEntry nfe = NS_FILE_ENTRY__INIT;
 	struct fd_link *link = p->link;
 	struct ns_id *nsid;
@@ -493,12 +483,7 @@ int dump_one_ns_file(int lfd, u32 id, const struct fd_parms *p)
 	nfe.ns_cflag	= link->ns_d->cflag;
 	nfe.flags	= p->flags;
 
-	fe.type = FD_TYPES__NS;
-	fe.id = nfe.id;
-	fe.nsf = &nfe;
-
-	img = img_from_set(glob_imgset, CR_FD_FILES);
-	return pb_write_one(img, &fe, PB_FILE);
+	return pb_write_one(img, &nfe, PB_NS_FILE);
 }
 
 const struct fdtype_ops nsfile_dump_ops = {
@@ -516,21 +501,8 @@ static int open_ns_fd(struct file_desc *d, int *new_fd)
 	struct ns_file_info *nfi = container_of(d, struct ns_file_info, d);
 	struct pstree_item *item, *t;
 	struct ns_desc *nd = NULL;
-	struct ns_id *ns;
-	int nsfd_id, fd;
 	char path[64];
-
-	for (ns = ns_ids; ns != NULL; ns = ns->next) {
-		if (ns->id != nfi->nfe->ns_id)
-			continue;
-		/* Check for CLONE_XXX as we use fdstore only if flag is set */
-		if (ns->nd == &net_ns_desc && (root_ns_mask & CLONE_NEWNET))
-			nsfd_id = ns->net.nsfd_id;
-		else
-			break;
-		fd = fdstore_get(nsfd_id);
-		goto check_open;
-	}
+	int fd;
 
 	/*
 	 * Find out who can open us.
@@ -547,10 +519,6 @@ static int open_ns_fd(struct file_desc *d, int *new_fd)
 		} else if (ids->net_ns_id == nfi->nfe->ns_id) {
 			item = t;
 			nd = &net_ns_desc;
-			break;
-		} else if (ids->user_ns_id == nfi->nfe->ns_id) {
-			item = t;
-			nd = &user_ns_desc;
 			break;
 		} else if (ids->ipc_ns_id == nfi->nfe->ns_id) {
 			item = t;
@@ -585,7 +553,6 @@ static int open_ns_fd(struct file_desc *d, int *new_fd)
 	path[sizeof(path) - 1] = '\0';
 
 	fd = open(path, nfi->nfe->flags);
-check_open:
 	if (fd < 0) {
 		pr_perror("Can't open file %s on restore", path);
 		return fd;
@@ -929,7 +896,7 @@ static int check_user_ns(int pid)
 	}
 
 	if (waitpid(chld, &status, 0) != chld) {
-		pr_perror("Unable to wait for PID %d", chld);
+		pr_perror("Unable to wait the %d process", pid);
 		return -1;
 	}
 
@@ -1015,7 +982,7 @@ static int do_dump_namespaces(struct ns_id *ns)
 	case CLONE_NEWNET:
 		pr_info("Dump NET namespace info %d via %d\n",
 				ns->id, ns->ns_pid);
-		ret = dump_net_ns(ns);
+		ret = dump_net_ns(ns->id);
 		break;
 	default:
 		pr_err("Unknown namespace flag %x\n", ns->nd->cflag);
@@ -1246,10 +1213,7 @@ static int usernsd(int sk)
 		unsc_msg_pid_fd(&um, &pid, &fd);
 		pr_debug("uns: daemon calls %p (%d, %d, %x)\n", call, pid, fd, flags);
 
-		if (fd < 0 && flags & UNS_FDOUT) {
-			pr_err("uns: bad flags/fd %p %d %x\n", call, fd, flags);
-			BUG();
-		}
+		BUG_ON(fd < 0 && flags & UNS_FDOUT);
 
 		/*
 		 * Caller has sent us bare address of the routine it
@@ -1537,7 +1501,7 @@ int collect_namespaces(bool for_dump)
 	return 0;
 }
 
-int prepare_userns_creds(void)
+static int prepare_userns_creds()
 {
 	/* UID and GID must be set after restoring /proc/PID/{uid,gid}_maps */
 	if (setuid(0) || setgid(0) || setgroups(0, NULL)) {
@@ -1548,12 +1512,12 @@ int prepare_userns_creds(void)
 	/*
 	 * This flag is dropped after entering userns, but is
 	 * required to access files in /proc, so put one here
-	 * temporarily. It will be set to proper value at the
+	 * temoprarily. It will be set to proper value at the
 	 * very end.
 	 */
 	if (prctl(PR_SET_DUMPABLE, 1, 0)) {
 		pr_perror("Unable to set PR_SET_DUMPABLE");
-		return -1;
+		exit(1);
 	}
 
 	return 0;
@@ -1575,7 +1539,7 @@ static int get_join_ns_fd(struct join_ns *jn)
 
 	fd = open(pnsf, O_RDONLY);
 	if (fd < 0) {
-		pr_perror("Can't open ns file %s", pnsf);
+		pr_perror("Can't open ns file: %s", pnsf);
 		return -1;
 	}
 	jn->ns_fd = fd;
@@ -1682,14 +1646,10 @@ err_out:
 int prepare_namespace(struct pstree_item *item, unsigned long clone_flags)
 {
 	pid_t pid = vpid(item);
-	sigset_t sig_mask;
-	int id, ret = -1;
+	int id;
 
 	pr_info("Restoring namespaces %d flags 0x%lx\n",
 			vpid(item), clone_flags);
-
-	if (block_sigmask(&sig_mask, SIGCHLD) < 0)
-		return -1;
 
 	if ((clone_flags & CLONE_NEWUSER) && prepare_userns_creds())
 		return -1;
@@ -1700,29 +1660,24 @@ int prepare_namespace(struct pstree_item *item, unsigned long clone_flags)
 	 * tree (i.e. -- mnt_ns restoring)
 	 */
 
+	id = ns_per_id ? item->ids->net_ns_id : pid;
+	if ((clone_flags & CLONE_NEWNET) && prepare_net_ns(id))
+		return -1;
 	id = ns_per_id ? item->ids->uts_ns_id : pid;
 	if ((clone_flags & CLONE_NEWUTS) && prepare_utsns(id))
-		goto out;
+		return -1;
 	id = ns_per_id ? item->ids->ipc_ns_id : pid;
 	if ((clone_flags & CLONE_NEWIPC) && prepare_ipc_ns(id))
-		goto out;
-
-	if (prepare_net_namespaces())
-		goto out;
+		return -1;
 
 	/*
 	 * This one is special -- there can be several mount
 	 * namespaces and prepare_mnt_ns handles them itself.
 	 */
 	if (prepare_mnt_ns())
-		goto out;
+		return -1;
 
-	ret = 0;
-out:
-	if (restore_sigmask(&sig_mask) < 0)
-		ret = -1;
-
-	return ret;
+	return 0;
 }
 
 int prepare_namespace_before_tasks(void)

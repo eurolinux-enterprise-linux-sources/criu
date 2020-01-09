@@ -1,9 +1,9 @@
-#ifndef __CR_PTRACE_H__
-#define __CR_PTRACE_H__
+#ifndef __CR_PTRACE_ARCH_H__
+#define __CR_PTRACE_ARCH_H__
 
-#include <compel/ptrace.h>
 #include <linux/types.h>
-#include "common/config.h"
+#include <sys/ptrace.h>
+#include "config.h"
 
 #ifndef CONFIG_HAS_PTRACE_PEEKSIGINFO
 struct ptrace_peeksiginfo_args {
@@ -13,4 +13,4 @@ struct ptrace_peeksiginfo_args {
 };
 #endif
 
-#endif /* __CR_PTRACE_H__ */
+#endif /* __CR_PTRACE_ARCH_H__ */

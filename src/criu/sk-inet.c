@@ -2,7 +2,6 @@
 #include <sys/socket.h>
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
-#include <netinet/udp.h>
 #include <libnl3/netlink/msg.h>
 #include <net/if.h>
 #include <sys/mman.h>
@@ -26,7 +25,6 @@
 #include "sk-inet.h"
 #include "protobuf.h"
 #include "util.h"
-#include "namespaces.h"
 
 #define PB_ALEN_INET	1
 #define PB_ALEN_INET6	4
@@ -124,15 +122,16 @@ static int can_dump_inet_sk(const struct inet_sk_desc *sk)
 	BUG_ON((sk->sd.family != AF_INET) && (sk->sd.family != AF_INET6));
 
 	if (sk->type == SOCK_DGRAM) {
+		if (sk->shutdown) {
+			pr_err("Can't dump shutdown inet socket %x\n",
+					sk->sd.ino);
+			return 0;
+		}
+
 		if (sk->wqlen != 0) {
-			if (sk->cork) {
-				pr_err("Can't dump corked dgram socket %x\n",
+			pr_err("Can't dump corked dgram socket %x\n",
 					sk->sd.ino);
-				return 0;
-			} else {
-				pr_warn("Write queue of the %x socket isn't empty\n",
-					sk->sd.ino);
-			}
+			return 0;
 		}
 
 		if (sk->rqlen)
@@ -144,7 +143,7 @@ static int can_dump_inet_sk(const struct inet_sk_desc *sk)
 
 	if (sk->type != SOCK_STREAM) {
 		pr_err("Can't dump %d inet socket %x. "
-				"Only stream and dgram are supported.\n",
+				"Only can stream and dgram.\n",
 				sk->type, sk->sd.ino);
 		return 0;
 	}
@@ -211,15 +210,8 @@ static struct inet_sk_desc *gen_uncon_sk(int lfd, const struct fd_parms *p, int 
 {
 	struct inet_sk_desc *sk;
 	union libsoccr_addr address;
-	struct ns_id *ns = NULL;
 	socklen_t aux;
 	int ret;
-
-	if (root_ns_mask & CLONE_NEWNET) {
-		ns = get_socket_ns(lfd);
-		if (ns == NULL)
-			return NULL;
-	}
 
 	sk = xzalloc(sizeof(*sk));
 	if (!sk)
@@ -260,14 +252,7 @@ static struct inet_sk_desc *gen_uncon_sk(int lfd, const struct fd_parms *p, int 
 	sk->sd.ino = p->stat.st_ino;
 
 	if (proto == IPPROTO_TCP) {
-		struct {
-			__u8    tcpi_state;
-			__u8    tcpi_ca_state;
-			__u8    tcpi_retransmits;
-			__u8    tcpi_probes;
-			__u8    tcpi_backoff;
-			__u8    tcpi_options;
-		} info;
+		struct tcp_info info;
 
 		aux = sizeof(info);
 		ret = getsockopt(lfd, SOL_TCP, TCP_INFO, &info, &aux);
@@ -287,7 +272,7 @@ static struct inet_sk_desc *gen_uncon_sk(int lfd, const struct fd_parms *p, int 
 
 	sk->state = TCP_CLOSE;
 
-	sk_collect_one(sk->sd.ino, sk->sd.family, &sk->sd, ns);
+	sk_collect_one(sk->sd.ino, sk->sd.family, &sk->sd);
 
 	return sk;
 err:
@@ -327,11 +312,10 @@ static bool needs_scope_id(uint32_t *src_addr)
 static int do_dump_one_inet_fd(int lfd, u32 id, const struct fd_parms *p, int family)
 {
 	struct inet_sk_desc *sk;
-	FileEntry fe = FILE_ENTRY__INIT;
 	InetSkEntry ie = INET_SK_ENTRY__INIT;
 	IpOptsEntry ipopts = IP_OPTS_ENTRY__INIT;
 	SkOptsEntry skopts = SK_OPTS_ENTRY__INIT;
-	int ret = -1, err = -1, proto, aux;
+	int ret = -1, err = -1, proto;
 
 	ret = do_dump_opt(lfd, SOL_SOCKET, SO_PROTOCOL,
 					&proto, sizeof(proto));
@@ -350,24 +334,6 @@ static int do_dump_one_inet_fd(int lfd, u32 id, const struct fd_parms *p, int fa
 			goto err;
 	}
 
-	sk->cork = false;
-	switch (proto) {
-	case IPPROTO_UDP:
-	case IPPROTO_UDPLITE:
-		if (dump_opt(lfd, SOL_UDP, UDP_CORK, &aux))
-			return -1;
-		if (aux) {
-			sk->cork = true;
-			/*
-			 * FIXME: it is possible to dump a corked socket with
-			 * the empty send queue.
-			 */
-			pr_err("Can't dump corked dgram socket %x\n", sk->sd.ino);
-			goto err;
-		}
-		break;
-	}
-
 	if (!can_dump_inet_sk(sk))
 		goto err;
 
@@ -375,10 +341,6 @@ static int do_dump_one_inet_fd(int lfd, u32 id, const struct fd_parms *p, int fa
 
 	ie.id		= id;
 	ie.ino		= sk->sd.ino;
-	if (sk->sd.sk_ns) {
-		ie.ns_id	= sk->sd.sk_ns->id;
-		ie.has_ns_id	= true;
-	}
 	ie.family	= family;
 	ie.proto	= proto;
 	ie.type		= sk->type;
@@ -452,10 +414,6 @@ static int do_dump_one_inet_fd(int lfd, u32 id, const struct fd_parms *p, int fa
 	case IPPROTO_TCP:
 		err = dump_one_tcp(lfd, sk);
 		break;
-	case IPPROTO_UDP:
-	case IPPROTO_UDPLITE:
-		sk_encode_shutdown(&ie, sk->shutdown);
-		/* Fallthrough! */
 	default:
 		err = 0;
 		break;
@@ -463,11 +421,7 @@ static int do_dump_one_inet_fd(int lfd, u32 id, const struct fd_parms *p, int fa
 
 	ie.state = sk->state;
 
-	fe.type = FD_TYPES__INETSK;
-	fe.id = ie.id;
-	fe.isk = &ie;
-
-	if (pb_write_one(img_from_set(glob_imgset, CR_FD_FILES), &fe, PB_FILE))
+	if (pb_write_one(img_from_set(glob_imgset, CR_FD_INETSK), &ie, PB_INET_SK))
 		goto err;
 err:
 	release_skopts(&skopts);
@@ -496,7 +450,7 @@ const struct fdtype_ops inet6_dump_ops = {
 	.dump		= dump_one_inet6_fd,
 };
 
-int inet_collect_one(struct nlmsghdr *h, int family, int type, struct ns_id *ns)
+int inet_collect_one(struct nlmsghdr *h, int family, int type)
 {
 	struct inet_sk_desc *d;
 	struct inet_diag_msg *m = NLMSG_DATA(h);
@@ -523,7 +477,7 @@ int inet_collect_one(struct nlmsghdr *h, int family, int type, struct ns_id *ns)
 	else
 		pr_err_once("Can't check shutdown state of inet socket\n");
 
-	ret = sk_collect_one(m->idiag_inode, family, &d->sd, ns);
+	ret = sk_collect_one(m->idiag_inode, family, &d->sd);
 
 	show_one_inet("Collected", d);
 
@@ -569,6 +523,11 @@ struct collect_image_info inet_sk_cinfo = {
 	.priv_size = sizeof(struct inet_sk_info),
 	.collect = collect_one_inetsk,
 };
+
+int collect_inet_sockets(void)
+{
+	return collect_image(&inet_sk_cinfo);
+}
 
 static int inet_validate_address(InetSkEntry *ie)
 {
@@ -622,18 +581,14 @@ static int post_open_inet_sk(struct file_desc *d, int sk)
 	}
 
 	/* SO_REUSEADDR is set for all sockets */
-	if (ii->ie->opts->reuseaddr && ii->ie->opts->so_reuseport)
+	if (ii->ie->opts->reuseaddr)
 		return 0;
 
 	if (atomic_read(&ii->port->users))
 		return 1;
 
 	val = ii->ie->opts->reuseaddr;
-	if (!val && restore_opt(sk, SOL_SOCKET, SO_REUSEADDR, &val))
-		return -1;
-
-	val = ii->ie->opts->so_reuseport;
-	if (!val && restore_opt(sk, SOL_SOCKET, SO_REUSEPORT, &val))
+	if (restore_opt(sk, SOL_SOCKET, SO_REUSEADDR, &val))
 		return -1;
 
 	return 0;
@@ -676,9 +631,6 @@ static int open_inet_sk(struct file_desc *d, int *new_fd)
 	if (inet_validate_address(ie))
 		return -1;
 
-	if (set_netns(ie->ns_id))
-		return -1;
-
 	sk = socket(ie->family, ie->type, ie->proto);
 	if (sk < 0) {
 		pr_perror("Can't create inet socket");
@@ -696,11 +648,9 @@ static int open_inet_sk(struct file_desc *d, int *new_fd)
 	 */
 	if (restore_opt(sk, SOL_SOCKET, SO_REUSEADDR, &yes))
 		goto err;
-	if (restore_opt(sk, SOL_SOCKET, SO_REUSEPORT, &yes))
-		goto err;
 
 	if (tcp_connection(ie)) {
-		if (!opts.tcp_established_ok && !opts.tcp_close) {
+		if (!opts.tcp_established_ok) {
 			pr_err("Connected TCP socket in image\n");
 			goto err;
 		}
@@ -753,16 +703,6 @@ done:
 
 	if (restore_socket_opts(sk, ie->opts))
 		goto err;
-
-	if (ie->has_shutdown &&
-	    (ie->proto == IPPROTO_UDP ||
-	     ie->proto == IPPROTO_UDPLITE)) {
-		if (shutdown(sk, sk_decode_shutdown(ie->shutdown))) {
-			pr_perror("Can't shutdown socket into %d",
-				  sk_decode_shutdown(ie->shutdown));
-			goto err;
-		}
-	}
 
 	*new_fd = sk;
 	return 1;

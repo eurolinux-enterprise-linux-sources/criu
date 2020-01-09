@@ -28,7 +28,6 @@ struct inet_sk_desc {
 	unsigned int		src_addr[4];
 	unsigned int		dst_addr[4];
 	unsigned short		shutdown;
-	bool			cork;
 
 	int rfd;
 	int cpt_reuseaddr;
@@ -76,7 +75,6 @@ extern int restore_one_tcp(int sk, struct inet_sk_info *si);
 
 #define SK_EST_PARAM	"tcp-established"
 #define SK_INFLIGHT_PARAM "skip-in-flight"
-#define SK_CLOSE_PARAM	"tcp-close"
 
 struct task_restore_args;
 int prepare_tcp_socks(struct task_restore_args *);

@@ -4,7 +4,7 @@
 #include "asm/types.h"
 #include "images/core.pb-c.h"
 
-#include <compel/asm/sigframe.h>
+#include "sigframe.h"
 
 #define RUN_CLONE_RESTORE_FN(ret, clone_flags, new_sp, parent_tid,	\
 			     thread_args, clone_restore_fn)		\
@@ -53,13 +53,10 @@
 		     : "memory")
 
 
-#define arch_map_vdso(map, compat)		-1
+
 
 int restore_gpregs(struct rt_sigframe *f, UserArmRegsEntry *r);
 int restore_nonsigframe_gpregs(UserArmRegsEntry *r);
-#define ARCH_HAS_SHMAT_HOOK
-unsigned long arch_shmat(int shmid, void *shmaddr,
-			int shmflg, unsigned long size);
 
 static inline void restore_tls(tls_t *ptls) {
 	asm (
@@ -75,15 +72,14 @@ static inline void restore_tls(tls_t *ptls) {
 	     );
 }
 
-static inline void *alloc_compat_syscall_stack(void) { return NULL; }
-static inline void free_compat_syscall_stack(void *stack32) { }
-static inline int arch_compat_rt_sigaction(void *stack, int sig, void *act)
+static inline int ptrace_set_breakpoint(pid_t pid, void *addr)
 {
-	return -1;
+	return 0;
 }
-static inline int set_compat_robust_list(uint32_t head_ptr, uint32_t len)
+
+static inline int ptrace_flush_breakpoints(pid_t pid)
 {
-	return -1;
+	return 0;
 }
 
 #endif

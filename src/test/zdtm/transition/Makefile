@@ -1,7 +1,11 @@
-LIBDIR	:= ../lib
-LIB	:= $(LIBDIR)/libzdtmtst.a
-LDLIBS	+= $(LIB)
-CPPFLAGS += -I$(LIBDIR)
+include ../Makefile.inc
+
+LIBDIR	= ../lib
+LIB	= $(LIBDIR)/libzdtmtst.a
+LDLIBS	+= $(LIBDIR)/libzdtmtst.a
+override CPPFLAGS += -I$(LIBDIR)
+CFLAGS	= -g -O2 -Wall -Werror -fno-strict-aliasing
+CFLAGS	+= $(USERCFLAGS)
 
 TST_NOFILE	=	\
 		ipc		\
@@ -20,7 +24,6 @@ TST_NOFILE	=	\
 		socket-tcp      \
 		socket-tcp6     \
 		shmem		\
-		lazy-thp	\
 
 
 TST_FILE	=	\
@@ -37,7 +40,9 @@ DEP	= $(SRC:%.c=%.d)
 PID	= $(TST:%=%.pid)
 OUT	= $(TST:%=%.out)
 
-include ../Makefile.inc
+%: %.c
+	$(Q)echo $@ >> .gitignore
+	$(CC) $(CFLAGS) $(CPPFLAGS) $(LDFLAGS) $(LOADLIBES) $^ $(LDLIBS) -o $@
 
 all:	$(TST)
 install: all
@@ -69,16 +74,16 @@ wait_stop:
 		sleep 1; \
 	done
 
-$(TST):	| $(LIB)
+$(TST):	$(LIB)
 
-file_aio:	LDLIBS += -lrt -pthread
-socket-tcp:	CFLAGS += -D STREAM
-socket-tcp6:	CFLAGS += -D ZDTM_IPV6 -D STREAM
-ptrace.o:	CFLAGS += -pthread
-ptrace:		LDFLAGS += -pthread
-fork2:		CFLAGS += -D FORK2
-thread-bomb.o:	CFLAGS += -pthread
-thread-bomb:	LDFLAGS += -pthread
+file_aio:	override LDLIBS += -lrt -pthread
+socket-tcp:	override CFLAGS += -D STREAM
+socket-tcp6:	override CFLAGS += -D ZDTM_IPV6 -D STREAM
+ptrace.o:	override CFLAGS += -pthread
+ptrace:		override LDFLAGS += -pthread
+fork2:		override CFLAGS += -D FORK2
+thread-bomb.o:	override CFLAGS += -pthread
+thread-bomb:	override LDFLAGS += -pthread
 
 %: %.sh
 	cp $< $@
@@ -87,4 +92,21 @@ thread-bomb:	LDFLAGS += -pthread
 $(LIB):	force
 	$(Q) $(MAKE) -C $(LIBDIR)
 
-.PHONY:	force start check_start stop wait_stop
+gitignore-clean:
+	$(RM) -f .gitignore
+
+clean:	gitignore-clean
+	$(RM) -f $(OBJ) $(TST) *~
+
+cleandep:	clean
+	$(RM) -f $(DEP)
+
+%.cleanout: %
+	$(Q) $(RM) -f -r $<.pid* $<.out* $<.test* chew_$<.test*
+
+cleanout:
+	$(RM) -f *.pid *.out* *.test chew*
+
+realclean:	cleandep cleanout
+
+.PHONY:	force clean cleandep cleanout realclean start check_start stop wait_stop

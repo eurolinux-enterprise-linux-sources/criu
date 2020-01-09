@@ -21,8 +21,8 @@
 #include <netinet/in.h>
 #include <sys/prctl.h>
 #include <sched.h>
-#include <sys/mount.h>
 #include <linux/aio_abi.h>
+#include <sys/mount.h>
 
 #include "../soccr/soccr.h"
 
@@ -38,7 +38,7 @@
 #include "proc_parse.h"
 #include "mount.h"
 #include "tty.h"
-#include <compel/ptrace.h>
+#include "ptrace.h"
 #include "ptrace-compat.h"
 #include "kerndat.h"
 #include "timerfd.h"
@@ -49,8 +49,6 @@
 #include "cr_options.h"
 #include "libnetlink.h"
 #include "net.h"
-#include "restorer.h"
-#include "uffd.h"
 
 static char *feature_name(int (*func)());
 
@@ -245,12 +243,14 @@ static int check_fcntl(void)
 	u32 v[2];
 	int fd;
 
-	fd = open_proc(PROC_SELF, "comm");
-	if (fd < 0)
+	fd = open("/proc/self/comm", O_RDONLY);
+	if (fd < 0) {
+		pr_perror("Can't open self comm file");
 		return -1;
+	}
 
 	if (fcntl(fd, F_GETOWNER_UIDS, (long)v)) {
-		pr_perror("Can't fetch file owner UIDs");
+		pr_perror("Can'r fetch file owner UIDs");
 		close(fd);
 		return -1;
 	}
@@ -273,11 +273,16 @@ static int check_proc_stat(void)
 	return 0;
 }
 
+static int check_one_fdinfo(union fdinfo_entries *e, void *arg)
+{
+	*(int *)arg = (int)e->efd.counter;
+	return 0;
+}
+
 static int check_fdinfo_eventfd(void)
 {
 	int fd, ret;
-	int cnt = 13;
-	EventfdFileEntry fe = EVENTFD_FILE_ENTRY__INIT;
+	int cnt = 13, proc_cnt = 0;
 
 	fd = eventfd(cnt, 0);
 	if (fd < 0) {
@@ -285,7 +290,7 @@ static int check_fdinfo_eventfd(void)
 		return -1;
 	}
 
-	ret = parse_fdinfo(fd, FD_TYPES__EVENTFD, &fe);
+	ret = parse_fdinfo(fd, FD_TYPES__EVENTFD, check_one_fdinfo, &proc_cnt);
 	close(fd);
 
 	if (ret) {
@@ -293,13 +298,18 @@ static int check_fdinfo_eventfd(void)
 		return -1;
 	}
 
-	if (fe.counter != cnt) {
+	if (proc_cnt != cnt) {
 		pr_err("Counter mismatch (or not met) %d want %d\n",
-				(int)fe.counter, cnt);
+				proc_cnt, cnt);
 		return -1;
 	}
 
-	pr_info("Eventfd fdinfo works OK (%d vs %d)\n", cnt, (int)fe.counter);
+	pr_info("Eventfd fdinfo works OK (%d vs %d)\n", cnt, proc_cnt);
+	return 0;
+}
+
+static int check_one_sfd(union fdinfo_entries *e, void *arg)
+{
 	return 0;
 }
 
@@ -308,7 +318,7 @@ int check_mnt_id(void)
 	struct fdinfo_common fdinfo = { .mnt_id = -1 };
 	int ret;
 
-	ret = parse_fdinfo(get_service_fd(LOG_FD_OFF), FD_TYPES__UND, &fdinfo);
+	ret = parse_fdinfo(get_service_fd(LOG_FD_OFF), FD_TYPES__UND, NULL, &fdinfo);
 	if (ret < 0)
 		return -1;
 
@@ -324,7 +334,6 @@ static int check_fdinfo_signalfd(void)
 {
 	int fd, ret;
 	sigset_t mask;
-	SignalfdEntry sfd = SIGNALFD_ENTRY__INIT;
 
 	sigemptyset(&mask);
 	sigaddset(&mask, SIGUSR1);
@@ -334,7 +343,7 @@ static int check_fdinfo_signalfd(void)
 		return -1;
 	}
 
-	ret = parse_fdinfo(fd, FD_TYPES__SIGNALFD, &sfd);
+	ret = parse_fdinfo(fd, FD_TYPES__SIGNALFD, check_one_sfd, NULL);
 	close(fd);
 
 	if (ret) {
@@ -345,11 +354,17 @@ static int check_fdinfo_signalfd(void)
 	return 0;
 }
 
+static int check_one_epoll(union fdinfo_entries *e, void *arg)
+{
+	*(int *)arg = e->epl.e.tfd;
+	free_event_poll_entry(e);
+	return 0;
+}
+
 static int check_fdinfo_eventpoll(void)
 {
-	int efd, pfd[2], ret = -1;
+	int efd, pfd[2], proc_fd = 0, ret = -1;
 	struct epoll_event ev;
-	EventpollFileEntry efe = EVENTPOLL_FILE_ENTRY__INIT;
 
 	if (pipe(pfd)) {
 		pr_perror("Can't make pipe to watch");
@@ -370,19 +385,20 @@ static int check_fdinfo_eventpoll(void)
 		goto epoll_err;
 	}
 
-	ret = parse_fdinfo(efd, FD_TYPES__EVENTPOLL, &efe);
+	ret = parse_fdinfo(efd, FD_TYPES__EVENTPOLL, check_one_epoll, &proc_fd);
 	if (ret) {
 		pr_err("Error parsing proc fdinfo\n");
 		goto epoll_err;
 	}
 
-	if (efe.n_tfd != 1 || efe.tfd[0]->tfd != pfd[0]) {
-		pr_err("TFD mismatch (or not met)\n");
+	if (pfd[0] != proc_fd) {
+		pr_err("TFD mismatch (or not met) %d want %d\n",
+				proc_fd, pfd[0]);
 		ret = -1;
 		goto epoll_err;
 	}
 
-	pr_info("Epoll fdinfo works OK\n");
+	pr_info("Epoll fdinfo works OK (%d vs %d)\n", pfd[0], proc_fd);
 
 epoll_err:
 	close(efd);
@@ -393,10 +409,16 @@ pipe_err:
 	return ret;
 }
 
+static int check_one_inotify(union fdinfo_entries *e, void *arg)
+{
+	*(int *)arg = e->ify.e.wd;
+	free_inotify_wd_entry(e);
+	return 0;
+}
+
 static int check_fdinfo_inotify(void)
 {
-	int ifd, wd, ret;
-	InotifyFileEntry ify = INOTIFY_FILE_ENTRY__INIT;
+	int ifd, wd, proc_wd = -1, ret;
 
 	ifd = inotify_init1(0);
 	if (ifd < 0) {
@@ -411,7 +433,7 @@ static int check_fdinfo_inotify(void)
 		return -1;
 	}
 
-	ret = parse_fdinfo(ifd, FD_TYPES__INOTIFY, &ify);
+	ret = parse_fdinfo(ifd, FD_TYPES__INOTIFY, check_one_inotify, &proc_wd);
 	close(ifd);
 
 	if (ret < 0) {
@@ -419,12 +441,12 @@ static int check_fdinfo_inotify(void)
 		return -1;
 	}
 
-	if (ify.n_wd != 1 || ify.wd[0]->wd != wd) {
-		pr_err("WD mismatch (or not met)\n");
+	if (wd != proc_wd) {
+		pr_err("WD mismatch (or not met) %d want %d\n", proc_wd, wd);
 		return -1;
 	}
 
-	pr_info("Inotify fdinfo works OK\n");
+	pr_info("Inotify fdinfo works OK (%d vs %d)\n", wd, proc_wd);
 	return 0;
 }
 
@@ -676,6 +698,9 @@ static int check_ptrace_dump_seccomp_filters(void)
 
 static int check_mem_dirty_track(void)
 {
+	if (kerndat_get_dirty_track() < 0)
+		return -1;
+
 	if (!kdat.has_dirty_track) {
 		pr_warn("Dirty tracking is OFF. Memory snapshot will not work.\n");
 		return -1;
@@ -700,9 +725,11 @@ static unsigned long get_ring_len(unsigned long addr)
 	FILE *maps;
 	char buf[256];
 
-	maps = fopen_proc(PROC_SELF, "maps");
-	if (!maps)
+	maps = fopen("/proc/self/maps", "r");
+	if (!maps) {
+		pr_perror("No maps proc file");
 		return 0;
+	}
 
 	while (fgets(buf, sizeof(buf), maps)) {
 		unsigned long start, end;
@@ -769,6 +796,9 @@ static int check_aio_remap(void)
 
 static int check_fdinfo_lock(void)
 {
+	if (kerndat_fdinfo_has_lock())
+		return -1;
+
 	if (!kdat.has_fdinfo_lock) {
 		pr_err("fdinfo doesn't contain the lock field\n");
 		return -1;
@@ -925,6 +955,12 @@ out:
 
 static int check_tcp_halt_closed(void)
 {
+	int ret;
+
+	ret = kerndat_tcp_repair();
+	if (ret < 0)
+		return -1;
+
 	if (!kdat.has_tcp_half_closed) {
 		pr_err("TCP_REPAIR can't be enabled for half-closed sockets\n");
 		return -1;
@@ -1011,72 +1047,13 @@ static int check_userns(void)
 
 static int check_loginuid(void)
 {
-	if (kdat.luid != LUID_FULL) {
+	if (kerndat_loginuid(false) < 0)
+		return -1;
+
+	if (!kdat.has_loginuid) {
 		pr_warn("Loginuid restore is OFF.\n");
 		return -1;
 	}
-
-	return 0;
-}
-
-static int check_compat_cr(void)
-{
-#ifdef CONFIG_COMPAT
-	if (kdat_compatible_cr())
-		return 0;
-	pr_warn("compat_cr is not supported. Requires kernel >= v4.12\n");
-#else
-	pr_warn("CRIU built without CONFIG_COMPAT - can't C/R ia32\n");
-#endif
-	return -1;
-}
-
-static int check_uffd(void)
-{
-	if (!kdat.has_uffd) {
-		pr_err("UFFD is not supported\n");
-		return -1;
-	}
-
-	return 0;
-}
-
-static int check_uffd_noncoop(void)
-{
-	if (check_uffd())
-		return -1;
-
-	if (!uffd_noncooperative()) {
-		pr_err("Non-cooperative UFFD is not supported\n");
-		return -1;
-	}
-
-	return 0;
-}
-
-static int check_can_map_vdso(void)
-{
-	if (kdat_can_map_vdso() == 1)
-		return 0;
-	pr_warn("Do not have API to map vDSO - will use mremap() to restore vDSO\n");
-	return -1;
-}
-
-static int check_sk_netns(void)
-{
-	if (kerndat_socket_netns() < 0)
-		return -1;
-
-	if (!kdat.sk_ns)
-		return -1;
-
-	return 0;
-}
-
-static int check_sk_unix_file(void)
-{
-	if (!kdat.sk_unix_file)
-		return -1;
 
 	return 0;
 }
@@ -1184,10 +1161,6 @@ int cr_check(void)
 		ret |= check_tcp_halt_closed();
 		ret |= check_userns();
 		ret |= check_loginuid();
-		ret |= check_can_map_vdso();
-		ret |= check_uffd();
-		ret |= check_uffd_noncoop();
-		ret |= check_sk_netns();
 	}
 
 	/*
@@ -1195,7 +1168,6 @@ int cr_check(void)
 	 */
 	if (opts.check_experimental_features) {
 		ret |= check_autofs();
-		ret |= check_compat_cr();
 	}
 
 	print_on_level(DEFAULT_LOGLEVEL, "%s\n", ret ? CHECK_MAYBE : CHECK_GOOD);
@@ -1217,39 +1189,6 @@ static int check_tun(void)
 	return check_tun_cr(-1);
 }
 
-static int check_tun_netns(void)
-{
-	bool has = false;
-	check_tun_netns_cr(&has);
-	return has ? 0 : -1;
-}
-
-static int check_nsid(void)
-{
-	if (kerndat_nsid() < 0)
-		return -1;
-
-	if (!kdat.has_nsid) {
-		pr_warn("NSID isn't supported\n");
-		return -1;
-	}
-
-	return 0;
-}
-
-static int check_link_nsid(void)
-{
-	if (kerndat_link_nsid() < 0)
-		return -1;
-
-	if (!kdat.has_link_nsid) {
-		pr_warn("NSID isn't supported\n");
-		return -1;
-	}
-
-	return 0;
-}
-
 struct feature_list {
 	char *name;
 	int (*func)();
@@ -1261,7 +1200,6 @@ static struct feature_list feature_list[] = {
 	{ "aio_remap", check_aio_remap },
 	{ "timerfd", check_timerfd },
 	{ "tun", check_tun },
-	{ "tun_ns", check_tun_netns },
 	{ "userns", check_userns },
 	{ "fdinfo_lock", check_fdinfo_lock },
 	{ "seccomp_suspend", check_ptrace_suspend_seccomp },
@@ -1270,14 +1208,6 @@ static struct feature_list feature_list[] = {
 	{ "cgroupns", check_cgroupns },
 	{ "autofs", check_autofs },
 	{ "tcp_half_closed", check_tcp_halt_closed },
-	{ "compat_cr", check_compat_cr },
-	{ "uffd", check_uffd },
-	{ "uffd-noncoop", check_uffd_noncoop },
-	{ "can_map_vdso", check_can_map_vdso},
-	{ "sk_ns", check_sk_netns },
-	{ "sk_unix_file", check_sk_unix_file },
-	{ "nsid", check_nsid },
-	{ "link_nsid", check_link_nsid},
 	{ NULL, NULL },
 };
 

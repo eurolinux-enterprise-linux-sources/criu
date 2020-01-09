@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include <alloca.h>
 #include <unistd.h>
 #include <stdbool.h>

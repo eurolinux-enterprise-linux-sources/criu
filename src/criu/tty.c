@@ -76,6 +76,11 @@
 #undef	LOG_PREFIX
 #define LOG_PREFIX "tty: "
 
+struct tty_info_entry {
+	struct list_head		list;
+	TtyInfoEntry			*tie;
+};
+
 struct tty_data_entry {
 	struct list_head		list;
 	TtyDataEntry			*tde;
@@ -109,7 +114,6 @@ struct tty_dump_info {
 	u32				id;
 	pid_t				sid;
 	pid_t				pgrp;
-	pid_t				pid_real;
 	int				fd;
 	int				mnt_id;
 	struct tty_driver		*driver;
@@ -123,9 +127,8 @@ struct tty_dump_info {
 };
 
 static bool stdin_isatty = false;
-static LIST_HEAD(collected_ttys);
+static LIST_HEAD(all_tty_info_entries);
 static LIST_HEAD(all_ttys);
-static int self_stdin_fdid = -1;
 
 /*
  * Usually an application has not that many ttys opened.
@@ -296,17 +299,6 @@ struct tty_driver *get_tty_driver(dev_t rdev, dev_t dev)
 			 * of kernel).
 			 */
 			return &vt_driver;
-#ifdef __s390x__
-		/*
-		 * On s390 we have the following consoles:
-		 * - tty3215    : ttyS0   , minor = 64, linemode console
-		 * - sclp_line  : ttyS0   , minor = 64, linemode console
-		 * - sclp_vt220 : ttysclp0, minor = 65, vt220 console
-		 * See also "drivers/s390/char"
-		 */
-		else if (minor == 64 || minor == 65)
-			return &vt_driver;
-#endif
 		/* Other minors points to UART serial ports */
 		break;
 	case USB_SERIAL_MAJOR:
@@ -333,11 +325,8 @@ static mutex_t *tty_mutex;
 
 static bool tty_is_master(struct tty_info *info);
 
-static int init_tty_mutex(void)
+int prepare_shared_tty(void)
 {
-	if (tty_mutex)
-		return 0;
-
 	tty_mutex = shmalloc(sizeof(*tty_mutex));
 	if (!tty_mutex) {
 		pr_err("Can't create ptmx index mutex\n");
@@ -382,7 +371,7 @@ static int tty_get_index(u32 id)
 }
 
 /* Make sure the active pairs do exist */
-static int tty_verify_active_pairs(void)
+static int tty_verify_active_pairs(void * unused)
 {
 	unsigned long i, unpaired_slaves = 0;
 
@@ -687,13 +676,15 @@ static int tty_set_prgp(int fd, int group)
 	return 0;
 }
 
-static int tty_restore_ctl_terminal(struct file_desc *d)
+int tty_restore_ctl_terminal(struct file_desc *d, int fd)
 {
 	struct tty_info *info = container_of(d, struct tty_info, d);
 	struct tty_driver *driver = info->driver;
 	struct reg_file_info *fake = NULL;
 	struct file_desc *slave_d;
 	int slave = -1, ret = -1, index = -1;
+
+	BUG_ON(!is_service_fd(fd, CTL_TTY_OFF));
 
 	if (driver->type == TTY_TYPE__EXT_TTY) {
 		slave = -1;
@@ -732,15 +723,16 @@ out:
 	close(slave);
 err:
 	pty_free_fake_reg(&fake);
+	close(fd);
 	return ret ? -1 : 0;
 }
 
-static bool __tty_is_master(struct tty_driver *driver)
+static bool tty_is_master(struct tty_info *info)
 {
-	if (driver->subtype == TTY_SUBTYPE_MASTER)
+	if (info->driver->subtype == TTY_SUBTYPE_MASTER)
 		return true;
 
-	switch (driver->type) {
+	switch (info->driver->type) {
 	case TTY_TYPE__CONSOLE:
 	case TTY_TYPE__CTTY:
 		return true;
@@ -754,11 +746,6 @@ static bool __tty_is_master(struct tty_driver *driver)
 	}
 
 	return false;
-}
-
-static bool tty_is_master(struct tty_info *info)
-{
-	return __tty_is_master(info->driver);
 }
 
 static bool tty_is_hung(struct tty_info *info)
@@ -1001,9 +988,9 @@ static int pty_open_unpaired_slave(struct file_desc *d, struct tty_info *slave)
 			return -1;
 		}
 
-		fd = fdstore_get(self_stdin_fdid);
+		fd = dup(get_service_fd(SELF_STDIN_OFF));
 		if (fd < 0) {
-			pr_err("Can't get self_stdin_fdid\n");
+			pr_perror("Can't dup SELF_STDIN_OFF");
 			return -1;
 		}
 
@@ -1228,124 +1215,6 @@ static struct pstree_item *find_first_sid(int sid)
 	return NULL;
 }
 
-static int add_fake_fle(struct pstree_item *item, u32 desc_id)
-{
-	FdinfoEntry *e;
-
-	e = xmalloc(sizeof(*e));
-	if (!e)
-		return -1;
-
-	fdinfo_entry__init(e);
-
-	e->id		= desc_id;
-	e->fd		= find_unused_fd(item, -1);
-	e->type		= FD_TYPES__TTY;
-
-	if (collect_fd(vpid(item), e, rsti(item), true)) {
-		xfree(e);
-		return -1;
-	}
-
-	return e->fd;
-}
-
-struct ctl_tty {
-	struct file_desc desc;
-	struct fdinfo_list_entry *real_tty;
-};
-
-static int ctl_tty_open(struct file_desc *d, int *new_fd)
-{
-	struct fdinfo_list_entry *fle;
-	int ret;
-
-	fle = container_of(d, struct ctl_tty, desc)->real_tty;
-	if (fle->stage != FLE_RESTORED)
-		return 1;
-
-	ret = tty_restore_ctl_terminal(fle->desc);
-	if (!ret) {
-		/*
-		 * Generic engine expects we return a new_fd.
-		 * Return this one just to return something.
-		 */
-		*new_fd = dup(fle->fe->fd);
-		if (*new_fd < 0) {
-			pr_perror("dup() failed");
-			ret = -1;
-		} else
-			ret = 0;
-	}
-	return ret;
-}
-
-/*
- * This is a fake type to handle ctl tty. The problem
- * is sometimes we need to do tty_set_sid() from slave
- * fle, while generic file engine allows to call open
- * method for file masters only. So, this type allows
- * to add fake masters, which will call open for slave
- * fles of type FD_TYPES__TTY indirectly.
- */
-static struct file_desc_ops ctl_tty_desc_ops = {
-	.type		= FD_TYPES__CTL_TTY,
-	.open		= ctl_tty_open,
-};
-
-static int prepare_ctl_tty(struct pstree_item *item, u32 ctl_tty_id)
-{
-	struct fdinfo_list_entry *fle;
-	struct ctl_tty *ctl_tty;
-	FdinfoEntry *e;
-	int fd;
-
-	if (!ctl_tty_id)
-		return 0;
-
-	pr_info("Requesting for ctl tty %#x into service fd\n", ctl_tty_id);
-
-	/* Add a fake fle to make generic engine deliver real tty desc to task */
-	fd = add_fake_fle(item, ctl_tty_id);
-	if (fd < 0)
-		return -1;
-
-	fle = find_used_fd(item, fd);
-	BUG_ON(!fle);
-	/*
-	 * Add a fake ctl_tty depending on the above fake fle, which will
-	 * actually restore the session.
-	 */
-	ctl_tty	= xmalloc(sizeof(*ctl_tty));
-	e	= xmalloc(sizeof(*e));
-
-	if (!ctl_tty || !e)
-		goto err;
-
-	ctl_tty->real_tty = fle;
-
-	/*
-	 * Use the same ctl_tty_id id for ctl_tty as it's unique among
-	 * FD_TYPES__CTL_TTY (as it's unique for FD_TYPES__TTY type).
-	 */
-	file_desc_add(&ctl_tty->desc, ctl_tty_id, &ctl_tty_desc_ops);
-
-	fdinfo_entry__init(e);
-
-	e->id		= ctl_tty_id;
-	e->fd		= find_unused_fd(item, -1);
-	e->type		= FD_TYPES__CTL_TTY;
-
-	if (collect_fd(vpid(item), e, rsti(item), true))
-		goto err;
-
-	return 0;
-err:
-	xfree(ctl_tty);
-	xfree(e);
-	return -1;
-}
-
 static int tty_find_restoring_task(struct tty_info *info)
 {
 	struct pstree_item *item;
@@ -1423,7 +1292,9 @@ static int tty_find_restoring_task(struct tty_info *info)
 		if (item && vpid(item) == item->sid) {
 			pr_info("Set a control terminal %#x to %d\n",
 				info->tfe->id, info->tie->sid);
-			return prepare_ctl_tty(item, info->tfe->id);
+			return prepare_ctl_tty(vpid(item),
+					       rsti(item),
+					       info->tfe->id);
 		}
 
 		goto notask;
@@ -1488,7 +1359,7 @@ static int tty_setup_orphan_slavery(void)
 	return 0;
 }
 
-static int tty_setup_slavery(void)
+static int tty_setup_slavery(void * unused)
 {
 	struct tty_info *info, *peer, *m;
 
@@ -1585,10 +1456,10 @@ static int verify_termios(u32 id, TermiosEntry *e)
 	return 0;
 }
 
-#define term_opts_missing_cmp(tie, op)		\
-	(!(tie)->termios		op	\
-	 !(tie)->termios_locked		op	\
-	 !(tie)->winsize)
+#define term_opts_missing_cmp(p, op)		\
+	(!(p)->tie->termios		op	\
+	 !(p)->tie->termios_locked	op	\
+	 !(p)->tie->winsize)
 
 #define term_opts_missing_any(p)		\
 	term_opts_missing_cmp(p, ||)
@@ -1596,47 +1467,61 @@ static int verify_termios(u32 id, TermiosEntry *e)
 #define term_opts_missing_all(p)		\
 	term_opts_missing_cmp(p, &&)
 
-static int verify_info(TtyInfoEntry *tie, struct tty_driver *driver)
+static int verify_info(struct tty_info *info)
 {
+	if (!info->driver) {
+		pr_err("Unknown driver master peer %#x\n", info->tfe->id);
+		return -1;
+	}
+
 	/*
 	 * Master peer must have all parameters present,
 	 * while slave peer must have either all parameters present
 	 * or don't have them at all.
 	 */
-	if (term_opts_missing_any(tie)) {
-		if (__tty_is_master(driver)) {
-			pr_err("Corrupted master peer %#x\n", tie->id);
+	if (term_opts_missing_any(info)) {
+		if (tty_is_master(info)) {
+			pr_err("Corrupted master peer %#x\n", info->tfe->id);
 			return -1;
-		} else if (!term_opts_missing_all(tie)) {
-			pr_err("Corrupted slave peer %#x\n", tie->id);
+		} else if (!term_opts_missing_all(info)) {
+			pr_err("Corrupted slave peer %#x\n", info->tfe->id);
 			return -1;
 		}
 	}
 
-	if (verify_termios(tie->id, tie->termios_locked) ||
-	    verify_termios(tie->id, tie->termios))
+	if (verify_termios(info->tfe->id, info->tie->termios_locked) ||
+	    verify_termios(info->tfe->id, info->tie->termios))
 		return -1;
 
-	if (tie->termios && tie->id > (MAX_TTYS << 1))
+	if (info->tie->termios && info->tfe->tty_info_id > (MAX_TTYS << 1))
 		return -1;
 
 	return 0;
 }
 
-static int tty_info_setup(struct tty_info *info);
+static TtyInfoEntry *lookup_tty_info_entry(u32 id)
+{
+	struct tty_info_entry *e;
+
+	list_for_each_entry(e, &all_tty_info_entries, list) {
+		if (e->tie->id == id)
+			return e->tie;
+	}
+
+	return NULL;
+}
 
 static int collect_one_tty_info_entry(void *obj, ProtobufCMessage *msg, struct cr_img *i)
 {
-	struct tty_info *info, *n;
-	TtyInfoEntry *tie;
-	struct tty_driver *driver;
+	struct tty_info_entry *info = obj;
 
-	tie = pb_msg(msg, TtyInfoEntry);
+	info->tie = pb_msg(msg, TtyInfoEntry);
 
-	switch (tie->type) {
+	switch (info->tie->type) {
 	case TTY_TYPE__PTY:
-		if (!tie->pty) {
-			pr_err("No PTY data found (id %#x), corrupted image?\n", tie->id);
+		if (!info->tie->pty) {
+			pr_err("No PTY data found (id %#x), corrupted image?\n",
+			       info->tie->id);
 			return -1;
 		}
 		break;
@@ -1645,47 +1530,20 @@ static int collect_one_tty_info_entry(void *obj, ProtobufCMessage *msg, struct c
 	case TTY_TYPE__SERIAL:
 	case TTY_TYPE__VT:
 	case TTY_TYPE__EXT_TTY:
-		if (tie->pty) {
-			pr_err("PTY data found (id %#x), corrupted image?\n", tie->id);
+		if (info->tie->pty) {
+			pr_err("PTY data found (id %#x), corrupted image?\n",
+			       info->tie->id);
 			return -1;
 		}
 		break;
 	default:
-		pr_err("Unexpected TTY type %d (id %#x)\n", tie->type, tie->id);
+		pr_err("Unexpected TTY type %d (id %#x)\n",
+		       info->tie->type, info->tie->id);
 		return -1;
 	}
 
-	driver = get_tty_driver(tie->rdev, tie->dev);
-	if (driver == NULL) {
-		pr_err("Unable to find a tty driver (rdev %#x dev %#x)\n",
-				tie->rdev, tie->dev);
-		return -1;
-	}
-
-	if (verify_info(tie, driver))
-		return -1;
-
-	list_for_each_entry_safe(info, n, &collected_ttys, list) {
-		if (info->tfe->tty_info_id != tie->id)
-			continue;
-
-		info->tie = tie;
-		info->driver = driver;
-		list_move_tail(&info->list, &all_ttys);
-
-		if (tty_info_setup(info))
-			return -1;
-	}
-
-	/*
-	 * The tty peers which have no @termios are hung up,
-	 * so don't mark them as active, we create them with
-	 * faked master and they are rather a rudiment which
-	 * can't be used. Most likely they appear if a user has
-	 * dumped program when it was closing a peer.
-	 */
-	if (is_pty(driver) && tie->termios)
-		tty_test_and_set(tie->id, tty_active_pairs);
+	INIT_LIST_HEAD(&info->list);
+	list_add(&info->list, &all_tty_info_entries);
 
 	return 0;
 }
@@ -1693,43 +1551,38 @@ static int collect_one_tty_info_entry(void *obj, ProtobufCMessage *msg, struct c
 struct collect_image_info tty_info_cinfo = {
 	.fd_type	= CR_FD_TTY_INFO,
 	.pb_type	= PB_TTY_INFO,
+	.priv_size	= sizeof(struct tty_info_entry),
 	.collect	= collect_one_tty_info_entry,
-	.flags		= COLLECT_NOFREE,
 };
-
-static int prep_tty_restore_cb(struct pprep_head *ph)
-{
-	if (!list_empty(&collected_ttys)) {
-		pr_err("Not all TTYs got its infos\n");
-		return -1;
-	}
-	if (tty_verify_active_pairs())
-		return -1;
-	if (tty_setup_slavery())
-		return -1;
-	return 0;
-}
-
-static MAKE_PPREP_HEAD(prep_tty_restore);
 
 static int collect_one_tty(void *obj, ProtobufCMessage *msg, struct cr_img *i)
 {
 	struct tty_info *info = obj;
 
 	info->tfe = pb_msg(msg, TtyFileEntry);
-	list_add_tail(&info->list, &collected_ttys);
 
-	return 0;
-}
+	info->tie = lookup_tty_info_entry(info->tfe->tty_info_id);
+	if (!info->tie) {
+		pr_err("No tty-info-id %#x found on id %#x\n",
+		       info->tfe->tty_info_id, info->tfe->id);
+		return -1;
+	}
 
-static int tty_info_setup(struct tty_info *info)
-{
 	INIT_LIST_HEAD(&info->sibling);
+	info->driver = get_tty_driver(info->tie->rdev, info->tie->dev);
+	if (info->driver == NULL) {
+		pr_err("Unable to find a tty driver (rdev %#x dev %#x)\n",
+		       info->tie->rdev, info->tie->dev);
+		return -1;
+	}
 	info->create = tty_is_master(info);
 	info->inherit = false;
 	info->ctl_tty = NULL;
 	info->tty_data = NULL;
 	info->link = NULL;
+
+	if (verify_info(info))
+		return -1;
 
 	/*
 	 * The image might have no reg file record in old CRIU, so
@@ -1740,8 +1593,7 @@ static int tty_info_setup(struct tty_info *info)
 	 * reg file rectord because they are inherited from
 	 * command line on restore.
 	 */
-	info->reg_d = try_collect_special_file( info->tfe->has_regf_id ?
-			info->tfe->regf_id : info->tfe->id, 1);
+	info->reg_d = try_collect_special_file(info->tfe->id, 1);
 	if (!info->reg_d) {
 		if (info->driver->type != TTY_TYPE__EXT_TTY) {
 			if (!deprecated_ok("TTY w/o regfile"))
@@ -1761,18 +1613,27 @@ static int tty_info_setup(struct tty_info *info)
 		}
 	}
 
+	/*
+	 * The tty peers which have no @termios are hung up,
+	 * so don't mark them as active, we create them with
+	 * faked master and they are rather a rudiment which
+	 * can't be used. Most likely they appear if a user has
+	 * dumped program when it was closing a peer.
+	 */
+	if (is_pty(info->driver) && info->tie->termios)
+		tty_test_and_set(info->tfe->tty_info_id, tty_active_pairs);
+
 	pr_info("Collected tty ID %#x (%s)\n", info->tfe->id, info->driver->name);
 
-	add_post_prepare_cb_once(&prep_tty_restore);
-
-	/*
-	 * Call it explicitly. Post-callbacks will be called after
-	 * namespaces preparation, while the latter needs this mutex.
-	 */
-	if (init_tty_mutex())
-		return -1;
+	if (list_empty(&all_ttys)) {
+		if (add_post_prepare_cb(tty_verify_active_pairs, NULL))
+			return -1;
+		if (add_post_prepare_cb(tty_setup_slavery, NULL))
+			return -1;
+	}
 
 	info->fdstore_id = -1;
+	list_add(&info->list, &all_ttys);
 	return file_desc_add(&info->d, info->tfe->id, &tty_desc_ops);
 }
 
@@ -1875,11 +1736,6 @@ static int dump_tty_info(int lfd, u32 id, const struct fd_parms *p, struct tty_d
 
 	int ret = -1;
 
-	if (!p->fd_ctl) {
-		pr_err("No CTL for TTY dump, likely SCM case\n");
-		return -1;
-	}
-
 	/*
 	 * Make sure the structures the system provides us
 	 * correlates well with protobuf templates.
@@ -1899,7 +1755,6 @@ static int dump_tty_info(int lfd, u32 id, const struct fd_parms *p, struct tty_d
 	dinfo->id		= id;
 	dinfo->sid		= pti->sid;
 	dinfo->pgrp		= pti->pgrp;
-	dinfo->pid_real		= p->pid;
 	dinfo->fd		= p->fd;
 	dinfo->mnt_id		= p->mnt_id;
 	dinfo->driver		= driver;
@@ -2019,22 +1874,13 @@ static int dump_one_tty(int lfd, u32 id, const struct fd_parms *p)
 		return -1;
 	}
 
+	if (driver->type != TTY_TYPE__EXT_TTY && dump_one_reg_file(lfd, id, p))
+		return -1;
+
 	e.id		= id;
 	e.tty_info_id	= tty_gen_id(driver, index);
 	e.flags		= p->flags;
 	e.fown		= (FownEntry *)&p->fown;
-
-	if (driver->type != TTY_TYPE__EXT_TTY) {
-		u32 rf_id;
-
-		fd_id_generate_special(NULL, &rf_id);
-		if (dump_one_reg_file(lfd, rf_id, p))
-			return -1;
-
-		e.has_regf_id = true;
-		e.regf_id = rf_id;
-	}
-
 
 	/*
 	 * FIXME
@@ -2059,15 +1905,8 @@ static int dump_one_tty(int lfd, u32 id, const struct fd_parms *p)
 	if (!tty_test_and_set(e.tty_info_id, tty_bitmap))
 		ret = dump_tty_info(lfd, e.tty_info_id, p, driver, index);
 
-	if (!ret) {
-		FileEntry fe = FILE_ENTRY__INIT;
-
-		fe.type = FD_TYPES__TTY;
-		fe.id = e.id;
-		fe.tty = &e;
-		ret = pb_write_one(img_from_set(glob_imgset, CR_FD_FILES), &fe, PB_FILE);
-	}
-
+	if (!ret)
+		ret = pb_write_one(img_from_set(glob_imgset, CR_FD_TTY_FILES), &e, PB_TTY_FILE);
 	return ret;
 }
 
@@ -2150,7 +1989,7 @@ static int tty_do_dump_queued_data(struct tty_dump_info *dinfo)
 			 ret, (int)off, dinfo->driver->name, dinfo->id);
 
 		if (off >= size) {
-			pr_err("The tty (%s %#x) queued data overflow %zu bytes limit\n",
+			pr_err("The tty (%s %#x) queued data overrflow %zu bytes limit\n",
 			       dinfo->driver->name, dinfo->id, size);
 			off = size;
 			break;
@@ -2275,46 +2114,9 @@ static int tty_dump_queued_data(void)
 	return ret;
 }
 
-static int tty_verify_ctty(void)
-{
-	struct tty_dump_info *d, *p;
-
-	list_for_each_entry(d, &all_ttys, list) {
-		struct tty_dump_info *n = NULL;
-
-		if (d->driver->type != TTY_TYPE__CTTY)
-			continue;
-
-		list_for_each_entry(p, &all_ttys, list) {
-			if (!is_pty(p->driver)	||
-			    p->sid != d->sid	||
-			    p->pgrp != d->sid)
-				continue;
-			n = p;
-			break;
-		}
-
-		if (!n) {
-			pr_err("ctty inheritance detected sid/pgrp %d, "
-			       "no PTY peer with sid/pgrp needed\n",
-			       d->sid);
-			return -ENOENT;
-		} else if (n->pid_real != d->pid_real) {
-			pr_err("ctty inheritance detected sid/pgrp %d "
-			       "(ctty pid_real %d pty pid_real %d)\n",
-			       d->sid, d->pid_real, n->pid_real);
-			return -ENOENT;
-		}
-	}
-
-	return 0;
-}
-
 int tty_post_actions(void)
 {
-	if (tty_verify_ctty())
-		return -1;
-	if (tty_verify_active_pairs())
+	if (tty_verify_active_pairs(NULL))
 		return -1;
 	else if (tty_dump_queued_data())
 		return -1;
@@ -2331,13 +2133,17 @@ int tty_prep_fds(void)
 	else
 		stdin_isatty = true;
 
-	self_stdin_fdid = fdstore_add(STDIN_FILENO);
-	if (self_stdin_fdid < 0) {
-		pr_err("Can't place stdin fd to fdstore\n");
+	if (install_service_fd(SELF_STDIN_OFF, STDIN_FILENO) < 0) {
+		pr_err("Can't dup stdin to SELF_STDIN_OFF\n");
 		return -1;
 	}
 
 	return 0;
+}
+
+void tty_fini_fds(void)
+{
+	close_service_fd(SELF_STDIN_OFF);
 }
 
 static int open_pty(void *arg, int flags)
@@ -2395,7 +2201,7 @@ int devpts_check_bindmount(struct mount_info *m)
 		return 0;
 
 	if (sscanf(m->root, "/%d", &index) != 1) {
-		pr_err("Unable to parse %s\n", m->root);
+		pr_err("Unable to parse %s", m->root);
 		return -1;
 	}
 
@@ -2428,8 +2234,7 @@ found:
 	}
 
 	if (master_mp->nsid->type != NS_ROOT) {
-		pr_err("The master for %s isn't from the root mntns\n",
-				m->root);
+		pr_err("The master for %s isn't from the root mntns", m->root);
 		return -1;
 	}
 

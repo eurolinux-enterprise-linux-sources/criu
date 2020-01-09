@@ -87,7 +87,7 @@ static inline bool task_alive(struct pstree_item *i)
 extern void free_pstree(struct pstree_item *root_item);
 extern struct pstree_item *__alloc_pstree_item(bool rst);
 #define alloc_pstree_item() __alloc_pstree_item(false)
-extern int init_pstree_helper(struct pstree_item *ret);
+extern void init_pstree_helper(struct pstree_item *ret);
 
 extern struct pstree_item *lookup_create_item(pid_t pid);
 extern void pstree_insert_pid(struct pid *pid_node);
@@ -100,7 +100,6 @@ extern struct pstree_item *pstree_item_next(struct pstree_item *item);
 
 extern bool restore_before_setsid(struct pstree_item *child);
 extern int prepare_pstree(void);
-extern int prepare_dummy_pstree(void);
 
 extern int dump_pstree(struct pstree_item *root_item);
 
@@ -111,8 +110,6 @@ extern int pid_to_virt(pid_t pid);
 
 struct task_entries;
 extern struct task_entries *task_entries;
-extern int prepare_task_entries(void);
-extern int prepare_dummy_task_state(struct pstree_item *pi);
 
 extern int get_task_ids(struct pstree_item *);
 extern struct _TaskKobjIdsEntry *root_ids;

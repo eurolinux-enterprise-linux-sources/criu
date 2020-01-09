@@ -1,5 +1,4 @@
 #include <sys/socket.h>
-#include <sys/ioctl.h>
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
 #include <libnl3/netlink/msg.h>
@@ -29,9 +28,6 @@
 #include "pstree.h"
 #include "external.h"
 #include "crtools.h"
-#include "fdstore.h"
-#include "fdinfo.h"
-#include "kerndat.h"
 
 #include "protobuf.h"
 #include "images/sk-unix.pb-c.h"
@@ -57,7 +53,11 @@
 #define USK_CALLBACK	(1 << 2)
 #define USK_INHERIT	(1 << 3)
 
-#define FAKE_INO	0
+typedef struct {
+	char			*dir;
+	unsigned int		udiag_vfs_dev;
+	unsigned int		udiag_vfs_ino;
+} rel_name_desc_t;
 
 struct unix_sk_desc {
 	struct socket_desc	sd;
@@ -68,12 +68,9 @@ struct unix_sk_desc {
 	unsigned int		wqlen;
 	unsigned int		namelen;
 	char			*name;
+	rel_name_desc_t		*rel_name;
 	unsigned int		nr_icons;
 	unsigned int		*icons;
-
-	unsigned int		vfs_dev;
-	unsigned int		vfs_ino;
-
 	unsigned char		shutdown;
 	bool			deleted;
 
@@ -178,13 +175,8 @@ static bool unix_sk_exception_lookup_id(unsigned int ino)
 static int write_unix_entry(struct unix_sk_desc *sk)
 {
 	int ret;
-	FileEntry fe = FILE_ENTRY__INIT;
 
-	fe.type = FD_TYPES__UNIXSK;
-	fe.id = sk->ue->id;
-	fe.usk = sk->ue;
-
-	ret = pb_write_one(img_from_set(glob_imgset, CR_FD_FILES), &fe, PB_FILE);
+	ret = pb_write_one(img_from_set(glob_imgset, CR_FD_UNIXSK), sk->ue, PB_UNIX_SK);
 
 	show_one_unix_img("Dumped", sk->ue);
 
@@ -196,57 +188,9 @@ static int write_unix_entry(struct unix_sk_desc *sk)
 	return ret;
 }
 
-#ifndef SIOCUNIXFILE
-#define SIOCUNIXFILE (SIOCPROTOPRIVATE + 0) /* open a socket file with O_PATH */
-#endif
-
-int kerndat_socket_unix_file(void)
+static int resolve_rel_name(struct unix_sk_desc *sk, const struct fd_parms *p)
 {
-	int sk, fd;
-
-	sk = socket(AF_UNIX, SOCK_DGRAM, 0);
-	if (sk < 0) {
-		pr_perror("Unable to create socket");
-		return -1;
-	}
-	fd = ioctl(sk, SIOCUNIXFILE);
-	if (fd < 0 && errno != ENOENT) {
-		pr_warn("Unable to open a socket file: %m\n");
-		kdat.sk_unix_file = false;
-		close(sk);
-		return 0;
-	}
-	close(sk);
-	close_safe(&fd);
-
-	kdat.sk_unix_file = true;
-
-	return 0;
-}
-
-static int get_mnt_id(int lfd, int *mnt_id)
-{
-	struct fdinfo_common fdinfo = { .mnt_id = -1 };
-	int ret, fd;
-
-	fd = ioctl(lfd, SIOCUNIXFILE);
-	if (fd < 0) {
-		pr_perror("Unable to get a socker file descriptor");
-		return -1;
-	}
-
-	ret = parse_fdinfo(fd, FD_TYPES__UND, &fdinfo);
-	close(fd);
-	if (ret < 0)
-		return -1;
-
-	*mnt_id = fdinfo.mnt_id;
-
-	return 0;
-}
-
-static int resolve_rel_name(u32 id, struct unix_sk_desc *sk, const struct fd_parms *p, char **pdir)
-{
+	rel_name_desc_t *rel_name = sk->rel_name;
 	const char *dirs[] = { "cwd", "root" };
 	struct pstree_item *task;
 	int mntns_root, i;
@@ -286,23 +230,20 @@ static int resolve_rel_name(u32 id, struct unix_sk_desc *sk, const struct fd_par
 		}
 		dir[ret] = 0;
 
-		if (snprintf(path, sizeof(path), ".%s/%s", dir, sk->name) >= sizeof(path)) {
-			pr_err("The path .%s/%s is too long", dir, sk->name);
-			goto err;
-		}
+		snprintf(path, sizeof(path), ".%s/%s", dir, sk->name);
 		if (fstatat(mntns_root, path, &st, 0)) {
 			if (errno == ENOENT)
 				continue;
 			goto err;
 		}
 
-		if ((st.st_ino == sk->vfs_ino) &&
-		    phys_stat_dev_match(st.st_dev, sk->vfs_dev, ns, &path[1])) {
-			*pdir = xstrdup(dir);
-			if (!*pdir)
+		if ((st.st_ino == rel_name->udiag_vfs_ino) &&
+		    phys_stat_dev_match(st.st_dev, rel_name->udiag_vfs_dev, ns, &path[1])) {
+			rel_name->dir = xstrdup(dir);
+			if (!rel_name->dir)
 				return -ENOMEM;
 
-			pr_debug("Resolved relative socket name to dir %s\n", *pdir);
+			pr_debug("Resolved relative socket name to dir %s\n", rel_name->dir);
 			sk->mode = st.st_mode;
 			sk->uid	= st.st_uid;
 			sk->gid	= st.st_gid;
@@ -311,12 +252,10 @@ static int resolve_rel_name(u32 id, struct unix_sk_desc *sk, const struct fd_par
 	}
 
 err:
-	pr_err("Can't resolve name for socket %#x\n", id);
+	pr_err("Can't resolve name for socket %#x\n", rel_name->udiag_vfs_ino);
 	return -ENOENT;
 }
 
-static int unix_resolve_name(int lfd, u32 id, struct unix_sk_desc *d,
-				UnixSkEntry *ue, const struct fd_parms *p);
 static int dump_one_unix_fd(int lfd, u32 id, const struct fd_parms *p)
 {
 	struct unix_sk_desc *sk, *peer;
@@ -358,8 +297,6 @@ static int dump_one_unix_fd(int lfd, u32 id, const struct fd_parms *p)
 
 	ue->id		= id;
 	ue->ino		= sk->sd.ino;
-	ue->ns_id	= sk->sd.sk_ns->id;
-	ue->has_ns_id	= true;
 	ue->type	= sk->type;
 	ue->state	= sk->state;
 	ue->flags	= p->flags;
@@ -369,8 +306,11 @@ static int dump_one_unix_fd(int lfd, u32 id, const struct fd_parms *p)
 	ue->opts	= skopts;
 	ue->uflags	= 0;
 
-	if (unix_resolve_name(lfd, id, sk, ue, p))
-		goto err;
+	if (sk->rel_name) {
+		if (resolve_rel_name(sk, p))
+			goto err;
+		ue->name_dir = sk->rel_name->dir;
+	}
 
 	/*
 	 * Check if this socket is connected to criu service.
@@ -396,18 +336,6 @@ static int dump_one_unix_fd(int lfd, u32 id, const struct fd_parms *p)
 	}
 
 	sk_encode_shutdown(ue, sk->shutdown);
-
-	/*
-	 * If a stream listening socket has non-zero rqueue, this
-	 * means there are in-flight connections waiting to get
-	 * accept()-ed. We handle them separately with the "icons"
-	 * (i stands for in-flight, cons -- for connections) things.
-	 */
-	if (sk->rqlen != 0 && !(sk->type == SOCK_STREAM &&
-				sk->state == TCP_LISTEN)) {
-		if (dump_sk_queue(lfd, id))
-			goto err;
-	}
 
 	if (ue->peer) {
 		peer = (struct unix_sk_desc *)lookup_socket(ue->peer, PF_UNIX, 0);
@@ -453,8 +381,8 @@ static int dump_one_unix_fd(int lfd, u32 id, const struct fd_parms *p)
 			/*
 			 * Usually this doesn't happen, however it's possible if
 			 * socket was shut down before connect() (see sockets03.c test).
-			 * On restore we will shutdown both end (iow sockets will be in
-			 * matched state). This shouldn't be a problem, since kernel seems
+			 * On restore we will shutdown both end (iow socktes will be in
+			 * matched state). This shoudn't be a problem, since kernel seems
 			 * to check both ends on read()/write(). Thus mismatched sockets behave
 			 * the same way as matched.
 			 */
@@ -506,6 +434,17 @@ dump:
 	if (dump_socket_opts(lfd, skopts))
 		goto err;
 
+	/*
+	 * If a stream listening socket has non-zero rqueue, this
+	 * means there are in-flight connections waiting to get
+	 * accept()-ed. We handle them separately with the "icons"
+	 * (i stands for in-flight, cons -- for connections) things.
+	 */
+	if (sk->rqlen != 0 && !(sk->type == SOCK_STREAM &&
+				sk->state == TCP_LISTEN))
+		if (dump_sk_queue(lfd, id))
+			goto err;
+
 	pr_info("Dumping unix socket at %d\n", p->fd);
 	show_one_unix("Dumping", sk);
 
@@ -529,7 +468,6 @@ dump:
 
 		if (write_unix_entry(psk))
 			return -1;
-		psk->sd.already_dumped = 1;
 	}
 
 	return 0;
@@ -545,97 +483,12 @@ const struct fdtype_ops unix_dump_ops = {
 	.dump		= dump_one_unix_fd,
 };
 
-static int unix_resolve_name(int lfd, u32 id, struct unix_sk_desc *d,
-				UnixSkEntry *ue, const struct fd_parms *p)
-{
-	char *name = d->name;
-	bool deleted = false;
-	char rpath[PATH_MAX];
-	struct ns_id *ns;
-	struct stat st;
-	int mntns_root;
-	int ret, mnt_id;
-
-	if (d->namelen == 0 || name[0] == '\0')
-		return 0;
-
-	if (kdat.sk_unix_file && (root_ns_mask & CLONE_NEWNS)) {
-		if (get_mnt_id(lfd, &mnt_id))
-			return -1;
-		ue->mnt_id = mnt_id;
-		ue->has_mnt_id = mnt_id;
-	}
-
-	if (ue->mnt_id >= 0)
-		ns = lookup_nsid_by_mnt_id(ue->mnt_id);
-	else
-		ns = lookup_ns_by_id(root_item->ids->mnt_ns_id, &mnt_ns_desc);
-	if (!ns) {
-		ret = -ENOENT;
-		goto out;
-	}
-
-	mntns_root = mntns_get_root_fd(ns);
-	if (mntns_root < 0) {
-		ret = -ENOENT;
-		goto out;
-	}
-
-	if (name[0] != '/') {
-		/*
-		 * Relative names are be resolved later at first
-		 * dump attempt.
-		 */
-
-		ret = resolve_rel_name(id, d, p, &ue->name_dir);
-		if (ret < 0)
-			goto out;
-		goto postprone;
-	}
-
-	snprintf(rpath, sizeof(rpath), ".%s", name);
-	if (fstatat(mntns_root, rpath, &st, 0)) {
-		if (errno != ENOENT) {
-			pr_warn("Can't stat socket %#x(%s), skipping: %m (err %d)\n",
-				id, rpath, errno);
-			goto skip;
-		}
-
-		pr_info("unix: Dropping path %s for unlinked sk %#x\n",
-			name, id);
-		deleted = true;
-	} else if ((st.st_ino != d->vfs_ino) ||
-		   !phys_stat_dev_match(st.st_dev, d->vfs_dev, ns, name)) {
-		pr_info("unix: Dropping path %s for unlinked bound "
-			"sk %#x.%#x real %#x.%#x\n",
-			name, (int)st.st_dev, (int)st.st_ino,
-			(int)d->vfs_dev, (int)d->vfs_ino);
-		deleted = true;
-	}
-
-	d->mode = st.st_mode;
-	d->uid	= st.st_uid;
-	d->gid	= st.st_gid;
-
-	d->deleted = deleted;
-
-postprone:
-	return 0;
-
-out:
-	xfree(name);
-	return ret;
-skip:
-	ret = 1;
-	goto out;
-}
-
 /*
  * Returns: < 0 on error, 0 if OK, 1 to skip the socket
  */
 static int unix_process_name(struct unix_sk_desc *d, const struct unix_diag_msg *m, struct nlattr **tb)
 {
-	int len;
+	int len, ret;
 	char *name;
 
 	len = nla_len(tb[UNIX_DIAG_NAME]);
@@ -646,29 +499,91 @@ static int unix_process_name(struct unix_sk_desc *d, const struct unix_diag_msg 
 	memcpy(name, nla_data(tb[UNIX_DIAG_NAME]), len);
 	name[len] = '\0';
 
-	if (name[0]) {
+	if (name[0] != '\0') {
 		struct unix_diag_vfs *uv;
+		bool deleted = false;
+		char rpath[PATH_MAX];
+		struct ns_id *ns;
+		struct stat st;
+		int mntns_root;
 
 		if (!tb[UNIX_DIAG_VFS]) {
 			pr_err("Bound socket w/o inode %#x\n", m->udiag_ino);
 			goto skip;
 		}
 
+		ns = lookup_ns_by_id(root_item->ids->mnt_ns_id, &mnt_ns_desc);
+		if (!ns) {
+			ret = -ENOENT;
+			goto out;
+		}
+
+		mntns_root = mntns_get_root_fd(ns);
+		if (mntns_root < 0) {
+			ret = -ENOENT;
+			goto out;
+		}
+
 		uv = RTA_DATA(tb[UNIX_DIAG_VFS]);
-		d->vfs_dev = uv->udiag_vfs_dev;
-		d->vfs_ino = uv->udiag_vfs_ino;
+		if (name[0] != '/') {
+			/*
+			 * Relative names are be resolved later at first
+			 * dump attempt.
+			 */
+			rel_name_desc_t *rel_name = xzalloc(sizeof(*rel_name));
+			if (!rel_name) {
+				ret = -ENOMEM;
+				goto out;
+			}
+			rel_name->udiag_vfs_dev = uv->udiag_vfs_dev;
+			rel_name->udiag_vfs_ino = uv->udiag_vfs_ino;
+
+			d->rel_name = rel_name;
+			goto postprone;
+		}
+
+		snprintf(rpath, sizeof(rpath), ".%s", name);
+		if (fstatat(mntns_root, rpath, &st, 0)) {
+			if (errno != ENOENT) {
+				pr_warn("Can't stat socket %#x(%s), skipping: %m (err %d)\n",
+					m->udiag_ino, rpath, errno);
+				goto skip;
+			}
+
+			pr_info("unix: Dropping path %s for unlinked sk %#x\n",
+				name, m->udiag_ino);
+			deleted = true;
+		} else if ((st.st_ino != uv->udiag_vfs_ino) ||
+			   !phys_stat_dev_match(st.st_dev, uv->udiag_vfs_dev, ns, name)) {
+			pr_info("unix: Dropping path %s for unlinked bound "
+				"sk %#x.%#x real %#x.%#x\n",
+				name, (int)st.st_dev, (int)st.st_ino,
+				(int)uv->udiag_vfs_dev, (int)uv->udiag_vfs_ino);
+			deleted = true;
+		}
+
+		d->mode = st.st_mode;
+		d->uid	= st.st_uid;
+		d->gid	= st.st_gid;
+
+		d->deleted = deleted;
 	}
 
+postprone:
 	d->namelen = len;
 	d->name = name;
 	return 0;
-skip:
+
+out:
 	xfree(name);
-	return 1;
+	return ret;
+skip:
+	ret = 1;
+	goto out;
 }
 
 static int unix_collect_one(const struct unix_diag_msg *m,
-			    struct nlattr **tb, struct ns_id *ns)
+			    struct nlattr **tb)
 {
 	struct unix_sk_desc *d;
 	int ret = 0;
@@ -745,7 +660,7 @@ static int unix_collect_one(const struct unix_diag_msg *m,
 		d->wqlen = rq->udiag_wqueue;
 	}
 
-	sk_collect_one(m->udiag_ino, AF_UNIX, &d->sd, ns);
+	sk_collect_one(m->udiag_ino, AF_UNIX, &d->sd);
 	list_add_tail(&d->list, &unix_sockets);
 	show_one_unix("Collected", d);
 
@@ -759,73 +674,58 @@ skip:
 	return ret;
 }
 
-int unix_receive_one(struct nlmsghdr *h, struct ns_id *ns, void *arg)
+int unix_receive_one(struct nlmsghdr *h, void *arg)
 {
 	struct unix_diag_msg *m = NLMSG_DATA(h);
 	struct nlattr *tb[UNIX_DIAG_MAX+1];
 
 	nlmsg_parse(h, sizeof(struct unix_diag_msg), tb, UNIX_DIAG_MAX, NULL);
 
-	return unix_collect_one(m, tb, ns);
-}
-
-static int __dump_external_socket(struct unix_sk_desc *sk,
-					struct unix_sk_desc *peer)
-{
-	int ret;
-
-	ret = run_plugins(DUMP_UNIX_SK, sk->fd, sk->sd.ino);
-	if (ret < 0 && ret != -ENOTSUP)
-		return -1;
-
-	if (ret == 0) {
-		sk->ue->uflags |= USK_CALLBACK;
-		return 0;
-	}
-
-	if (unix_sk_exception_lookup_id(sk->sd.ino)) {
-		pr_debug("found exception for unix name-less external socket.\n");
-		return 0;
-	}
-
-	/* Legacy -x|--ext-unix-sk option handling */
-	if (!opts.ext_unix_sk) {
-		show_one_unix("Runaway socket", peer);
-		pr_err("External socket is used. "
-		       "Consider using --" USK_EXT_PARAM " option.\n");
-		return -1;
-	}
-
-	if (peer->type != SOCK_DGRAM) {
-		show_one_unix("Ext stream not supported", peer);
-		pr_err("Can't dump half of stream unix connection.\n");
-		return -1;
-	}
-
-	if (!peer->name) {
-		show_one_unix("Ext dgram w/o name", peer);
-		pr_err("Can't dump name-less external socket.\n");
-		pr_err("%d\n", sk->fd);
-		return -1;
-	}
-
-	return 0;
+	return unix_collect_one(m, tb);
 }
 
 static int dump_external_sockets(struct unix_sk_desc *peer)
 {
 	struct unix_sk_desc *sk;
+	int ret;
 
 	while (!list_empty(&peer->peer_list)) {
 		sk = list_first_entry(&peer->peer_list, struct unix_sk_desc, peer_node);
 
-		if (__dump_external_socket(sk, peer))
+		ret = run_plugins(DUMP_UNIX_SK, sk->fd, sk->sd.ino);
+		if (ret == -ENOTSUP) {
+			if (unix_sk_exception_lookup_id(sk->sd.ino)) {
+				pr_debug("found exception for unix name-less external socket.\n");
+			} else {
+				/* Legacy -x|--ext-unix-sk option handling */
+				if (!opts.ext_unix_sk) {
+					show_one_unix("Runaway socket", peer);
+					pr_err("External socket is used. "
+							"Consider using --" USK_EXT_PARAM " option.\n");
+					return -1;
+				}
+
+				if (peer->type != SOCK_DGRAM) {
+					show_one_unix("Ext stream not supported", peer);
+					pr_err("Can't dump half of stream unix connection.\n");
+					return -1;
+				}
+
+				if (!peer->name) {
+					show_one_unix("Ext dgram w/o name", peer);
+					pr_err("Can't dump name-less external socket.\n");
+					pr_err("%d\n", sk->fd);
+					return -1;
+				}
+			}
+		} else if (ret < 0)
 			return -1;
+		else
+			sk->ue->uflags |= USK_CALLBACK;
 
 		if (write_unix_entry(sk))
 			return -1;
 		close_safe(&sk->fd);
-
 		list_del_init(&sk->peer_node);
 	}
 
@@ -839,7 +739,6 @@ int fix_external_unix_sockets(void)
 	pr_debug("Dumping external sockets\n");
 
 	list_for_each_entry(sk, &unix_sockets, list) {
-		FileEntry fe = FILE_ENTRY__INIT;
 		UnixSkEntry e = UNIX_SK_ENTRY__INIT;
 		FownEntry fown = FOWN_ENTRY__INIT;
 		SkOptsEntry skopts = SK_OPTS_ENTRY__INIT;
@@ -861,11 +760,7 @@ int fix_external_unix_sockets(void)
 		e.fown		= &fown;
 		e.opts		= &skopts;
 
-		fe.type = FD_TYPES__UNIXSK;
-		fe.id = e.id;
-		fe.usk = &e;
-
-		if (pb_write_one(img_from_set(glob_imgset, CR_FD_FILES), &fe, PB_FILE))
+		if (pb_write_one(img_from_set(glob_imgset, CR_FD_UNIXSK), &e, PB_UNIX_SK))
 			goto err;
 
 		show_one_unix_img("Dumped extern", &e);
@@ -886,31 +781,18 @@ struct unix_sk_info {
 	char *name_dir;
 	unsigned flags;
 	struct unix_sk_info *peer;
-	struct pprep_head peer_resolve; /* XXX : union with the above? */
 	struct file_desc d;
 	struct list_head connected; /* List of sockets, connected to me */
 	struct list_head node; /* To link in peer's connected list  */
-	struct list_head scm_fles;
 
 	/*
 	 * For DGRAM sockets with queues, we should only restore the queue
 	 * once although it may be open by more than one tid. This is the peer
 	 * that should do the queueing.
 	 */
-	struct unix_sk_info *queuer;
-	/*
-	 * These bits are set by task-owner of this unix_sk_info.
-	 * Another tasks can only read them.
-	 */
+	u32 queuer;
 	u8 bound:1;
 	u8 listen:1;
-	u8 is_connected:1;
-	u8 peer_queue_restored:1; /* Set in 1 after we restore peer's queue */
-};
-
-struct scm_fle {
-	struct list_head l;
-	struct fdinfo_list_entry *fle;
 };
 
 #define USK_PAIR_MASTER		0x1
@@ -926,141 +808,6 @@ static struct unix_sk_info *find_unix_sk_by_ino(int ino)
 	}
 
 	return NULL;
-}
-
-static struct unix_sk_info *find_queuer_for(int id)
-{
-	struct unix_sk_info *ui;
-
-	list_for_each_entry(ui, &unix_sockets, list) {
-		if (ui->queuer && ui->queuer->ue->id == id)
-			return ui;
-	}
-
-	return NULL;
-}
-
-static struct fdinfo_list_entry *get_fle_for_task(struct file_desc *tgt,
-		struct pstree_item *owner, bool force_master)
-{
-	struct fdinfo_list_entry *fle;
-	FdinfoEntry *e = NULL;
-	int fd;
-
-	list_for_each_entry(fle, &tgt->fd_info_head, desc_list) {
-		if (fle->task == owner)
-			/*
-			 * Owner already has this file in its fdtable.
-			 * Just use one.
-			 */
-			return fle;
-
-		e = fle->fe; /* keep any for further reference */
-	}
-
-	/*
-	 * Some other task restores this file. Pretend that
-	 * we're another user of it.
-	 */
-	fd = find_unused_fd(owner, -1);
-	pr_info("`- will add fake %d fd\n", fd);
-
-	if (e != NULL) {
-		e = dup_fdinfo(e, fd, 0);
-		if (!e) {
-			pr_err("Can't duplicate fdinfo for scm\n");
-			return NULL;
-		}
-	} else {
-		/*
-		 * This can happen if the file in question is
-		 * sent over the socket and closed. In this case
-		 * we need to ... invent a new one!
-		 */
-
-		e = xmalloc(sizeof(*e));
-		if (!e)
-			return NULL;
-
-		fdinfo_entry__init(e);
-		e->id = tgt->id;
-		e->type = tgt->ops->type;
-		e->fd = fd;
-		e->flags = 0;
-	}
-
-	/*
-	 * Make this fle fake, so that files collecting engine
-	 * closes them at the end.
-	 */
-	return collect_fd_to(vpid(owner), e, rsti(owner), tgt, true, force_master);
-}
-
-int unix_note_scm_rights(int id_for, uint32_t *file_ids, int *fds, int n_ids)
-{
-	struct unix_sk_info *ui;
-	struct pstree_item *owner;
-	int i;
-
-	ui = find_queuer_for(id_for);
-	if (!ui) {
-		pr_err("Can't find sender for %d\n", id_for);
-		return -1;
-	}
-
-	pr_info("Found queuer for %d -> %d\n", id_for, ui->ue->id);
-	/*
-	 * This is the task that will restore this socket
-	 */
-	owner = file_master(&ui->d)->task;
-
-	pr_info("-> will set up deps\n");
-	/*
-	 * The ui will send data to the rights receiver. Add a fake fle
-	 * for the file and a dependency.
-	 */
-	for (i = 0; i < n_ids; i++) {
-		struct file_desc *tgt;
-		struct scm_fle *sfle;
-
-		tgt = find_file_desc_raw(FD_TYPES__UND, file_ids[i]);
-		if (!tgt) {
-			pr_err("Can't find fdesc to send\n");
-			return -1;
-		}
-
-		pr_info("scm: add file %d -> %d\n", tgt->id, vpid(owner));
-		sfle = xmalloc(sizeof(*sfle));
-		if (!sfle)
-			return -1;
-
-		sfle->fle = get_fle_for_task(tgt, owner, false);
-		if (!sfle->fle) {
-			pr_err("Can't request new fle for scm\n");
-			return -1;
-		}
-
-		list_add_tail(&sfle->l, &ui->scm_fles);
-		fds[i] = sfle->fle->fe->fd;
-	}
-
-	return 0;
-}
-
-static int chk_restored_scms(struct unix_sk_info *ui)
-{
-	struct scm_fle *sf, *n;
-
-	list_for_each_entry_safe(sf, n, &ui->scm_fles, l) {
-		if (sf->fle->stage < FLE_OPEN)
-			return 1;
-
-		/* Optimization for the next pass */
-		list_del(&sf->l);
-		xfree(sf);
-	}
-
-	return 0;
 }
 
 static int wake_connected_sockets(struct unix_sk_info *ui)
@@ -1081,20 +828,6 @@ static bool peer_is_not_prepared(struct unix_sk_info *peer)
 		return (!peer->bound);
 	else
 		return (!peer->listen);
-}
-
-static int restore_unix_queue(int fd, struct unix_sk_info *peer)
-{
-	struct pstree_item *task;
-
-	if (restore_sk_queue(fd, peer->ue->id))
-		return -1;
-	if (peer->queuer)
-		peer->queuer->peer_queue_restored = true;
-
-	task = file_master(&peer->d)->task;
-	set_fds_event(vpid(task));
-	return 0;
 }
 
 static int shutdown_unix_sk(int sk, struct unix_sk_info *ui)
@@ -1129,17 +862,12 @@ static int restore_sk_common(int fd, struct unix_sk_info *ui)
 	return 0;
 }
 
-static int revert_unix_sk_cwd(int *prev_cwd_fd, int *root_fd, int *ns_fd)
+static void revert_unix_sk_cwd(int *prev_cwd_fd, int *root_fd)
 {
-	int ret = 0;
-
-	if (*ns_fd >= 0 && restore_ns(*ns_fd, &mnt_ns_desc))
-		ret = -1;
 	if (*root_fd >= 0) {
 		if (fchdir(*root_fd) || chroot("."))
 			pr_perror("Can't revert root directory");
 		close_safe(root_fd);
-		ret = -1;
 	}
 	if (prev_cwd_fd && *prev_cwd_fd >= 0) {
 		if (fchdir(*prev_cwd_fd))
@@ -1148,72 +876,32 @@ static int revert_unix_sk_cwd(int *prev_cwd_fd, int *root_fd, int *ns_fd)
 			pr_debug("Reverted working dir\n");
 		close(*prev_cwd_fd);
 		*prev_cwd_fd = -1;
-		ret = -1;
 	}
-
-	return ret;
 }
 
-static int prep_unix_sk_cwd(struct unix_sk_info *ui, int *prev_cwd_fd,
-			    int *prev_root_fd, int *prev_mntns_fd)
+static int prep_unix_sk_cwd(struct unix_sk_info *ui, int *prev_cwd_fd, int *prev_root_fd)
 {
-	static struct ns_id *root = NULL, *ns;
-	int fd;
-
-	if (prev_mntns_fd && ui->name[0] && ui->ue->mnt_id >= 0) {
-		struct ns_id *mntns = lookup_nsid_by_mnt_id(ui->ue->mnt_id);
-		int ns_fd;
-
-		if (mntns == NULL) {
-			pr_err("Unable to find the %d mount\n", ui->ue->mnt_id);
-			return -1;
-		}
-
-		ns_fd = fdstore_get(mntns->mnt.nsfd_id);
-		if (ns_fd < 0)
-			return -1;
-
-		if (switch_ns_by_fd(ns_fd, &mnt_ns_desc, prev_mntns_fd))
-			return -1;
-
-		set_proc_self_fd(-1);
-		close(ns_fd);
-	}
+	static struct ns_id *root = NULL;
 
 	*prev_cwd_fd = open(".", O_RDONLY);
 	if (*prev_cwd_fd < 0) {
-		pr_perror("Can't open current dir");
+		pr_err("Can't open current dir\n");
 		return -1;
 	}
 
 	if (prev_root_fd && (root_ns_mask & CLONE_NEWNS)) {
-		if (ui->ue->mnt_id >= 0) {
-			ns = lookup_nsid_by_mnt_id(ui->ue->mnt_id);
-			if (ns == NULL)
-				goto err;
-		} else {
-			if (root == NULL)
-				root = lookup_ns_by_id(root_item->ids->mnt_ns_id,
-									&mnt_ns_desc);
-			ns = root;
-		}
+		if (root == NULL)
+			root = lookup_ns_by_id(root_item->ids->mnt_ns_id, &mnt_ns_desc);
 		*prev_root_fd = open("/", O_RDONLY);
 		if (*prev_root_fd < 0) {
-			pr_perror("Can't open current root");
+			pr_err("Can't open current root\n");
 			goto err;
 		}
 
-		fd = fdstore_get(ns->mnt.root_fd_id);
-		if (fd < 0) {
-			pr_err("Can't get root fd\n");
-			goto err;
-		}
-		if (fchdir(fd)) {
+		if (fchdir(root->mnt.root_fd)) {
 			pr_perror("Unable to change current working dir");
-			close(fd);
 			goto err;
 		}
-		close(fd);
 		if (chroot(".")) {
 			pr_perror("Unable to change root directory");
 			goto err;
@@ -1237,28 +925,19 @@ err:
 	return -1;
 }
 
-static int post_open_standalone(struct file_desc *d, int fd)
+static int post_open_unix_sk(struct file_desc *d, int fd)
 {
 	struct unix_sk_info *ui;
 	struct unix_sk_info *peer;
 	struct sockaddr_un addr;
-	int cwd_fd = -1, root_fd = -1, ns_fd = -1;
+	int cwd_fd = -1, root_fd = -1;
 
 	ui = container_of(d, struct unix_sk_info, d);
 	BUG_ON((ui->flags & (USK_PAIR_MASTER | USK_PAIR_SLAVE)) ||
 			(ui->ue->uflags & (USK_CALLBACK | USK_INHERIT)));
 
-	if (chk_restored_scms(ui))
-		return 1;
-
 	peer = ui->peer;
-	if (!peer || ui->is_connected)
-		goto restore_sk_common;
-
-	if (ui->ue->ino == FAKE_INO) {
-		BUG_ON(ui->queuer);
-		goto restore_queue;
-	}
+	BUG_ON(peer == NULL);
 
 	/* Skip external sockets */
 	if (!list_empty(&peer->d.fd_info_head))
@@ -1271,82 +950,30 @@ static int post_open_standalone(struct file_desc *d, int fd)
 
 	pr_info("\tConnect %#x to %#x\n", ui->ue->ino, peer->ue->ino);
 
-	if (prep_unix_sk_cwd(peer, &cwd_fd, NULL, &ns_fd))
+	if (prep_unix_sk_cwd(peer, &cwd_fd, NULL))
 		return -1;
 
 	if (connect(fd, (struct sockaddr *)&addr,
 				sizeof(addr.sun_family) +
 				peer->ue->name.len) < 0) {
+		revert_unix_sk_cwd(&cwd_fd, &root_fd);
 		pr_perror("Can't connect %#x socket", ui->ue->ino);
-		revert_unix_sk_cwd(&cwd_fd, &root_fd, &ns_fd);
 		return -1;
 	}
-	ui->is_connected = true;
 
-	revert_unix_sk_cwd(&cwd_fd, &root_fd, &ns_fd);
+	revert_unix_sk_cwd(&cwd_fd, &root_fd);
 
-restore_queue:
-	if (peer->queuer == ui &&
-	    !(peer->ue->uflags & USK_EXTERN) &&
-	    restore_unix_queue(fd, peer))
+	if (peer->queuer == ui->ue->ino && restore_sk_queue(fd, peer->ue->id))
 		return -1;
-restore_sk_common:
-	if (ui->queuer && !ui->queuer->peer_queue_restored)
-		return 1;
+
 	return restore_sk_common(fd, ui);
-}
-
-static int bind_deleted_unix_sk(int sk, struct unix_sk_info *ui,
-					struct sockaddr_un *addr)
-{
-	char temp[PATH_MAX];
-	int ret;
-
-	pr_info("found duplicate unix socket bound at %s\n", addr->sun_path);
-
-	ret = snprintf(temp, sizeof(temp),
-			"%s-%s-%d", addr->sun_path, "criu-temp", getpid());
-	/* this shouldn't happen, since sun_addr is only 108 chars long */
-	if (ret < 0 || ret >= sizeof(temp)) {
-		pr_err("snprintf of %s failed?\n", addr->sun_path);
-		return -1;
-	}
-
-	ret = rename(addr->sun_path, temp);
-	if (ret < 0) {
-		pr_perror("couldn't move socket for binding");
-		return -1;
-	}
-
-	ret = bind(sk, (struct sockaddr *)addr,
-			sizeof(addr->sun_family) + ui->ue->name.len);
-	if (ret < 0) {
-		pr_perror("Can't bind socket after move");
-		return -1;
-	}
-
-	ret = rename(temp, addr->sun_path);
-	if (ret < 0) {
-		pr_perror("couldn't move socket back");
-		return -1;
-	}
-
-	/* we've handled the deleted-ness of this
-	 * socket and we don't want to delete it later
-	 * since it's not /this/ socket.
-	 */
-	ui->ue->deleted = false;
-	return 0;
 }
 
 static int bind_unix_sk(int sk, struct unix_sk_info *ui)
 {
 	struct sockaddr_un addr;
-	int cwd_fd = -1, root_fd = -1, ns_fd = -1;
-	int ret, exit_code = -1;
-
-	if (ui->ue->name.len == 0)
-		return 0;
+	int cwd_fd = -1, root_fd = -1;
+	int ret = -1;
 
 	if ((ui->ue->type == SOCK_STREAM) && (ui->ue->state == TCP_ESTABLISHED)) {
 		/*
@@ -1356,54 +983,91 @@ static int bind_unix_sk(int sk, struct unix_sk_info *ui)
 		 * restored we should walk those temp names and rename
 		 * some of them back to real ones.
 		 */
-		return 0;
+		ret = 0;
+		goto done;
 	}
 
 	memset(&addr, 0, sizeof(addr));
 	addr.sun_family = AF_UNIX;
 	memcpy(&addr.sun_path, ui->name, ui->ue->name.len);
 
-	if (ui->name[0] && prep_unix_sk_cwd(ui, &cwd_fd, NULL, &ns_fd))
+	if (prep_unix_sk_cwd(ui, &cwd_fd, NULL))
 		return -1;
 
-	ret = bind(sk, (struct sockaddr *)&addr,
-			sizeof(addr.sun_family) + ui->ue->name.len);
-	if (ret < 0) {
-		if (ui->ue->has_deleted && ui->ue->deleted && errno == EADDRINUSE) {
-			if (bind_deleted_unix_sk(sk, ui, &addr))
+	if (ui->ue->name.len) {
+		ret = bind(sk, (struct sockaddr *)&addr,
+				sizeof(addr.sun_family) + ui->ue->name.len);
+		if (ret < 0) {
+			if (ui->ue->has_deleted && ui->ue->deleted && errno == EADDRINUSE) {
+				char temp[PATH_MAX];
+
+				pr_info("found duplicate unix socket bound at %s\n", addr.sun_path);
+
+				ret = snprintf(temp, sizeof(temp), "%s-%s-%d", addr.sun_path, "criu-temp", getpid());
+				/* this shouldn't happen, since sun_addr is only 108 chars long */
+				if (ret < 0 || ret >= sizeof(temp)) {
+					pr_err("snprintf of %s failed?\n", addr.sun_path);
+					goto done;
+				}
+
+				ret = rename(addr.sun_path, temp);
+				if (ret < 0) {
+					pr_perror("couldn't move socket for binding");
+					goto done;
+				}
+
+				ret = bind(sk, (struct sockaddr *)&addr,
+						sizeof(addr.sun_family) + ui->ue->name.len);
+				if (ret < 0) {
+					pr_perror("Can't bind socket after move");
+					goto done;
+				}
+
+				ret = rename(temp, addr.sun_path);
+				if (ret < 0) {
+					pr_perror("couldn't move socket back");
+					goto done;
+				}
+
+				/* we've handled the deleted-ness of this
+				 * socket and we don't want to delete it later
+				 * since it's not /this/ socket.
+				 */
+				ui->ue->deleted = false;
+
+			} else {
+				pr_perror("Can't bind socket");
 				goto done;
-		} else {
-			pr_perror("Can't bind socket");
-			goto done;
-		}
-	}
-
-	if (*ui->name && ui->ue->file_perms) {
-		FilePermsEntry *perms = ui->ue->file_perms;
-		char fname[PATH_MAX];
-
-		if (ui->ue->name.len >= sizeof(fname)) {
-			pr_err("The file name is too long\n");
-			goto done;
+			}
 		}
 
-		memcpy(fname, ui->name, ui->ue->name.len);
-		fname[ui->ue->name.len] = '\0';
+		if (*ui->name && ui->ue->file_perms) {
+			FilePermsEntry *perms = ui->ue->file_perms;
+			char fname[PATH_MAX];
 
-		if (fchownat(AT_FDCWD, fname, perms->uid, perms->gid, 0) == -1) {
-			pr_perror("Unable to change file owner and group");
-			goto done;
+			if (ui->ue->name.len >= sizeof(fname)) {
+				pr_err("The file name is too long\n");
+				goto done;
+			}
+
+			memcpy(fname, ui->name, ui->ue->name.len);
+			fname[ui->ue->name.len] = '\0';
+
+			if (fchownat(AT_FDCWD, fname, perms->uid, perms->gid, 0) == -1) {
+				pr_perror("Unable to change file owner and group");
+				goto done;
+			}
+
+			if (fchmodat(AT_FDCWD, fname, perms->mode, 0) == -1) {
+				pr_perror("Unable to change file mode bits");
+				goto done;
+			}
 		}
 
-		if (fchmodat(AT_FDCWD, fname, perms->mode, 0) == -1) {
-			pr_perror("Unable to change file mode bits");
+		if (ui->ue->deleted && unlink((char *)ui->ue->name.data) < 0) {
+			pr_perror("failed to unlink %s", ui->ue->name.data);
 			goto done;
 		}
-	}
-
-	if (ui->ue->deleted && unlink((char *)ui->ue->name.data) < 0) {
-		pr_perror("failed to unlink %s", ui->ue->name.data);
-		goto done;
 	}
 
 	if (ui->ue->state != TCP_LISTEN) {
@@ -1411,154 +1075,74 @@ static int bind_unix_sk(int sk, struct unix_sk_info *ui)
 		wake_connected_sockets(ui);
 	}
 
-	exit_code = 0;
+	ret = 0;
 done:
-	revert_unix_sk_cwd(&cwd_fd, &root_fd, &ns_fd);
-	return exit_code;
-}
-
-static int post_open_interconnected_master(struct unix_sk_info *ui)
-{
-	struct fdinfo_list_entry *fle, *fle_peer;
-	struct unix_sk_info *peer = ui->peer;
-
-	fle = file_master(&ui->d);
-	fle_peer = file_master(&peer->d);
-	BUG_ON(fle->task != fle_peer->task); /* See interconnected_pair() */
-
-	if (chk_restored_scms(ui) || chk_restored_scms(peer))
-		return 0;
-
-	if (restore_unix_queue(fle->fe->fd, peer))
-		return -1;
-
-	if (restore_unix_queue(fle_peer->fe->fd, ui))
-		return -1;
-
-	if (restore_sk_common(fle->fe->fd, ui))
-		return -1;
-
-	if (restore_sk_common(fle_peer->fe->fd, peer))
-		return -1;
-
-	return 0;
+	revert_unix_sk_cwd(&cwd_fd, &root_fd);
+	return ret;
 }
 
 static int open_unixsk_pair_master(struct unix_sk_info *ui, int *new_fd)
 {
-	struct fdinfo_list_entry *fle, *fle_peer;
+	int sk[2];
 	struct unix_sk_info *peer = ui->peer;
-	int sk[2], tmp;
 
 	pr_info("Opening pair master (id %#x ino %#x peer %#x)\n",
 			ui->ue->id, ui->ue->ino, ui->ue->peer);
-
-	fle = file_master(&ui->d);
-	if (fle->stage == FLE_OPEN)
-		return post_open_interconnected_master(ui);
-
-	fle_peer = file_master(&peer->d);
-
-	BUG_ON(fle->task != fle_peer->task); /* See interconnected_pair() */
-
-	if (set_netns(ui->ue->ns_id))
-		return -1;
 
 	if (socketpair(PF_UNIX, ui->ue->type, 0, sk) < 0) {
 		pr_perror("Can't make socketpair");
 		return -1;
 	}
 
-	if (sk[0] == fle_peer->fe->fd) {
-		/*
-		 * Below setup_and_serve_out() will reuse this fd,
-		 * so this dups it in something else.
-		 */
-		tmp = dup(sk[0]);
-		if (tmp < 0) {
-			pr_perror("Can't dup()");
-			return -1;
-		}
-		close(sk[0]);
-		sk[0] = tmp;
-	}
-
-	if (setup_and_serve_out(fle_peer, sk[1])) {
-		pr_err("Can't send pair slave\n");
+	if (restore_sk_queue(sk[0], peer->ue->id))
 		return -1;
-	}
-	sk[1] = fle_peer->fe->fd;
+	if (restore_sk_queue(sk[1], ui->ue->id))
+		return -1;
 
 	if (bind_unix_sk(sk[0], ui))
 		return -1;
 
-	if (bind_unix_sk(sk[1], peer))
+	if (restore_sk_common(sk[0], ui))
 		return -1;
 
+	if (send_desc_to_peer(sk[1], &peer->d)) {
+		pr_err("Can't send pair slave\n");
+		return -1;
+	}
+
+	close(sk[1]);
+
 	*new_fd = sk[0];
-	return 1;
+	return 0;
 }
 
 static int open_unixsk_pair_slave(struct unix_sk_info *ui, int *new_fd)
 {
-	struct fdinfo_list_entry *fle_peer;
+	int sk, ret;
 
-	fle_peer = file_master(&ui->peer->d);
-	/*
-	 * All the work is made in master. Slave just says it's restored
-	 * after it sees the master is restored.
-	 */
-	return (fle_peer->stage != FLE_RESTORED);
-}
-
-/*
- * When sks[0]'s fle requires to create socketpair, and sks[1] is also
- * somebody's fle, this makes file engine to make note the second_end
- * is also open.
- */
-static int setup_second_end(int *sks, struct fdinfo_list_entry *second_end)
-{
-	int ret;
-
-	if (sks[0] == second_end->fe->fd) {
-		/*
-		 * Below setup_and_serve_out() will reuse this fd,
-		 * so this dups it in something else.
-		 */
-		ret = dup(sks[0]);
-		if (ret < 0) {
-			pr_perror("Can't dup()");
-			return -1;
-		}
-		close(sks[0]);
-		sks[0] = ret;
+	ret = recv_desc_from_peer(&ui->d, &sk);
+	if (ret != 0) {
+		if (ret != 1)
+			pr_err("Can't recv pair slave\n");
+		return ret;
 	}
 
-	if (setup_and_serve_out(second_end, sks[1])) {
-		pr_err("Can't send pair slave\n");
+	if (bind_unix_sk(sk, ui))
 		return -1;
-	}
+
+	if (restore_sk_common(sk, ui))
+		return -1;
+
+	*new_fd = sk;
 	return 0;
 }
 
 static int open_unixsk_standalone(struct unix_sk_info *ui, int *new_fd)
 {
-	struct unix_sk_info *queuer = ui->queuer;
-	struct fdinfo_list_entry *fle;
 	int sk;
 
 	pr_info("Opening standalone socket (id %#x ino %#x peer %#x)\n",
 			ui->ue->id, ui->ue->ino, ui->ue->peer);
-	fle = file_master(&ui->d);
-	if (fle->stage == FLE_OPEN)
-		return post_open_standalone(&ui->d, fle->fe->fd);
-
-	/* Fake socket will be restored by its peer */
-	if (!(ui->ue->uflags & USK_EXTERN) && ui->ue->ino == FAKE_INO)
-		return 1;
-
-	if (set_netns(ui->ue->ns_id))
-		return -1;
 
 	/*
 	 * Check if this socket was connected to criu service.
@@ -1578,7 +1162,7 @@ static int open_unixsk_standalone(struct unix_sk_info *ui, int *new_fd)
 
 		close(sks[1]);
 		sk = sks[0];
-	} else if (ui->ue->state == TCP_ESTABLISHED && queuer && queuer->ue->ino == FAKE_INO) {
+	} else if ((ui->ue->state == TCP_ESTABLISHED) && !ui->ue->peer) {
 		int ret, sks[2];
 
 		if (ui->ue->type != SOCK_STREAM) {
@@ -1599,11 +1183,18 @@ static int open_unixsk_standalone(struct unix_sk_info *ui, int *new_fd)
 			return -1;
 		}
 
-		if (setup_second_end(sks, file_master(&queuer->d)))
+		/*
+		 * Restore queue at the one end,
+		 * before closing the second one.
+		 */
+		if (restore_sk_queue(sks[1], ui->ue->id)) {
+			pr_perror("Can't restore socket queue");
 			return -1;
+		}
 
+		close(sks[1]);
 		sk = sks[0];
-	} else if (ui->ue->type == SOCK_DGRAM && queuer && queuer->ue->ino == FAKE_INO) {
+	} else if (ui->ue->type == SOCK_DGRAM && !ui->queuer) {
 		struct sockaddr_un addr;
 		int sks[2];
 
@@ -1622,18 +1213,21 @@ static int open_unixsk_standalone(struct unix_sk_info *ui, int *new_fd)
 		 * to sks[0] (see unix_dgram_connect()->unix_may_send()).
 		 * The below is hack: we use that connect with AF_UNSPEC
 		 * clears socket's peer.
-		 * Note, that connect hack flushes receive queue,
-		 * so restore_unix_queue() must be after it.
 		 */
 		if (connect(sk, (struct sockaddr *)&addr, sizeof(addr.sun_family))) {
 			pr_perror("Can't clear socket's peer");
 			return -1;
 		}
 
-		if (setup_second_end(sks, file_master(&queuer->d)))
+		/*
+		 * This must be after the connect() hack, because
+		 * connect() flushes receive queue.
+		 */
+		if (restore_sk_queue(sks[1], ui->ue->id)) {
+			pr_perror("Can't restore socket queue");
 			return -1;
-
-		sk = sks[0];
+		}
+		close(sks[1]);
 	} else {
 		if (ui->ue->uflags & USK_CALLBACK) {
 			sk = run_plugins(RESTORE_UNIX_SK, ui->ue->ino);
@@ -1652,6 +1246,7 @@ static int open_unixsk_standalone(struct unix_sk_info *ui, int *new_fd)
 					"option to allow restoring it.\n");
 			return -1;
 		}
+
 
 		sk = socket(PF_UNIX, ui->ue->type, 0);
 		if (sk < 0) {
@@ -1673,13 +1268,11 @@ static int open_unixsk_standalone(struct unix_sk_info *ui, int *new_fd)
 		wake_connected_sockets(ui);
 	}
 
-	if (ui->peer || ui->queuer) {
+	if (ui->peer) {
 		/*
-		 * 1)We need to connect() to the peer, but the
+		 * We need to connect() to the peer, but the
 		 * guy might have not bind()-ed himself, so
 		 * let's postpone this.
-		 * 2)Queuer won't be able to connect, if we do
-		 * shutdown, so postpone it.
 		 */
 		*new_fd = sk;
 		return 1;
@@ -1695,8 +1288,13 @@ out:
 
 static int open_unix_sk(struct file_desc *d, int *new_fd)
 {
+	struct fdinfo_list_entry *fle;
 	struct unix_sk_info *ui;
 	int ret;
+
+	fle = file_master(d);
+	if (fle->stage >= FLE_OPEN)
+		return post_open_unix_sk(d, fle->fe->fd);
 
 	ui = container_of(d, struct unix_sk_info, d);
 
@@ -1740,12 +1338,12 @@ static struct file_desc_ops unix_desc_ops = {
  */
 static void unlink_stale(struct unix_sk_info *ui)
 {
-	int ret, cwd_fd = -1, root_fd = -1, ns_fd = -1;
+	int ret, cwd_fd = -1, root_fd = -1;
 
 	if (ui->name[0] == '\0' || (ui->ue->uflags & USK_EXTERN))
 		return;
 
-	if (prep_unix_sk_cwd(ui, &cwd_fd, &root_fd, NULL))
+	if (prep_unix_sk_cwd(ui, &cwd_fd, &root_fd))
 		return;
 
 	ret = unlinkat(AT_FDCWD, ui->name, 0) ? -1 : 0;
@@ -1755,94 +1353,48 @@ static void unlink_stale(struct unix_sk_info *ui)
 			ui->name ? (ui->name[0] ? ui->name : &ui->name[1]) : "-",
 			ui->name_dir ? ui->name_dir : "-");
 	}
-	revert_unix_sk_cwd(&cwd_fd, &root_fd, &ns_fd);
+	revert_unix_sk_cwd(&cwd_fd, &root_fd);
 }
 
-static void try_resolve_unix_peer(struct unix_sk_info *ui);
-static int fixup_unix_peer(struct unix_sk_info *ui);
-
-static int post_prepare_unix_sk(struct pprep_head *ph)
-{
-	struct unix_sk_info *ui;
-
-	ui = container_of(ph, struct unix_sk_info, peer_resolve);
-	if (ui->ue->peer && fixup_unix_peer(ui))
-		return -1;
-	if (ui->name)
-		unlink_stale(ui);
-	return 0;
-}
-
-static int init_unix_sk_info(struct unix_sk_info *ui, UnixSkEntry *ue)
-{
-	ui->ue = ue;
-	if (ue->name.len) {
-		if (ue->name.len > UNIX_PATH_MAX) {
-			pr_err("Bad unix name len %d\n", (int)ue->name.len);
-			return -1;
-		}
-
-		ui->name = (void *)ue->name.data;
-	} else
-		ui->name = NULL;
-	ui->name_dir = (void *)ue->name_dir;
-
-	ui->queuer = NULL;
-	ui->peer = NULL;
-	ui->bound = 0;
-	ui->listen = 0;
-	ui->is_connected = 0;
-	ui->peer_queue_restored = 0;
-	INIT_LIST_HEAD(&ui->connected);
-	INIT_LIST_HEAD(&ui->node);
-	INIT_LIST_HEAD(&ui->scm_fles);
-	ui->flags = 0;
-
-	return 0;
-}
+static int resolve_unix_peers(void *unused);
 
 static int collect_one_unixsk(void *o, ProtobufCMessage *base, struct cr_img *i)
 {
 	struct unix_sk_info *ui = o;
-	char *uname, *prefix = "";
-	int ulen;
+	static bool post_queued = false;
 
-	if (init_unix_sk_info(ui, pb_msg(base, UnixSkEntry)))
-		return -1;
+	ui->ue = pb_msg(base, UnixSkEntry);
+	ui->name_dir = (void *)ui->ue->name_dir;
 
-	uname = ui->name;
-	ulen = ui->ue->name.len;
-	if (ulen > 0 && uname[0] == 0) {
-		prefix = "@";
-		uname++;
-		ulen--;
-		if (memrchr(uname, 0, ulen)) {
-			/* replace zero characters */
-			char *s = alloca(ulen + 1);
-			int i;
+	if (ui->ue->peer && !post_queued) {
+		post_queued = true;
+		if (add_post_prepare_cb(resolve_unix_peers, NULL))
+			return -1;
+	}
 
-			for (i = 0; i < ulen; i++)
-				s[i] = uname[i] ? : '@';
-			uname = s;
+	if (ui->ue->name.len) {
+		if (ui->ue->name.len > UNIX_PATH_MAX) {
+			pr_err("Bad unix name len %d\n", (int)ui->ue->name.len);
+			return -1;
 		}
-	} else if (ulen == 0) {
-		ulen = 1;
-		uname = "-";
-	}
 
-	pr_info(" `- Got %#x peer %#x (name %s%.*s dir %s)\n",
+		ui->name = (void *)ui->ue->name.data;
+
+		unlink_stale(ui);
+	} else
+		ui->name = NULL;
+
+	ui->queuer = 0;
+	ui->peer = NULL;
+	ui->bound = 0;
+	ui->listen = 0;
+	INIT_LIST_HEAD(&ui->connected);
+	INIT_LIST_HEAD(&ui->node);
+	ui->flags = 0;
+	pr_info(" `- Got %#x peer %#x (name %s dir %s)\n",
 		ui->ue->ino, ui->ue->peer,
-		prefix, ulen, uname,
+		ui->name ? (ui->name[0] ? ui->name : &ui->name[1]) : "-",
 		ui->name_dir ? ui->name_dir : "-");
-
-	if (ui->ue->peer || ui->name) {
-		if (ui->ue->peer)
-			try_resolve_unix_peer(ui);
-
-		ui->peer_resolve.actor = post_prepare_unix_sk;
-		add_post_prepare_cb(&ui->peer_resolve);
-	}
-
 	list_add_tail(&ui->list, &unix_sockets);
 	return file_desc_add(&ui->d, ui->ue->id, &unix_desc_ops);
 }
@@ -1859,143 +1411,74 @@ static void set_peer(struct unix_sk_info *ui, struct unix_sk_info *peer)
 {
 	ui->peer = peer;
 	list_add(&ui->node, &peer->connected);
-	if (!peer->queuer)
-		peer->queuer = ui;
 }
 
-static int add_fake_queuer(struct unix_sk_info *ui)
-{
-	struct unix_sk_info *peer;
-	struct pstree_item *task;
-	UnixSkEntry *peer_ue;
-	SkOptsEntry *skopts;
-	FownEntry *fown;
-
-	if (ui->ue->ino == FAKE_INO)
-		return 0;
-
-	peer = xzalloc(sizeof(struct unix_sk_info) +
-			sizeof(UnixSkEntry) +
-			sizeof(SkOptsEntry) +
-			sizeof(FownEntry));
-	if (peer == NULL)
-		return -1;
-
-	peer_ue = (void *) peer + sizeof(struct unix_sk_info);
-	skopts = (void *) peer_ue + sizeof(UnixSkEntry);
-	fown = (void *) skopts + sizeof(SkOptsEntry);
-	memcpy(skopts, ui->ue->opts, sizeof(SkOptsEntry));
-	memcpy(fown, ui->ue->fown, sizeof(FownEntry));
-	memcpy(peer_ue, ui->ue, sizeof(UnixSkEntry));
-	peer_ue->opts = skopts;
-	peer_ue->file_perms = NULL;
-	peer_ue->fown = fown;
-	peer_ue->name.len = 0;
-	peer_ue->name_dir = NULL;
-
-	if (init_unix_sk_info(peer, peer_ue))
-		return -1;
-
-	peer_ue->id = find_unused_file_desc_id();
-	set_peer(peer, ui);
-
-	/* Note, that this fake fdesc has no ino */
-	peer->ue->ino = FAKE_INO;
-	file_desc_add(&peer->d, peer_ue->id, &unix_desc_ops);
-	list_del_init(&peer->d.fake_master_list);
-	list_add(&peer->list, &unix_sockets);
-	task = file_master(&ui->d)->task;
-
-	return (get_fle_for_task(&peer->d, task, true) == NULL);
-}
-
-int add_fake_unix_queuers(void)
-{
-	struct unix_sk_info *ui;
-
-	list_for_each_entry(ui, &unix_sockets, list) {
-		if ((ui->ue->uflags & (USK_EXTERN | USK_CALLBACK)) || ui->queuer)
-			continue;
-		if (!(ui->ue->state == TCP_ESTABLISHED && !ui->peer) &&
-		     ui->ue->type != SOCK_DGRAM)
-			continue;
-		if (add_fake_queuer(ui))
-			return -1;
-	}
-	return 0;
-}
-
-/* This function is called from post prepare only */
-static int interconnected_pair(struct unix_sk_info *ui, struct unix_sk_info *peer)
+static void interconnected_pair(struct unix_sk_info *ui, struct unix_sk_info *peer)
 {
 	struct fdinfo_list_entry *fle, *fle_peer;
-
-	ui->flags |= USK_PAIR_MASTER;
-	peer->flags |= USK_PAIR_SLAVE;
-
+	/*
+	 * Select who will restore the pair. Check is identical to
+	 * the one in pipes.c and makes sure tasks wait for each other
+	 * in pids sorting order (ascending).
+	 */
 	fle = file_master(&ui->d);
 	fle_peer = file_master(&peer->d);
 
-	/*
-	 * Since queue restore is delayed, every socket of the pair
-	 * should have another end to send the queue packets.
-	 * To fit that, we make the both file_master's to be owned
-	 * by the only task.
-	 * This function is called from run_post_prepare() and
-	 * after add_fake_fds_masters(), so we must not add masters,
-	 * which fle->task has no permissions to restore. But
-	 * it has permissions on ui, so it has permissions on peer.
-	 */
-	if (fle->task != fle_peer->task &&
-	    !get_fle_for_task(&peer->d, fle->task, true))
-		return -1;
-
-	return 0;
+	if (fdinfo_rst_prio(fle, fle_peer)) {
+		ui->flags |= USK_PAIR_MASTER;
+		peer->flags |= USK_PAIR_SLAVE;
+	} else {
+		peer->flags |= USK_PAIR_MASTER;
+		ui->flags |= USK_PAIR_SLAVE;
+	}
 }
 
-static int fixup_unix_peer(struct unix_sk_info *ui)
+static int resolve_unix_peers(void *unused)
 {
-	struct unix_sk_info *peer = ui->peer;
+	struct unix_sk_info *ui, *peer;
 
-	if (!peer) {
-		pr_err("FATAL: Peer %#x unresolved for %#x\n",
-				ui->ue->peer, ui->ue->ino);
-		return -1;
-	}
+	list_for_each_entry(ui, &unix_sockets, list) {
+		if (ui->peer)
+			continue;
+		if (!ui->ue->peer)
+			continue;
 
-	if (peer != ui && peer->peer == ui &&
-			!(ui->flags & (USK_PAIR_MASTER | USK_PAIR_SLAVE))) {
-		pr_info("Connected %#x -> %#x (%#x) flags %#x\n",
-				ui->ue->ino, ui->ue->peer, peer->ue->ino, ui->flags);
-		/* socketpair or interconnected sockets */
-		if (interconnected_pair(ui, peer))
+		peer = find_unix_sk_by_ino(ui->ue->peer);
+
+		if (!peer) {
+			pr_err("FATAL: Peer %#x unresolved for %#x\n",
+					ui->ue->peer, ui->ue->ino);
 			return -1;
+		}
+
+		set_peer(ui, peer);
+		if (!peer->queuer)
+			peer->queuer = ui->ue->ino;
+		if (ui == peer)
+			/* socket connected to self %) */
+			continue;
+		if (peer->ue->peer != ui->ue->ino)
+			continue;
+
+		set_peer(peer, ui);
+
+		/* socketpair or interconnected sockets */
+		interconnected_pair(ui, peer);
+	}
+
+	pr_info("Unix sockets:\n");
+	list_for_each_entry(ui, &unix_sockets, list) {
+		struct fdinfo_list_entry *fle;
+
+		pr_info("\t%#x -> %#x (%#x) flags %#x\n", ui->ue->ino, ui->ue->peer,
+				ui->peer ? ui->peer->ue->ino : 0, ui->flags);
+		list_for_each_entry(fle, &ui->d.fd_info_head, desc_list)
+			pr_info("\t\tfd %d in pid %d\n",
+					fle->fe->fd, fle->pid);
+
 	}
 
 	return 0;
-}
-
-static void try_resolve_unix_peer(struct unix_sk_info *ui)
-{
-	struct unix_sk_info *peer;
-
-	if (ui->peer)
-		return;
-
-	BUG_ON(!ui->ue->peer);
-
-	if (ui->ue->peer == ui->ue->ino) {
-		/* socket connected to self %) */
-		set_peer(ui, ui);
-		return;
-	}
-
-	peer = find_unix_sk_by_ino(ui->ue->peer);
-	if (peer) {
-		set_peer(ui, peer);
-		if (peer->ue->peer == ui->ue->ino)
-			set_peer(peer, ui);
-	} /* else -- maybe later */
 }
 
 int unix_sk_id_add(unsigned int ino)

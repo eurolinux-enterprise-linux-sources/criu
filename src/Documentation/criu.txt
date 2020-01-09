@@ -24,20 +24,15 @@ on a different system, or both.
 OPTIONS
 -------
 
-Most of the true / false long options (the ones without arguments) can be
-prefixed with *--no-* to negate the option (example: *--display-stats*
-and *--no-display-stats*).
-
 Common options
 ~~~~~~~~~~~~~~
 Common options are applicable to any 'command'.
 
-*-v*[*v*...], *--verbosity*::
+*-v*[*v*...]::
     Increase verbosity up from the default level. Multiple *v* can be used,
-    each increasing verbosity by one level. Using long option without argument
-    increases verbosity by one level.
+    each increasing verbosity by one level.
 
-*-v*'num', *--verbosity*='num'::
+*-v*'num'::
     Set verbosity level to 'num'. The higher the level, the more output
     is produced.
     +
@@ -265,9 +260,6 @@ For example, the command line for the above example should look like this:
     The TCP stack on the client side is expected to handle the
     re-connect gracefully.
 
-*--tcp-close*::
-    Restore connected TCP sockets in closed state.
-
 *--evasive-devices*::
     Use any path to a device file if the original one is inaccessible.
 
@@ -316,15 +308,6 @@ For example, the command line for the above example should look like this:
     container moves all of its tasks into a cgroup directory below the container
     engine's default directory for tasks, permissions will not be preserved on
     the upper directories with no tasks in them, which may cause problems.
-
-*--lazy-pages*::
-    Perform the dump procedure without writing memory pages into the
-    image files and prepare to service page requests over the
-    network. When *dump* runs in this mode it presumes that
-    *lazy-pages* daemon will connect to it and fetch memory pages to
-    lazily inject them into the restored process address space. This
-    option is intended for post-copy (lazy) migration and should be
-    used in conjunction with *restore* with appropriate options.
 
 *restore*
 ~~~~~~~~~
@@ -475,14 +458,6 @@ are not adequate, but this can be suppressed by using *--cpu-cap=none*.
    to restore on an older kernel, or a kernel configured without some
    options.
 
-*--lazy-pages*::
-   Restore the processes without filling out the entire memory
-   contents. When this option is used, *restore* sets up the
-   infrastructure required to fill memory pages either on demand when
-   the process accesses them or in the background without stopping the
-   restored process.
-   This option requires running *lazy-pages* daemon.
-
 *check*
 ~~~~~~~
 Checks whether the kernel supports the features needed by *criu* to
@@ -548,24 +523,6 @@ Launches *criu* in page server mode.
 
 *--port* 'number'::
     Page server port number.
-
-*--lazy-pages*::
-    Serve local memory dump to a remote *lazy-pages* daemon. In this
-    mode the *page-server* reads local memory dump and allows the
-    remote *lazy-pages* deamon to request memory pages in random
-    order.
-
-*lazy-pages*
-~~~~~~~~~~~~
-Launches *criu* in lazy-pages daemon mode.
-
-The *lazy-pages* daemon is responsible for managing user-level demand
-paging for the restored processes. It gets information required to
-fill the process memory pages from the *restore* and from the
-checkpont directory. When a restored process access certain memory
-page for the first time, the *lazy-pages* daemon injects its contents
-into the process address space. The memory pages that are not yet
-requested by the restored processes are injected in the background.
 
 *exec*
 ~~~~~~

@@ -7,10 +7,6 @@
 
 #include <string.h>
 #include <errno.h>
-#include <stdarg.h>
-
-extern void vprint_on_level(unsigned int loglevel, const char *format,
-		va_list params);
 
 #endif /* CR_NOGLIBC */
 
@@ -61,9 +57,7 @@ extern void print_on_level(unsigned int loglevel, const char *format, ...)
 		       __FILE__, __LINE__, ##__VA_ARGS__)
 
 #define pr_warn_once(fmt, ...)						\
-       print_once(LOG_WARN,						\
-			"Warn  (%s:%d): " LOG_PREFIX fmt,		\
-			__FILE__, __LINE__, ##__VA_ARGS__)
+	print_once(LOG_WARN, fmt, ##__VA_ARGS__)
 
 #define pr_debug(fmt, ...)						\
 	print_on_level(LOG_DEBUG,					\
@@ -74,6 +68,15 @@ extern void print_on_level(unsigned int loglevel, const char *format, ...)
 #define pr_perror(fmt, ...)						\
 	pr_err(fmt ": %s\n", ##__VA_ARGS__, strerror(errno))
 
+#else
+
+#define LOG_SIMPLE_CHUNK	79
+
+extern int vprint_num(char *buf, int blen, int num, char **ps);
+extern void simple_sprintf(char output[LOG_SIMPLE_CHUNK], const char *format, ...)
+	__attribute__ ((__format__ (__printf__, 2, 3)));
+
 #endif /* CR_NOGLIBC */
+
 
 #endif /* __CR_LOG_H__ */

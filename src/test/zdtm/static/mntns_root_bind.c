@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include <stdbool.h>
 #include <string.h>
 #include <fcntl.h>
@@ -38,14 +39,14 @@ int main(int argc, char **argv)
 
 	mount(NULL, "/", NULL, MS_SHARED, NULL);
 
-	ssprintf(subdir1, "%s/subdir1", dirname);
-	ssprintf(path, "%s/test", subdir1);
-	ssprintf(bpath, "%s/test.bind", subdir1);
-	ssprintf(spath, "%s/test/sub", subdir1);
-	ssprintf(bspath, "%s/test.bind/sub", subdir1);
+	snprintf(subdir1, sizeof(subdir1), "%s/subdir1", dirname);
+	snprintf(path, sizeof(path), "%s/test", subdir1);
+	snprintf(bpath, sizeof(bpath), "%s/test.bind", subdir1);
+	snprintf(spath, sizeof(spath), "%s/test/sub", subdir1);
+	snprintf(bspath, sizeof(bspath), "%s/test.bind/sub", subdir1);
 
-	ssprintf(subdir2, "%s/subdir2", dirname);
-	ssprintf(bsubdir2, "%s/bsubdir2", dirname);
+	snprintf(subdir2, sizeof(subdir2), "%s/subdir2", dirname);
+	snprintf(bsubdir2, sizeof(bsubdir2), "%s/bsubdir2", dirname);
 
 	if (mkdir(dirname, 0700) ||
 	    mkdir(subdir1, 0777) ||

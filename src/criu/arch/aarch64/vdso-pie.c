@@ -2,7 +2,7 @@
 
 #include "asm/types.h"
 
-#include <compel/plugins/std/syscall.h>
+#include "syscall.h"
 #include "parasite-vdso.h"
 #include "log.h"
 #include "common/bug.h"
@@ -13,8 +13,8 @@
 #define LOG_PREFIX "vdso: "
 
 int vdso_redirect_calls(unsigned long base_to, unsigned long base_from,
-			struct vdso_symtable *to, struct vdso_symtable *from,
-			bool __always_unused compat_vdso)
+			struct vdso_symtable *to,
+			struct vdso_symtable *from)
 {
 	unsigned int i;
 

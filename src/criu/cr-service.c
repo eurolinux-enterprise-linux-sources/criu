@@ -15,7 +15,6 @@
 #include <arpa/inet.h>
 #include <sched.h>
 
-#include "version.h"
 #include "crtools.h"
 #include "cr_options.h"
 #include "external.h"
@@ -40,7 +39,6 @@
 #include <sys/un.h>
 #include <sys/socket.h>
 #include "common/scm.h"
-#include "uffd.h"
 
 #include "setproctitle.h"
 
@@ -372,23 +370,16 @@ static int setup_opts_from_req(int sk, CriuOpts *req)
 		opts.exec_cmd[req->n_exec_cmd] = NULL;
 	}
 
-	if (req->has_lazy_pages) {
-		opts.lazy_pages = req->lazy_pages;
-	}
-
 	if (req->ps) {
+		opts.use_page_server = true;
+		opts.addr = req->ps->address;
 		opts.port = htons((short)req->ps->port);
 
-		if (!opts.lazy_pages) {
-			opts.use_page_server = true;
-			opts.addr = req->ps->address;
+		if (req->ps->has_fd) {
+			if (!opts.swrk_restore)
+				goto err;
 
-			if (req->ps->has_fd) {
-				if (!opts.swrk_restore)
-					goto err;
-
-				opts.ps_socket = req->ps->fd;
-			}
+			opts.ps_socket = req->ps->fd;
 		}
 	}
 
@@ -559,7 +550,7 @@ static int dump_using_req(int sk, CriuOpts *req)
 	/*
 	 * FIXME -- cr_dump_tasks() may return code from custom
 	 * scripts, that can be positive. However, right now we
-	 * don't have ability to push scripts via RPC, so positive
+	 * don't have ability to push scripts via RPC, so psitive
 	 * ret values are impossible here.
 	 */
 	if (cr_dump_tasks(req->pid))
@@ -706,7 +697,12 @@ static int pre_dump_loop(int sk, CriuReq *msg)
 	return dump_using_req(sk, msg->opts);
 }
 
-static int start_page_server_req(int sk, CriuOpts *req, bool daemon_mode)
+struct ps_info {
+	int pid;
+	unsigned short port;
+};
+
+static int start_page_server_req(int sk, CriuOpts *req)
 {
 	int ret = -1, pid, start_pipe[2];
 	ssize_t count;
@@ -731,40 +727,35 @@ static int start_page_server_req(int sk, CriuOpts *req, bool daemon_mode)
 
 		pr_debug("Starting page server\n");
 
-		pid = cr_page_server(daemon_mode, false, start_pipe[1]);
+		pid = cr_page_server(true, start_pipe[1]);
 		if (pid < 0)
 			goto out_ch;
 
-		if (daemon_mode) {
-			info.pid = pid;
-			info.port = opts.port;
+		info.pid = pid;
+		info.port = opts.port;
 
-			count = write(start_pipe[1], &info, sizeof(info));
-			if (count != sizeof(info))
-				goto out_ch;
-		}
+		count = write(start_pipe[1], &info, sizeof(info));
+		if (count != sizeof(info))
+			goto out_ch;
 
 		ret = 0;
 out_ch:
-		if (daemon_mode && ret < 0 && pid > 0)
+		if (ret < 0 && pid > 0)
 			kill(pid, SIGKILL);
 		close(start_pipe[1]);
 		exit(ret);
 	}
 
 	close(start_pipe[1]);
-
-	if (daemon_mode) {
-		wait(&ret);
-		if (WIFEXITED(ret)) {
-			if (WEXITSTATUS(ret)) {
-				pr_err("Child exited with an error\n");
-				goto out;
-			}
-		} else {
-			pr_err("Child wasn't terminated normally\n");
+	wait(&ret);
+	if (WIFEXITED(ret)) {
+		if (WEXITSTATUS(ret)) {
+			pr_err("Child exited with an error\n");
 			goto out;
 		}
+	} else {
+		pr_err("Child wasn't terminated normally\n");
+		goto out;
 	}
 
 	count = read(start_pipe[0], &info, sizeof(info));
@@ -772,12 +763,11 @@ out_ch:
 	if (count != sizeof(info))
 		goto out;
 
+	success = true;
+	ps.has_pid = true;
 	ps.pid = info.pid;
 	ps.has_port = true;
 	ps.port = info.port;
-
-	success = true;
-	ps.has_pid = true;
 	resp.ps = &ps;
 
 	pr_debug("Page server started\n");
@@ -804,51 +794,13 @@ static int chk_keepopen_req(CriuReq *msg)
 	if (msg->type == CRIU_REQ_TYPE__PAGE_SERVER)
 		/* This just fork()-s so no leaks */
 		return 0;
-	if (msg->type == CRIU_REQ_TYPE__PAGE_SERVER_CHLD)
-		/* This just fork()-s so no leaks */
-		return 0;
 	else if (msg->type == CRIU_REQ_TYPE__CPUINFO_DUMP ||
 		 msg->type == CRIU_REQ_TYPE__CPUINFO_CHECK)
 		return 0;
 	else if (msg->type == CRIU_REQ_TYPE__FEATURE_CHECK)
 		return 0;
-	else if (msg->type == CRIU_REQ_TYPE__VERSION)
-		return 0;
 
 	return -1;
-}
-
-/*
- * Return the version information, depending on the information
- * available in version.h
- */
-static int handle_version(int sk, CriuReq * msg)
-{
-	CriuResp resp = CRIU_RESP__INIT;
-	CriuVersion version = CRIU_VERSION__INIT;
-
-	/* This assumes we will always have a major and minor version */
-	version.major = CRIU_VERSION_MAJOR;
-	version.minor = CRIU_VERSION_MINOR;
-	if (strcmp(CRIU_GITID, "0")) {
-		version.gitid = CRIU_GITID;
-	}
-#ifdef CRIU_VERSION_SUBLEVEL
-	version.has_sublevel = 1;
-	version.sublevel = CRIU_VERSION_SUBLEVEL;
-#endif
-#ifdef CRIU_VERSION_EXTRA
-	version.has_extra = 1;
-	version.extra = CRIU_VERSION_EXTRA;
-#endif
-#ifdef CRIU_VERSION_NAME
-	/* This is not actually exported in version.h */
-	version.name = CRIU_VERSION_NAME;
-#endif
-	resp.type = msg->type;
-	resp.success = true;
-	resp.version = &version;
-	return send_criu_msg(sk, &resp);
 }
 
 /*
@@ -864,14 +816,32 @@ static int handle_feature_check(int sk, CriuReq * msg)
 {
 	CriuResp resp = CRIU_RESP__INIT;
 	CriuFeatures feat = CRIU_FEATURES__INIT;
+	bool success = false;
 	int pid, status;
-	int ret;
 
 	/* enable setting of an optional message */
 	feat.has_mem_track = 1;
 	feat.mem_track = false;
-	feat.has_lazy_pages = 1;
-	feat.lazy_pages = false;
+
+	/*
+	 * Check if the requested feature check can be answered.
+	 *
+	 * This function is right now hard-coded to memory
+	 * tracking detection and needs other/better logic to
+	 * handle multiple feature checks.
+	 */
+	if (msg->features->has_mem_track != 1) {
+		pr_warn("Feature checking for unknown feature.\n");
+		goto out;
+	}
+
+	/*
+	 * From this point on the function will always
+	 * 'succeed'. If the requested features are supported
+	 * can be seen if the requested optional parameters are
+	 * set in the message 'criu_features'.
+	 */
+	success = true;
 
 	pid = fork();
 	if (pid < 0) {
@@ -880,73 +850,26 @@ static int handle_feature_check(int sk, CriuReq * msg)
 	}
 
 	if (pid == 0) {
+		int ret = 1;
 
 		setproctitle("feature-check --rpc");
 
-		if ((msg->features->has_mem_track == 1) &&
-		    (msg->features->mem_track == true))
-			feat.mem_track = kdat.has_dirty_track;
+		kerndat_get_dirty_track();
 
-		if ((msg->features->has_lazy_pages == 1) &&
-		    (msg->features->lazy_pages == true))
-			feat.lazy_pages = kdat.has_uffd && uffd_noncooperative();
-
-		resp.features = &feat;
-		resp.type = msg->type;
-		/* The feature check is working, actual results are in resp.features */
-		resp.success = true;
-
-		/*
-		 * If this point is reached the information about the features
-		 * is transmitted from the forked CRIU process (here).
-		 * If an error occurred earlier, the feature check response will be
-		 * be send from the parent process.
-		 */
-		ret = send_criu_msg(sk, &resp);
+		if (kdat.has_dirty_track)
+			ret = 0;
 
 		exit(ret);
 	}
 
-	ret = waitpid(pid, &status,  0);
-	if (ret == -1)
+	wait(&status);
+	if (!WIFEXITED(status) || WEXITSTATUS(status))
 		goto out;
 
-	if (WIFEXITED(status) && !WEXITSTATUS(status))
-		/*
-		 * The child process exited was able to send the answer.
-		 * Nothing more to do here.
-		 */
-		return 0;
-
-	/*
-	 * The child process was not able to send an answer. Tell
-	 * the RPC client that something did not work as expected.
-	 */
+	feat.mem_track = true;
 out:
+	resp.features = &feat;
 	resp.type = msg->type;
-	resp.success = false;
-
-	return send_criu_msg(sk, &resp);
-}
-
-static int handle_wait_pid(int sk, int pid)
-{
-	CriuResp resp = CRIU_RESP__INIT;
-	bool success = false;
-	int status;
-
-	if (waitpid(pid, &status, 0) == -1) {
-		resp.cr_errno = errno;
-		pr_perror("Unable to wait %d", pid);
-		goto out;
-	}
-
-	resp.status = status;
-	resp.has_status = true;
-
-	success = true;
-out:
-	resp.type = CRIU_REQ_TYPE__WAIT_PID;
 	resp.success = success;
 
 	return send_criu_msg(sk, &resp);
@@ -1037,13 +960,7 @@ more:
 		ret = pre_dump_loop(sk, msg);
 		break;
 	case CRIU_REQ_TYPE__PAGE_SERVER:
-		ret = start_page_server_req(sk, msg->opts, true);
-		break;
-	case CRIU_REQ_TYPE__PAGE_SERVER_CHLD:
-		ret = start_page_server_req(sk, msg->opts, false);
-		break;
-	case CRIU_REQ_TYPE__WAIT_PID:
-		ret =  handle_wait_pid(sk, msg->pid);
+		ret =  start_page_server_req(sk, msg->opts);
 		break;
 	case CRIU_REQ_TYPE__CPUINFO_DUMP:
 	case CRIU_REQ_TYPE__CPUINFO_CHECK:
@@ -1051,9 +968,6 @@ more:
 		break;
 	case CRIU_REQ_TYPE__FEATURE_CHECK:
 		ret = handle_feature_check(sk, msg);
-		break;
-	case CRIU_REQ_TYPE__VERSION:
-		ret = handle_version(sk, msg);
 		break;
 
 	default:

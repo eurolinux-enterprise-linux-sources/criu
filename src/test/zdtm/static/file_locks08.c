@@ -1,3 +1,5 @@
+#define _GNU_SOURCE
+
 #include <sys/wait.h>
 #include <sys/file.h>
 #include <unistd.h>
@@ -14,7 +16,7 @@ char *filename;
 TEST_OPTION(filename, string, "file name", 1);
 
 
-int init_file_lock(int *fd, struct flock64 *lck)
+int init_file_lock(int *fd, struct flock *lck)
 {
 	*fd = open(filename, O_RDWR | O_CREAT, 0666);
 	if (*fd < 0) {
@@ -51,7 +53,7 @@ int main(int argc, char **argv)
 	int status;
 	int ret = 0;
 	task_waiter_t tw;
-	struct flock64 lck;
+	struct flock lck;
 
 	test_init(argc, argv);
 	if (init_file_lock(&fd, &lck))

@@ -1,15 +1,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <sys/mman.h>
-#include <limits.h>
 #include "zdtmtst.h"
-
-#if (LONG_MAX == 2147483647L)	/* 32 bit */
-
-#define TEST_SKIP_REASON "64-bit arch required"
-#include "skip-me.c"
-
-#else
 
 const char *test_doc	= "Test for huge VMA area";
 const char *test_author	= "Cyrill Gorcunov <gorcunov@openvz.org>";
@@ -44,4 +36,3 @@ int main(int argc, char **argv)
 
 	return 0;
 }
-#endif

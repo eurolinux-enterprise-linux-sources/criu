@@ -11,7 +11,7 @@ all:
 	$(MAKE) zdtm-freezer
 .PHONY: all
 
-TESTS = unix-callback mem-snap rpc libcriu mounts/ext security pipes crit socketpairs overlayfs mnt-ext-dev shell-job
+TESTS = unix-callback mem-snap rpc libcriu mounts/ext security pipes crit socketpairs overlayfs mnt-ext-dev
 
 other:
 	for t in $(TESTS); do				\
@@ -25,7 +25,7 @@ zdtm:
 
 zdtm-pre-dump:
 	./zdtm.py run --pre 2:1 -t zdtm/transition/fork -f uns
-.PHONY: zdtm-pre-dump
+.PHONY: zdtm
 
 zdtm-snapshot:
 	./zdtm.py run --pre 2:1 --snap -t zdtm/transition/fork -f uns

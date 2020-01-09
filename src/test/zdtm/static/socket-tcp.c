@@ -1,14 +1,12 @@
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #include "zdtmtst.h"
 
-#ifdef ZDTM_IPV4V6
-#define ZDTM_FAMILY AF_INET
-#define ZDTM_SRV_FAMILY AF_INET6
-#elif defined(ZDTM_IPV6)
+#ifdef ZDTM_IPV6
 #define ZDTM_FAMILY AF_INET6
-#define ZDTM_SRV_FAMILY AF_INET6
 #else
 #define ZDTM_FAMILY AF_INET
-#define ZDTM_SRV_FAMILY AF_INET
 #endif
 
 const char *test_doc = "Check, that a TCP connection can be restored\n";
@@ -140,7 +138,7 @@ int main(int argc, char **argv)
 	test_init(argc, argv);
 #endif
 
-	if ((fd_s = tcp_init_server(ZDTM_SRV_FAMILY, &port)) < 0) {
+	if ((fd_s = tcp_init_server(ZDTM_FAMILY, &port)) < 0) {
 		pr_err("initializing server failed\n");
 		return 1;
 	}

@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include <sched.h>
 
 #include <stdio.h>
@@ -111,11 +112,7 @@ int main(int argc, char **argv)
 
 	test_init(argc, argv);
 
-#ifdef ZDTM_SHM_UNALIGNED
 	key = ftok(argv[0], 822155666);
-#else
-	key = ftok(argv[0], 822155667);
-#endif
 	if (key == -1) {
 		pr_perror("Can't make key");
 		goto out;

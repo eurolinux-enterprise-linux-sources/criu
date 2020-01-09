@@ -33,7 +33,7 @@ static char *decode_signal(const sigset_t *s, char *buf)
 
 #define COLLECT(sig)						\
 	do {							\
-		if (sigismember(s, sig))			\
+		if ((long)s->__val[0] & (long)sigmask(sig))	\
 			strcat(buf, #sig " ");			\
 	} while (0)
 
@@ -43,7 +43,7 @@ static char *decode_signal(const sigset_t *s, char *buf)
 	COLLECT(SIGTERM); COLLECT(SIGSTKFLT); COLLECT(SIGCHLD); COLLECT(SIGCONT); COLLECT(SIGSTOP);
 	COLLECT(SIGTSTP); COLLECT(SIGTTIN); COLLECT(SIGTTOU); COLLECT(SIGURG); COLLECT(SIGXCPU);
 	COLLECT(SIGXFSZ); COLLECT(SIGVTALRM); COLLECT(SIGPROF); COLLECT(SIGWINCH); COLLECT(SIGIO);
-	COLLECT(SIGPOLL); COLLECT(SIGPWR); COLLECT(SIGSYS);
+	COLLECT(SIGPOLL); COLLECT(SIGPWR); COLLECT(SIGSYS); COLLECT(SIGUNUSED);
 #undef COLLECT
 
 	return buf;

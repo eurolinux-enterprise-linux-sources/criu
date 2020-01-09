@@ -57,12 +57,6 @@ def _marked_as_dev(field):
 def _marked_as_odev(field):
 	return field.GetOptions().Extensions[opts_pb2.criu].odev
 
-def _marked_as_dict(field):
-	return field.GetOptions().Extensions[opts_pb2.criu].dict
-
-def _custom_conv(field):
-	return field.GetOptions().Extensions[opts_pb2.criu].conv
-
 mmap_prot_map = [
 	('PROT_READ',	0x1),
 	('PROT_WRITE',	0x2),
@@ -105,57 +99,11 @@ rfile_flags_map = [
 	('O_LARGEFILE',	0100000),
 ];
 
-pmap_flags_map = [
-	('PE_PARENT',	1 << 0),
-	('PE_LAZY',	1 << 1),
-	('PE_PRESENT',	1 << 2),
-];
-
 flags_maps = {
 	'mmap.prot' : mmap_prot_map,
 	'mmap.flags' : mmap_flags_map,
 	'mmap.status' : mmap_status_map,
 	'rfile.flags' : rfile_flags_map,
-	'pmap.flags' : pmap_flags_map,
-}
-
-gen_maps = {
-	'task_state' : { 1: 'Alive', 3: 'Zombie', 6: 'Stopped' },
-}
-
-sk_maps = {
-	'family'    : {  1: 'UNIX',
-			 2: 'INET',
-			10: 'INET6',
-			16: 'NETLINK',
-			17: 'PACKET' },
-	'type'      : {  1: 'STREAM',
-			 2: 'DGRAM',
-			 3: 'RAW',
-			 5: 'SEQPACKET',
-			10: 'PACKET' },
-	'state'     : {  1: 'ESTABLISHED',
-			 2: 'SYN_SENT',
-			 3: 'SYN_RECV',
-			 4: 'FIN_WAIT1',
-			 5: 'FIN_WAIT2',
-			 6: 'TIME_WAIT',
-			 7: 'CLOSE',
-			 8: 'CLOSE_WAIT',
-			 9: 'LAST_ACK',
-			10: 'LISTEN' },
-	'proto'     : {   0: 'IP',
-			  6: 'TCP',
-			 17: 'UDP',
-			136: 'UDPLITE' },
-}
-
-gen_rmaps = { k: {v2:k2 for k2,v2 in v.items()} for k,v in gen_maps.items() }
-sk_rmaps = { k: {v2:k2 for k2,v2 in v.items()} for k,v in sk_maps.items() }
-
-dict_maps = {
-	'gen' : ( gen_maps, gen_rmaps ),
-	'sk'  : ( sk_maps, sk_rmaps ),
 }
 
 def map_flags(value, flags_map):
@@ -187,33 +135,6 @@ def encode_dev(field, value):
 	else:
 		return dev[0] << kern_minorbits | dev[1]
 
-def encode_base64(value):
-	return value.encode('base64')
-def decode_base64(value):
-	return value.decode('base64')
-
-def encode_unix(value):
-	return value.encode('quopri')
-def decode_unix(value):
-	return value.decode('quopri')
-
-encode = { 'unix_name': encode_unix }
-decode = { 'unix_name': decode_unix }
-
-def get_bytes_enc(field):
-	c = _custom_conv(field)
-	if c:
-		return encode[c]
-	else:
-		return encode_base64
-
-def get_bytes_dec(field):
-	c = _custom_conv(field)
-	if c:
-		return decode[c]
-	else:
-		return decode_base64
-
 def is_string(value):
 	return isinstance(value, unicode) or isinstance(value, str)
 
@@ -224,7 +145,7 @@ def _pb2dict_cast(field, value, pretty = False, is_hex = False):
 	if field.type == FD.TYPE_MESSAGE:
 		return pb2dict(value, pretty, is_hex)
 	elif field.type == FD.TYPE_BYTES:
-		return get_bytes_enc(field)(value)
+		return value.encode('base64')
 	elif field.type == FD.TYPE_ENUM:
 		return field.enum_type.values_by_number.get(value, None).name
 	elif field.type in _basic_cast:
@@ -246,10 +167,6 @@ def _pb2dict_cast(field, value, pretty = False, is_hex = False):
 					return "0x%x" % value # flags are better seen as hex anyway
 				else:
 					return map_flags(value, flags_map)
-
-			dct = _marked_as_dict(field)
-			if dct:
-				return dict_maps[dct][0][field.name].get(value, cast(value))
 
 		return cast(value)
 	else:
@@ -290,7 +207,7 @@ def _dict2pb_cast(field, value):
 	# and non-repeated messages need special treatment
 	# in this case, and are hadled separately.
 	if field.type == FD.TYPE_BYTES:
-		return get_bytes_dec(field)(value)
+		return value.decode('base64')
 	elif field.type == FD.TYPE_ENUM:
 		return field.enum_type.values_by_name.get(value, None).number
 	elif field.type in _basic_cast:
@@ -307,13 +224,6 @@ def _dict2pb_cast(field, value):
 					pass # Try to use plain string cast
 				else:
 					return unmap_flags(value, flags_map)
-
-			dct = _marked_as_dict(field)
-			if dct:
-				ret = dict_maps[dct][1][field.name].get(value, None)
-				if ret == None:
-					ret = cast(value, 0)
-				return ret
 
 			# Some int or long fields might be stored as hex
 			# strings. See _pb2dict_cast.

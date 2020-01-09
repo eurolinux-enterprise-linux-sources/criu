@@ -42,6 +42,7 @@
 #include "cr_options.h"
 #include "servicefd.h"
 #include "string.h"
+#include "ptrace.h"
 #include "ptrace-compat.h"
 #include "util.h"
 #include "namespaces.h"
@@ -82,20 +83,6 @@
 #include "seize.h"
 #include "fault-injection.h"
 #include "dump.h"
-
-/*
- * Architectures can overwrite this function to restore register sets that
- * are not covered by ptrace_set/get_regs().
- *
- * with_threads = false: Only the register sets of the tasks are restored
- * with_threads = true : The register sets of the tasks with all their threads
- *			 are restored
- */
-int __attribute__((weak)) arch_set_thread_regs(struct pstree_item *item,
-					       bool with_threads)
-{
-	return 0;
-}
 
 static char loc_buf[PAGE_SIZE];
 
@@ -355,7 +342,7 @@ static int dump_pid_misc(pid_t pid, TaskCoreEntry *tc)
 {
 	int ret;
 
-	if (kdat.luid != LUID_NONE) {
+	if (kdat.has_loginuid) {
 		pr_info("dumping /proc/%d/loginuid\n", pid);
 
 		tc->has_loginuid = true;
@@ -520,9 +507,6 @@ static int dump_task_mm(pid_t pid, const struct proc_pid_stat *stat,
 	mme.dumpable = misc->dumpable;
 	mme.has_dumpable = true;
 
-	mme.thp_disabled = misc->thp_disabled;
-	mme.has_thp_disabled = true;
-
 	mme.n_mm_saved_auxv = AT_VECTOR_SIZE;
 	mme.mm_saved_auxv = xmalloc(pb_repeated_size(&mme, mm_saved_auxv));
 	if (!mme.mm_saved_auxv)
@@ -684,30 +668,18 @@ static int dump_task_ids(struct pstree_item *item, const struct cr_imgset *cr_im
 }
 
 int dump_thread_core(int pid, CoreEntry *core, const struct parasite_dump_thread *ti)
-
 {
 	int ret;
 	ThreadCoreEntry *tc = core->thread_core;
 
 	ret = collect_lsm_profile(pid, tc->creds);
-	if (!ret) {
-		/*
-		 * XXX: It's possible to set two: 32-bit and 64-bit
-		 * futex list's heads. That makes about no sense, but
-		 * it's possible. Until we meet such application, dump
-		 * only one: native or compat futex's list pointer.
-		 */
-		if (!core_is_compat(core))
-			ret = get_task_futex_robust_list(pid, tc);
-		else
-			ret = get_task_futex_robust_list_compat(pid, tc);
-	}
+	if (!ret)
+		ret = get_task_futex_robust_list(pid, tc);
 	if (!ret)
 		ret = dump_sched_info(pid, tc);
 	if (!ret) {
 		core_put_tls(core, ti->tls);
-		CORE_THREAD_ARCH_INFO(core)->clear_tid_addr =
-			encode_pointer(ti->tid_addr);
+		CORE_THREAD_ARCH_INFO(core)->clear_tid_addr = encode_pointer(ti->tid_addr);
 		BUG_ON(!tc->sas);
 		copy_sas(tc->sas, &ti->sas);
 		if (ti->pdeath_sig) {
@@ -731,8 +703,6 @@ static int dump_task_core_all(struct parasite_ctl *ctl,
 	struct proc_status_creds *creds;
 	struct parasite_dump_cgroup_args cgroup_args, *info = NULL;
 
-	BUILD_BUG_ON(sizeof(cgroup_args) < PARASITE_ARG_SIZE_MIN);
-
 	pr_info("\n");
 	pr_info("Dumping core (pid: %d)\n", pid);
 	pr_info("----------------------------------------\n");
@@ -742,12 +712,12 @@ static int dump_task_core_all(struct parasite_ctl *ctl,
 		goto err;
 
 	creds = dmpi(item)->pi_creds;
-	if (creds->s.seccomp_mode != SECCOMP_MODE_DISABLED) {
-		pr_info("got seccomp mode %d for %d\n", creds->s.seccomp_mode, vpid(item));
+	if (creds->seccomp_mode != SECCOMP_MODE_DISABLED) {
+		pr_info("got seccomp mode %d for %d\n", creds->seccomp_mode, vpid(item));
 		core->tc->has_seccomp_mode = true;
-		core->tc->seccomp_mode = creds->s.seccomp_mode;
+		core->tc->seccomp_mode = creds->seccomp_mode;
 
-		if (creds->s.seccomp_mode == SECCOMP_MODE_FILTER) {
+		if (creds->seccomp_mode == SECCOMP_MODE_FILTER) {
 			core->tc->has_seccomp_filter = true;
 			core->tc->seccomp_filter = creds->last_filter;
 		}
@@ -1098,7 +1068,7 @@ static int dump_zombies(void)
 		return -1;
 
 	/*
-	 * We dump zombies separately because for pid-ns case
+	 * We dump zombies separately becase for pid-ns case
 	 * we'd have to resolve their pids w/o parasite via
 	 * target ns' proc.
 	 */
@@ -1195,13 +1165,12 @@ static int pre_dump_one_task(struct pstree_item *item)
 	item->pid->ns[0].virt = misc.pid;
 
 	mdc.pre_dump = true;
-	mdc.lazy = false;
 
 	ret = parasite_dump_pages_seized(item, &vmas, &mdc, parasite_ctl);
 	if (ret)
 		goto err_cure;
 
-	if (compel_cure_remote(parasite_ctl))
+	if (parasite_cure_remote(parasite_ctl))
 		pr_err("Can't cure (pid: %d) from parasite\n", pid);
 err_free:
 	free_mappings(&vmas);
@@ -1209,7 +1178,7 @@ err:
 	return ret;
 
 err_cure:
-	if (compel_cure(parasite_ctl))
+	if (parasite_cure_seized(parasite_ctl))
 		pr_err("Can't cure (pid: %d) from parasite\n", pid);
 	goto err_free;
 }
@@ -1286,7 +1255,7 @@ static int dump_one_task(struct pstree_item *item)
 
 	if (fault_injected(FI_DUMP_EARLY)) {
 		pr_info("fault: CRIU sudden detach\n");
-		kill(getpid(), SIGKILL);
+		BUG();
 	}
 
 	if (root_ns_mask & CLONE_NEWPID && root_item == item) {
@@ -1355,13 +1324,12 @@ static int dump_one_task(struct pstree_item *item)
 	}
 
 	mdc.pre_dump = false;
-	mdc.lazy = opts.lazy_pages;
 
 	ret = parasite_dump_pages_seized(item, &vmas, &mdc, parasite_ctl);
 	if (ret)
 		goto err_cure;
 
-	ret = parasite_dump_sigacts_seized(parasite_ctl, item);
+	ret = parasite_dump_sigacts_seized(parasite_ctl, cr_imgset);
 	if (ret) {
 		pr_err("Can't dump sigactions (pid: %d) with parasite\n", pid);
 		goto err_cure;
@@ -1385,7 +1353,7 @@ static int dump_one_task(struct pstree_item *item)
 		goto err_cure;
 	}
 
-	ret = compel_stop_daemon(parasite_ctl);
+	ret = parasite_stop_daemon(parasite_ctl);
 	if (ret) {
 		pr_err("Can't cure (pid: %d) from parasite\n", pid);
 		goto err;
@@ -1397,10 +1365,7 @@ static int dump_one_task(struct pstree_item *item)
 		goto err;
 	}
 
-	if (opts.lazy_pages)
-		ret = compel_cure_remote(parasite_ctl);
-	else
-		ret = compel_cure(parasite_ctl);
+	ret = parasite_cure_seized(parasite_ctl);
 	if (ret) {
 		pr_err("Can't cure (pid: %d) from parasite\n", pid);
 		goto err;
@@ -1429,7 +1394,7 @@ err:
 err_cure:
 	close_cr_imgset(&cr_imgset);
 err_cure_imgset:
-	compel_cure(parasite_ctl);
+	parasite_cure_seized(parasite_ctl);
 	goto err;
 }
 
@@ -1473,15 +1438,12 @@ static int cr_pre_dump_finish(int ret)
 {
 	struct pstree_item *item;
 
-	/*
-	 * Restore registers for tasks only. The threads have not been
-	 * infected. Therefore, the thread register sets have not been changed.
-	 */
-	if (arch_set_thread_regs(root_item, false) < 0)
-		goto err;
 	pstree_switch_state(root_item, TASK_ALIVE);
 
 	timing_stop(TIME_FROZEN);
+
+	if (ret < 0)
+		goto err;
 
 	pr_info("Pre-dumping tasks' memory\n");
 	for_each_pstree_item(item) {
@@ -1499,7 +1461,7 @@ static int cr_pre_dump_finish(int ret)
 			goto err;
 
 		mem_pp = dmpi(item)->mem_pp;
-		ret = page_xfer_dump_pages(&xfer, mem_pp);
+		ret = page_xfer_dump_pages(&xfer, mem_pp, 0);
 
 		xfer.close(&xfer);
 
@@ -1509,7 +1471,7 @@ static int cr_pre_dump_finish(int ret)
 		timing_stop(TIME_MEMWRITE);
 
 		destroy_page_pipe(mem_pp);
-		compel_cure_local(ctl);
+		parasite_cure_local(ctl);
 	}
 
 	free_pstree(root_item);
@@ -1561,7 +1523,7 @@ int cr_pre_dump_tasks(pid_t pid)
 	if (cr_plugin_init(CR_PLUGIN_STAGE__PRE_DUMP))
 		goto err;
 
-	if (lsm_check_opts())
+	if (kerndat_init())
 		goto err;
 
 	if (irmap_load_cache())
@@ -1570,10 +1532,10 @@ int cr_pre_dump_tasks(pid_t pid)
 	if (cpu_init())
 		goto err;
 
-	if (vdso_init_dump())
+	if (vdso_init())
 		goto err;
 
-	if (connect_to_page_server_to_send() < 0)
+	if (connect_to_page_server())
 		goto err;
 
 	if (setup_alarm_handler())
@@ -1602,27 +1564,6 @@ int cr_pre_dump_tasks(pid_t pid)
 	ret = 0;
 err:
 	return cr_pre_dump_finish(ret);
-}
-
-static int cr_lazy_mem_dump(void)
-{
-	struct pstree_item *item;
-	int ret = 0;
-
-	pr_info("Starting lazy pages server\n");
-	ret = cr_page_server(false, true, -1);
-
-	for_each_pstree_item(item) {
-		destroy_page_pipe(dmpi(item)->mem_pp);
-		compel_cure_local(dmpi(item)->parasite_ctl);
-	}
-
-	if (ret)
-		pr_err("Lazy pages transfer FAILED.\n");
-	else
-		pr_info("Lazy pages transfer finished successfully\n");
-
-	return ret;
 }
 
 static int cr_dump_finish(int ret)
@@ -1666,30 +1607,24 @@ static int cr_dump_finish(int ret)
 	 *  - error happened during checkpoint: just clean up
 	 *    everything and continue execution of the dumpee;
 	 *
-	 *  - dump succeeded but post-dump script returned
+	 *  - dump successed but post-dump script returned
 	 *    some ret code: same as in previous scenario --
 	 *    just clean up everything and continue execution,
 	 *    we will return script ret code back to criu caller
 	 *    and it's up to a caller what to do with running instance
 	 *    of the dumpee -- either kill it, or continue running;
 	 *
-	 *  - dump succeeded but -R option passed, pointing that
+	 *  - dump successed but -R option passed, pointing that
 	 *    we're asked to continue execution of the dumpee. It's
 	 *    assumed that a user will use post-dump script to keep
 	 *    consistency of the FS and other resources, we simply
-	 *    start rollback procedure and cleanup everything.
+	 *    start rollback procedure and cleanup everyhting.
 	 */
 	if (ret || post_dump_ret || opts.final_state == TASK_ALIVE) {
 		network_unlock();
 		delete_link_remaps();
 		clean_cr_time_mounts();
 	}
-
-	if (!ret && opts.lazy_pages)
-		ret = cr_lazy_mem_dump();
-
-	if (arch_set_thread_regs(root_item, true) < 0)
-		return -1;
 	pstree_switch_state(root_item,
 			    (ret || post_dump_ret) ?
 			    TASK_ALIVE : opts.final_state);
@@ -1738,7 +1673,7 @@ int cr_dump_tasks(pid_t pid)
 	if (cr_plugin_init(CR_PLUGIN_STAGE__DUMP))
 		goto err;
 
-	if (lsm_check_opts())
+	if (kerndat_init())
 		goto err;
 
 	if (irmap_load_cache())
@@ -1747,7 +1682,7 @@ int cr_dump_tasks(pid_t pid)
 	if (cpu_init())
 		goto err;
 
-	if (vdso_init_dump())
+	if (vdso_init())
 		goto err;
 
 	if (cgp_init(opts.cgroup_props,
@@ -1767,7 +1702,7 @@ int cr_dump_tasks(pid_t pid)
 			goto err;
 	}
 
-	if (connect_to_page_server_to_send() < 0)
+	if (connect_to_page_server())
 		goto err;
 
 	if (setup_alarm_handler())
@@ -1831,21 +1766,15 @@ int cr_dump_tasks(pid_t pid)
 	if (dump_pstree(root_item))
 		goto err;
 
-	/*
-	 * TODO: cr_dump_shmem has to be called before dump_namespaces(),
-	 * because page_ids is a global variable and it is used to dump
-	 * ipc shared memory, but an ipc namespace is dumped in a child
-	 * process.
-	 */
-	ret = cr_dump_shmem();
-	if (ret)
-		goto err;
-
 	if (root_ns_mask)
 		if (dump_namespaces(root_item, root_ns_mask) < 0)
 			goto err;
 
 	ret = dump_cgroups();
+	if (ret)
+		goto err;
+
+	ret = cr_dump_shmem();
 	if (ret)
 		goto err;
 

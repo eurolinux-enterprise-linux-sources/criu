@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include <sched.h>
 
 #include <stdio.h>
@@ -110,13 +111,7 @@ int main(int argc, char **argv)
 {
 	int id, key;
 	int i;
-	/* See man semctl */
-	union semun {
-		int		val;
-		struct		semid_ds *buf;
-		unsigned short	*array;
-		struct seminfo	*__buf;
-	} val[NSEMS];
+	int val[NSEMS];
 	int ret, fail_count = 0;
 
 	test_init(argc, argv);
@@ -135,7 +130,7 @@ int main(int argc, char **argv)
 	}
 
 	for (i = 0; i < NSEMS; i++) {
-		val[i].val = lrand48() & 0x7;
+		val[i] = lrand48() & 0x7;
 
 		if (semctl(id, i, SETVAL, val[i]) == -1) {
 			fail_count++;
@@ -148,7 +143,7 @@ int main(int argc, char **argv)
 	test_waitsig();
 
 	for (i = 0; i < NSEMS; i++) {
-		ret = check_sem_by_id(id, i, val[i].val);
+		ret = check_sem_by_id(id, i, val[i]);
 		if (ret < 0) {
 			fail_count++;
 			fail("Check sem %d by id failed", i);
@@ -161,14 +156,14 @@ int main(int argc, char **argv)
 			goto out_destroy;
 		}
 
-		val[i].val = semctl(id, 0, GETVAL);
-		if (val[i].val < 0) {
+		val[i] = semctl(id, 0, GETVAL);
+		if (val[i] < 0) {
 			fail("Failed to get sem %d value", i);
 			fail_count++;
 			goto out_destroy;
 		}
-		if (val[i].val != 0) {
-			fail("Non-zero sem %d value: %d", i, val[i].val);
+		if (val[i] != 0) {
+			fail("Non-zero sem %d value: %d", i, val[i]);
 			fail_count++;
 		}
 	}

@@ -14,42 +14,42 @@
 
 static void datagen_fast(uint8_t *buffer, unsigned length, uint32_t *crc)
 {
-	size_t off;
+	uint8_t *p;
 
 	datagen(buffer, FAST_SIZE, crc);
-	off = FAST_SIZE;
+	p = buffer + FAST_SIZE;
 
-	while (off < length) {
+	while (p < buffer + length) {
 		unsigned long size = FAST_SIZE;
 
-		if (off + FAST_SIZE > length)
-			size = length - off;
-		memcpy(buffer + off, buffer, size);
+		if (p + FAST_SIZE > buffer + length)
+			size = buffer + length - p;
+		memcpy(p, buffer, size);
 
-		off += size;
+		p += FAST_SIZE;
 	}
 }
 
 static int datachk_fast(const uint8_t *buffer, unsigned length, uint32_t *crc)
 {
-	size_t off;
+	const uint8_t *p;
 
 	if (datachk(buffer, FAST_SIZE, crc))
 		return 1;
 
-	off = FAST_SIZE;
+	p = buffer + FAST_SIZE;
 
-	while (off < length) {
+	while (p < buffer + length) {
 		unsigned long size = FAST_SIZE;
 
-		if (off + FAST_SIZE > length)
-			size = length - off;
+		if (p + FAST_SIZE > buffer + length)
+			size = buffer + length - p;
 
-		if (memcmp(buffer + off, buffer, size)) {
-			test_msg("Memory corruption [%p, %p]\n", buffer, buffer + size);
+		if (memcmp(p, buffer, size)) {
+			test_msg("Memory corruption [%p, %p]\n", p, p + size);
 			return 1;
 		}
-		off += size;
+		p += FAST_SIZE;
 	}
 
 	return 0;

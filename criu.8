@@ -1,13 +1,13 @@
 '\" t
 .\"     Title: criu
 .\"    Author: [see the "AUTHOR" section]
-.\" Generator: DocBook XSL Stylesheets vsnapshot <http://docbook.sf.net/>
-.\"      Date: 06/01/2018
+.\" Generator: DocBook XSL Stylesheets v1.79.1 <http://docbook.sf.net/>
+.\"      Date: 03/09/2017
 .\"    Manual: CRIU Manual
-.\"    Source: criu 3.9
+.\"    Source: criu 2.12
 .\"  Language: English
 .\"
-.TH "CRIU" "8" "06/01/2018" "criu 3\&.9" "CRIU Manual"
+.TH "CRIU" "8" "03/09/2017" "criu 2\&.12" "CRIU Manual"
 .\" -----------------------------------------------------------------
 .\" * Define some portability stuff
 .\" -----------------------------------------------------------------
@@ -181,20 +181,18 @@ criu \- checkpoint/restore in userspace
 .sp
 \fBcriu\fR is a tool for checkpointing and restoring running applications\&. It does this by saving their state as a collection of files (see the \fBdump\fR command) and creating equivalent processes from those files (see the \fBrestore\fR command)\&. The restore operation can be performed at a later time, on a different system, or both\&.
 .SH "OPTIONS"
-.sp
-Most of the true / false long options (the ones without arguments) can be prefixed with \fB\-\-no\-\fR to negate the option (example: \fB\-\-display\-stats\fR and \fB\-\-no\-display\-stats\fR)\&.
 .SS "Common options"
 .sp
 Common options are applicable to any \fIcommand\fR\&.
 .PP
-\fB\-v\fR[\fBv\fR\&...], \fB\-\-verbosity\fR
+\fB\-v\fR[\fBv\fR\&...]
 .RS 4
 Increase verbosity up from the default level\&. Multiple
 \fBv\fR
-can be used, each increasing verbosity by one level\&. Using long option without argument increases verbosity by one level\&.
+can be used, each increasing verbosity by one level\&.
 .RE
 .PP
-\fB\-v\fR\fInum\fR, \fB\-\-verbosity\fR=\fInum\fR
+\fB\-v\fR\fInum\fR
 .RS 4
 Set verbosity level to
 \fInum\fR\&. The higher the level, the more output is produced\&.
@@ -632,11 +630,6 @@ This option skips in\-flight TCP connections\&. If any TCP connections that are 
 ignores these connections, rather than errors out\&. The TCP stack on the client side is expected to handle the re\-connect gracefully\&.
 .RE
 .PP
-\fB\-\-tcp\-close\fR
-.RS 4
-Restore connected TCP sockets in closed state\&.
-.RE
-.PP
 \fB\-\-evasive\-devices\fR
 .RS 4
 Use any path to a device file if the original one is inaccessible\&.
@@ -714,17 +707,6 @@ Specify CPU capabilities to write to an image file\&. The argument is a comma\-s
 Change the root for the controller that will be dumped\&. By default,
 \fBcriu\fR
 simply dumps everything below where any of the tasks live\&. However, if a container moves all of its tasks into a cgroup directory below the container engine\(cqs default directory for tasks, permissions will not be preserved on the upper directories with no tasks in them, which may cause problems\&.
-.RE
-.PP
-\fB\-\-lazy\-pages\fR
-.RS 4
-Perform the dump procedure without writing memory pages into the image files and prepare to service page requests over the network\&. When
-\fBdump\fR
-runs in this mode it presumes that
-\fBlazy\-pages\fR
-daemon will connect to it and fetch memory pages to lazily inject them into the restored process address space\&. This option is intended for post\-copy (lazy) migration and should be used in conjunction with
-\fBrestore\fR
-with appropriate options\&.
 .RE
 .SS "restore"
 .sp
@@ -1031,15 +1013,6 @@ shows an error that CPU capabilities are not adequate, but this can be suppresse
 .RS 4
 Silently skip restoring sysctls that are not available\&. This allows to restore on an older kernel, or a kernel configured without some options\&.
 .RE
-.PP
-\fB\-\-lazy\-pages\fR
-.RS 4
-Restore the processes without filling out the entire memory contents\&. When this option is used,
-\fBrestore\fR
-sets up the infrastructure required to fill memory pages either on demand when the process accesses them or in the background without stopping the restored process\&. This option requires running
-\fBlazy\-pages\fR
-daemon\&.
-.RE
 .RE
 .SS "check"
 .sp
@@ -1124,22 +1097,6 @@ Page server IP address\&.
 .RS 4
 Page server port number\&.
 .RE
-.PP
-\fB\-\-lazy\-pages\fR
-.RS 4
-Serve local memory dump to a remote
-\fBlazy\-pages\fR
-daemon\&. In this mode the
-\fBpage\-server\fR
-reads local memory dump and allows the remote
-\fBlazy\-pages\fR
-deamon to request memory pages in random order\&.
-.RE
-.SS "lazy\-pages"
-.sp
-Launches \fBcriu\fR in lazy\-pages daemon mode\&.
-.sp
-The \fBlazy\-pages\fR daemon is responsible for managing user\-level demand paging for the restored processes\&. It gets information required to fill the process memory pages from the \fBrestore\fR and from the checkpont directory\&. When a restored process access certain memory page for the first time, the \fBlazy\-pages\fR daemon injects its contents into the process address space\&. The memory pages that are not yet requested by the restored processes are injected in the background\&.
 .SS "exec"
 .sp
 Executes a system call inside a destination task\*(Aqs context\&. This functionality is deprecated; please use \fBCompel\fR instead\&.

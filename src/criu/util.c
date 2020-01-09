@@ -47,61 +47,14 @@
 #include "namespaces.h"
 #include "criu-log.h"
 
-#include "clone-noasan.h"
 #include "cr_options.h"
 #include "servicefd.h"
 #include "cr-service.h"
 #include "files.h"
-#include "pstree.h"
 
 #include "cr-errno.h"
 
 #define VMA_OPT_LEN	128
-
-static int xatol_base(const char *string, long *number, int base)
-{
-	char *endptr;
-	long nr;
-
-	errno = 0;
-	nr = strtol(string, &endptr, base);
-	if ((errno == ERANGE && (nr == LONG_MAX || nr == LONG_MIN))
-			|| (errno != 0 && nr == 0)) {
-		pr_perror("failed to convert string '%s'", string);
-		return -EINVAL;
-	}
-
-	if ((endptr == string) || (*endptr != '\0')) {
-		pr_err("String is not a number: '%s'\n", string);
-		return -EINVAL;
-	}
-	*number = nr;
-	return 0;
-}
-
-int xatol(const char *string, long *number)
-{
-	return xatol_base(string, number, 10);
-}
-
-
-int xatoi(const char *string, int *number)
-{
-	long tmp;
-	int err;
-
-	err = xatol(string, &tmp);
-	if (err)
-		return err;
-
-	if (tmp > INT_MAX || tmp < INT_MIN) {
-		pr_err("value %#lx (%ld) is out of int range\n", tmp, tmp);
-		return -ERANGE;
-	}
-
-	*number = (int)tmp;
-	return 0;
-}
 
 /*
  * This function reallocates passed str pointer.
@@ -293,10 +246,11 @@ int move_fd_from(int *img_fd, int want_fd)
  */
 
 static pid_t open_proc_pid = PROC_NONE;
+static int open_proc_fd = -1;
 static pid_t open_proc_self_pid;
 static int open_proc_self_fd = -1;
 
-void set_proc_self_fd(int fd)
+static inline void set_proc_self_fd(int fd)
 {
 	if (open_proc_self_fd >= 0)
 		close(open_proc_self_fd);
@@ -305,18 +259,13 @@ void set_proc_self_fd(int fd)
 	open_proc_self_pid = getpid();
 }
 
-static inline int set_proc_pid_fd(int pid, int fd)
+static inline void set_proc_pid_fd(int pid, int fd)
 {
-	int ret;
-
-	if (fd < 0)
-		return close_service_fd(PROC_PID_FD_OFF);
+	if (open_proc_fd >= 0)
+		close(open_proc_fd);
 
 	open_proc_pid = pid;
-	ret = install_service_fd(PROC_PID_FD_OFF, fd);
-	close(fd);
-
-	return ret;
+	open_proc_fd = fd;
 }
 
 static inline int get_proc_fd(int pid)
@@ -328,7 +277,7 @@ static inline int get_proc_fd(int pid)
 		}
 		return open_proc_self_fd;
 	} else if (pid == open_proc_pid)
-		return get_service_fd(PROC_PID_FD_OFF);
+		return open_proc_fd;
 	else
 		return -1;
 }
@@ -412,7 +361,7 @@ inline int open_pid_proc(pid_t pid)
 	if (pid == PROC_SELF)
 		set_proc_self_fd(fd);
 	else
-		fd = set_proc_pid_fd(pid, fd);
+		set_proc_pid_fd(pid, fd);
 
 	return fd;
 }
@@ -434,11 +383,7 @@ int do_open_proc(pid_t pid, int flags, const char *fmt, ...)
 	return openat(dirfd, path, flags);
 }
 
-/* Max potentially possible fd to be open by criu process */
-int service_fd_rlim_cur;
-/* Base of current process service fds set */
-static int service_fd_base;
-/* Id of current process in shared fdt */
+static int service_fd_rlim_cur;
 static int service_fd_id = 0;
 
 int init_service_fd(void)
@@ -456,40 +401,31 @@ int init_service_fd(void)
 	}
 
 	service_fd_rlim_cur = (int)rlimit.rlim_cur;
-	service_fd_base = service_fd_rlim_cur;
-	BUG_ON(service_fd_base < SERVICE_FD_MAX);
+	BUG_ON(service_fd_rlim_cur < SERVICE_FD_MAX);
 
 	return 0;
 }
 
 static int __get_service_fd(enum sfd_type type, int service_fd_id)
 {
-	return service_fd_base - type - SERVICE_FD_MAX * service_fd_id;
+	return service_fd_rlim_cur - type - SERVICE_FD_MAX * service_fd_id;
 }
 
-int service_fd_min_fd(struct pstree_item *item)
+int service_fd_min_fd(void)
 {
-	struct fdt *fdt = rsti(item)->fdt;
-	int id = 0;
-
-	if (fdt)
-		id = fdt->nr - 1;
-	return service_fd_rlim_cur - (SERVICE_FD_MAX - 1) - SERVICE_FD_MAX * id;
+	return service_fd_rlim_cur - (SERVICE_FD_MAX - 1) - SERVICE_FD_MAX * service_fd_id;
 }
 
 static DECLARE_BITMAP(sfd_map, SERVICE_FD_MAX);
-/*
- * Variable for marking areas of code, where service fds modifications
- * are prohibited. It's used to safe them from reusing their numbers
- * by ordinary files. See install_service_fd() and close_service_fd().
- */
-bool sfds_protected = false;
 
-static void sfds_protection_bug(enum sfd_type type)
+int reserve_service_fd(enum sfd_type type)
 {
-	pr_err("Service fd %u is being modified in protected context\n", type);
-	print_stack_trace(current ? vpid(current) : 0);
-	BUG();
+	int sfd = __get_service_fd(type, service_fd_id);
+
+	BUG_ON((int)type <= SERVICE_FD_MIN || (int)type >= SERVICE_FD_MAX);
+
+	set_bit(type, sfd_map);
+	return sfd;
 }
 
 int install_service_fd(enum sfd_type type, int fd)
@@ -497,8 +433,6 @@ int install_service_fd(enum sfd_type type, int fd)
 	int sfd = __get_service_fd(type, service_fd_id);
 
 	BUG_ON((int)type <= SERVICE_FD_MIN || (int)type >= SERVICE_FD_MAX);
-	if (sfds_protected && !test_bit(type, sfd_map))
-		sfds_protection_bug(type);
 
 	if (dup3(fd, sfd, O_CLOEXEC) != sfd) {
 		pr_perror("Dup %d -> %d failed", fd, sfd);
@@ -528,9 +462,6 @@ int close_service_fd(enum sfd_type type)
 {
 	int fd;
 
-	if (sfds_protected)
-		sfds_protection_bug(type);
-
 	fd = get_service_fd(type);
 	if (fd < 0)
 		return 0;
@@ -542,92 +473,28 @@ int close_service_fd(enum sfd_type type)
 	return 0;
 }
 
-static void move_service_fd(struct pstree_item *me, int type, int new_id, int new_base)
+int clone_service_fd(int id)
 {
-	int old = get_service_fd(type);
-	int new = new_base - type - SERVICE_FD_MAX * new_id;
-	int ret;
+	int ret = -1, i;
 
-	if (old < 0)
-		return;
-	ret = dup2(old, new);
-	if (ret == -1) {
-		if (errno != EBADF)
+	if (service_fd_id == id)
+		return 0;
+
+	for (i = SERVICE_FD_MIN + 1; i < SERVICE_FD_MAX; i++) {
+		int old = __get_service_fd(i, service_fd_id);
+		int new = __get_service_fd(i, id);
+
+		/* Do not dup parent's transport fd */
+		if (i == TRANSPORT_FD_OFF)
+			continue;
+		ret = dup2(old, new);
+		if (ret == -1) {
+			if (errno == EBADF)
+				continue;
 			pr_perror("Unable to clone %d->%d", old, new);
-	} else if (!(rsti(me)->clone_flags & CLONE_FILES))
-		close(old);
-}
-
-static int choose_service_fd_base(struct pstree_item *me)
-{
-	int nr, real_nr, fdt_nr = 1, id = rsti(me)->service_fd_id;
-
-	if (rsti(me)->fdt) {
-		/* The base is set by owner of fdt (id 0) */
-		if (id != 0)
-			return service_fd_base;
-		fdt_nr = rsti(me)->fdt->nr;
-	}
-	/* Now find process's max used fd number */
-	if (!list_empty(&rsti(me)->fds))
-		nr = list_entry(rsti(me)->fds.prev,
-				struct fdinfo_list_entry, ps_list)->fe->fd;
-	else
-		nr = -1;
-
-	nr = max(nr, inh_fd_max);
-	/*
-	 * Service fds go after max fd near right border of alignment:
-	 *
-	 * ...|max_fd|max_fd+1|...|sfd first|...|sfd last (aligned)|
-	 *
-	 * So, they take maximum numbers of area allocated by kernel.
-	 * See linux alloc_fdtable() for details.
-	 */
-	nr += (SERVICE_FD_MAX - SERVICE_FD_MIN) * fdt_nr;
-	nr += 16; /* Safety pad */
-	real_nr = nr;
-
-	nr /= (1024 / sizeof(void *));
-	if (nr)
-		nr = 1 << (32 - __builtin_clz(nr));
-	else
-		nr = 1;
-	nr *= (1024 / sizeof(void *));
-
-	if (nr > service_fd_rlim_cur) {
-		/* Right border is bigger, than rlim. OK, then just aligned value is enough */
-		nr = round_down(service_fd_rlim_cur, (1024 / sizeof(void *)));
-		if (nr < real_nr) {
-			pr_err("Can't chose service_fd_base: %d %d\n", nr, real_nr);
-			return -1;
 		}
 	}
 
-	return nr;
-}
-
-int clone_service_fd(struct pstree_item *me)
-{
-	int id, new_base, i, ret = -1;
-
-	new_base = choose_service_fd_base(me);
-	id = rsti(me)->service_fd_id;
-
-	if (new_base == -1)
-		return -1;
-	if (service_fd_base == new_base && service_fd_id == id)
-		return 0;
-
-	/* Dup sfds in memmove() style: they may overlap */
-	if (get_service_fd(LOG_FD_OFF) < new_base - LOG_FD_OFF - SERVICE_FD_MAX * id)
-		for (i = SERVICE_FD_MIN + 1; i < SERVICE_FD_MAX; i++)
-			move_service_fd(me, i, id, new_base);
-	else
-		for (i = SERVICE_FD_MAX - 1; i > SERVICE_FD_MIN; i--)
-			move_service_fd(me, i, id, new_base);
-
-	service_fd_base = new_base;
 	service_fd_id = id;
 	ret = 0;
 
@@ -786,7 +653,7 @@ int cr_system_userns(int in, int out, int err, char *cmd,
 
 		execvp(cmd, argv);
 
-		pr_perror("exec(%s, ...) failed", cmd);
+		pr_perror("exec failed");
 out_chld:
 		_exit(1);
 	}
@@ -918,23 +785,14 @@ out:
 	return ret;
 }
 
-/*
- * Get PFN from pagemap file for virtual address vaddr.
- * Optionally if fd >= 0, it's used as pagemap file descriptor
- * (may be other task's pagemap)
- */
-int vaddr_to_pfn(int fd, unsigned long vaddr, u64 *pfn)
+int vaddr_to_pfn(unsigned long vaddr, u64 *pfn)
 {
-	int ret = -1;
+	int fd, ret = -1;
 	off_t off;
-	bool close_fd = false;
 
-	if (fd < 0) {
-		fd = open_proc(PROC_SELF, "pagemap");
-		if (fd < 0)
-			return -1;
-		close_fd = true;
-	}
+	fd = open_proc(PROC_SELF, "pagemap");
+	if (fd < 0)
+		return -1;
 
 	off = (vaddr / page_size()) * sizeof(u64);
 	ret = pread(fd, pfn, sizeof(*pfn), off);
@@ -946,9 +804,7 @@ int vaddr_to_pfn(int fd, unsigned long vaddr, u64 *pfn)
 		ret = 0;
 	}
 
-	if (close_fd)
-		close(fd);
-
+	close(fd);
 	return ret;
 }
 
@@ -1146,15 +1002,13 @@ const char *ns_to_string(unsigned int ns)
 void tcp_cork(int sk, bool on)
 {
 	int val = on ? 1 : 0;
-	if (setsockopt(sk, SOL_TCP, TCP_CORK, &val, sizeof(val)))
-		pr_perror("Unable to restore TCP_CORK (%d)", val);
+	setsockopt(sk, SOL_TCP, TCP_CORK, &val, sizeof(val));
 }
 
 void tcp_nodelay(int sk, bool on)
 {
 	int val = on ? 1 : 0;
-	if (setsockopt(sk, SOL_TCP, TCP_NODELAY, &val, sizeof(val)))
-		pr_perror("Unable to restore TCP_NODELAY (%d)", val);
+	setsockopt(sk, SOL_TCP, TCP_NODELAY, &val, sizeof(val));
 }
 
 static inline void pr_xsym(unsigned char *data, size_t len, int pos)
@@ -1360,158 +1214,3 @@ int setup_tcp_client(char *addr)
 
 	return sk;
 }
-
-int epoll_add_rfd(int epfd, struct epoll_rfd *rfd)
-{
-	struct epoll_event ev;
-
-	ev.events = EPOLLIN | EPOLLRDHUP;
-	ev.data.ptr = rfd;
-	if (epoll_ctl(epfd, EPOLL_CTL_ADD, rfd->fd, &ev) == -1) {
-		pr_perror("epoll_ctl failed");
-		return -1;
-	}
-
-	return 0;
-}
-
-int epoll_del_rfd(int epfd, struct epoll_rfd *rfd)
-{
-	if (epoll_ctl(epfd, EPOLL_CTL_DEL, rfd->fd, NULL) == -1) {
-		pr_perror("epoll_ctl failed");
-		return -1;
-	}
-
-	return 0;
-}
-
-static int epoll_hangup_event(int epollfd, struct epoll_rfd *rfd)
-{
-	int ret = 0;
-
-	if (rfd->hangup_event) {
-		ret = rfd->hangup_event(rfd);
-		if (ret < 0)
-			return ret;
-	}
-
-	if (epoll_del_rfd(epollfd, rfd))
-		return -1;
-
-	close_safe(&rfd->fd);
-
-	return ret;
-}
-
-int epoll_run_rfds(int epollfd, struct epoll_event *evs, int nr_fds, int timeout)
-{
-	int ret, i, nr_events;
-	bool have_a_break = false;
-
-	while (1) {
-		ret = epoll_wait(epollfd, evs, nr_fds, timeout);
-		if (ret <= 0) {
-			if (ret < 0)
-				pr_perror("polling failed");
-			break;
-		}
-
-		nr_events = ret;
-		for (i = 0; i < nr_events; i++) {
-			struct epoll_rfd *rfd;
-			uint32_t events;
-
-			rfd = (struct epoll_rfd *)evs[i].data.ptr;
-			events = evs[i].events;
-
-			if (events & EPOLLIN) {
-				ret = rfd->read_event(rfd);
-				if (ret < 0)
-					goto out;
-				if (ret > 0)
-					have_a_break = true;
-			}
-
-			if (events & (EPOLLHUP | EPOLLRDHUP)) {
-				ret = epoll_hangup_event(epollfd, rfd);
-				if (ret < 0)
-					goto out;
-				if (ret > 0)
-					have_a_break = true;
-			}
-		}
-
-		if (have_a_break)
-			return 1;
-	}
-out:
-	return ret;
-}
-
-int epoll_prepare(int nr_fds, struct epoll_event **events)
-{
-	int epollfd;
-
-	*events = xmalloc(sizeof(struct epoll_event) * nr_fds);
-	if (!*events)
-		return -1;
-
-	epollfd = epoll_create(nr_fds);
-	if (epollfd == -1) {
-		pr_perror("epoll_create failed");
-		goto free_events;
-	}
-
-	return epollfd;
-
-free_events:
-	xfree(*events);
-	return -1;
-}
-
-int call_in_child_process(int (*fn)(void *), void *arg)
-{
-	int status, ret = -1;
-	pid_t pid;
-	/*
-	 * Parent freezes till child exit, so child may use the same stack.
-	 * No SIGCHLD flag, so it's not need to block signal.
-	 */
-	pid = clone_noasan(fn, CLONE_VFORK | CLONE_VM | CLONE_FILES |
-			   CLONE_IO | CLONE_SIGHAND | CLONE_SYSVSEM, arg);
-	if (pid == -1) {
-		pr_perror("Can't clone");
-		return -1;
-	}
-	errno = 0;
-	if (waitpid(pid, &status, __WALL) != pid || !WIFEXITED(status) || WEXITSTATUS(status)) {
-		pr_err("Can't wait or bad status: errno=%d, status=%d\n", errno, status);
-		goto out;
-	}
-	ret = 0;
-	/*
-	 * Child opened PROC_SELF for pid. If we create one more child
-	 * with the same pid later, it will try to reuse this /proc/self.
-	 */
-out:
-	close_pid_proc();
-	return ret;
-}
-
-#ifdef __GLIBC__
-#include <execinfo.h>
-void print_stack_trace(pid_t pid)
-{
-	void *array[10];
-	char **strings;
-	size_t size, i;
-
-	size = backtrace(array, 10);
-	strings = backtrace_symbols(array, size);
-
-	for (i = 0; i < size; i++)
-		pr_err("stack %d#%zu: %s\n", pid, i, strings[i]);
-
-	free(strings);
-}
-#endif

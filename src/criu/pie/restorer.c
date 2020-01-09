@@ -17,23 +17,19 @@
 #include <sys/resource.h>
 #include <signal.h>
 
-#include "linux/userfaultfd.h"
-
-#include "common/config.h"
 #include "int.h"
 #include "types.h"
 #include "common/compiler.h"
-#include <compel/plugins/std/syscall.h>
-#include <compel/plugins/std/log.h>
-#include <compel/ksigset.h>
+#include "string.h"
+#include "syscall.h"
 #include "signal.h"
+#include "config.h"
 #include "prctl.h"
 #include "criu-log.h"
 #include "util.h"
 #include "image.h"
 #include "sk-inet.h"
 #include "vma.h"
-#include "uffd.h"
 
 #include "common/lock.h"
 #include "restorer.h"
@@ -64,28 +60,6 @@ static pid_t *helpers;
 static int n_helpers;
 static pid_t *zombies;
 static int n_zombies;
-static enum faults fi_strategy;
-bool fault_injected(enum faults f)
-{
-	return __fault_injected(f, fi_strategy);
-}
-
-/*
- * These are stubs for std compel plugin.
- */
-int parasite_daemon_cmd(int cmd, void *args)
-{
-	return 0;
-}
-
-int parasite_trap_cmd(int cmd, void *args)
-{
-	return 0;
-}
-
-void parasite_cleanup(void)
-{
-}
 
 extern void cr_restore_rt (void) asm ("__cr_restore_rt")
 			__attribute__ ((visibility ("hidden")));
@@ -105,18 +79,12 @@ static void sigchld_handler(int signal, siginfo_t *siginfo, void *data)
 		if (siginfo->si_pid == zombies[i])
 			return;
 
-	if (siginfo->si_code == CLD_EXITED)
-		r = "exited, status=";
-	else if (siginfo->si_code == CLD_KILLED)
-		r = "killed by signal";
-	else if (siginfo->si_code == CLD_DUMPED)
-		r = "terminated abnormally with";
-	else if (siginfo->si_code == CLD_TRAPPED)
-		r = "trapped with";
-	else if (siginfo->si_code == CLD_STOPPED)
-		r = "stopped with";
+	if (siginfo->si_code & CLD_EXITED)
+		r = " exited, status=";
+	else if (siginfo->si_code & CLD_KILLED)
+		r = " killed by signal ";
 	else
-		r = "disappeared with";
+		r = "disappeared with ";
 
 	pr_info("Task %d %s %d\n", siginfo->si_pid, r, siginfo->si_status);
 
@@ -129,14 +97,14 @@ static void sigchld_handler(int signal, siginfo_t *siginfo, void *data)
 static int lsm_set_label(char *label, int procfd)
 {
 	int ret = -1, len, lsmfd;
-	char path[STD_LOG_SIMPLE_CHUNK];
+	char path[LOG_SIMPLE_CHUNK];
 
 	if (!label)
 		return 0;
 
 	pr_info("restoring lsm profile %s\n", label);
 
-	std_sprintf(path, "self/task/%ld/attr/current", sys_gettid());
+	simple_sprintf(path, "self/task/%ld/attr/current", sys_gettid());
 
 	lsmfd = sys_openat(procfd, path, O_WRONLY, 0);
 	if (lsmfd < 0) {
@@ -374,7 +342,7 @@ static int restore_signals(siginfo_t *ptr, int nr, bool group)
 		if (ret) {
 			pr_err("Unable to send siginfo %d %x with code %d\n",
 					info->si_signo, info->si_code, ret);
-			return -1;
+			return -1;;
 		}
 	}
 
@@ -431,40 +399,20 @@ die:
 	return -1;
 }
 
-static int restore_robust_futex(struct thread_restore_args *args)
-{
-	uint32_t futex_len = args->futex_rla_len;
-	int ret;
-
-	if (!args->futex_rla_len)
-		return 0;
-
-	/*
-	 * XXX: We check here *task's* mode, not *thread's*.
-	 * But it's possible to write an application with mixed
-	 * threads (on x86): some in 32-bit mode, some in 64-bit.
-	 * Quite unlikely that such application exists at all.
-	 */
-	if (args->ta->compatible_mode) {
-		uint32_t futex = (uint32_t)args->futex_rla;
-		ret = set_compat_robust_list(futex, futex_len);
-	} else {
-		void *futex = decode_pointer(args->futex_rla);
-		ret = sys_set_robust_list(futex, futex_len);
-	}
-
-	if (ret)
-		pr_err("Failed to recover futex robust list: %d\n", ret);
-
-	return ret;
-}
-
 static int restore_thread_common(struct thread_restore_args *args)
 {
 	sys_set_tid_address((int *)decode_pointer(args->clear_tid_addr));
 
-	if (restore_robust_futex(args))
-		return -1;
+	if (args->has_futex && args->futex_rla_len) {
+		int ret;
+
+		ret = sys_set_robust_list(decode_pointer(args->futex_rla),
+					  args->futex_rla_len);
+		if (ret) {
+			pr_err("Failed to recover futex robust list: %d\n", ret);
+			return -1;
+		}
+	}
 
 	restore_sched_info(&args->sp);
 
@@ -476,10 +424,9 @@ static int restore_thread_common(struct thread_restore_args *args)
 	return 0;
 }
 
-static void noinline rst_sigreturn(unsigned long new_sp,
-		struct rt_sigframe *sigframe)
+static void noinline rst_sigreturn(unsigned long new_sp)
 {
-	ARCH_RT_SIGRETURN(new_sp, sigframe);
+	ARCH_RT_SIGRETURN(new_sp);
 }
 
 /*
@@ -538,7 +485,7 @@ long __export_restore_thread(struct thread_restore_args *args)
 	futex_dec_and_wake(&thread_inprogress);
 
 	new_sp = (long)rt_sigframe + RT_SIGFRAME_OFFSET(rt_sigframe);
-	rst_sigreturn(new_sp, rt_sigframe);
+	rst_sigreturn(new_sp);
 
 core_restore_end:
 	pr_err("Restorer abnormal termination for %ld\n", sys_getpid());
@@ -560,14 +507,6 @@ static long restore_self_exe_late(struct task_restore_args *args)
 	return ret;
 }
 
-#ifndef ARCH_HAS_SHMAT_HOOK
-unsigned long arch_shmat(int shmid, void *shmaddr,
-			int shmflg, unsigned long size)
-{
-	return sys_shmat(shmid, shmaddr, shmflg);
-}
-#endif
-
 static unsigned long restore_mapping(VmaEntry *vma_entry)
 {
 	int prot	= vma_entry->prot;
@@ -576,8 +515,6 @@ static unsigned long restore_mapping(VmaEntry *vma_entry)
 
 	if (vma_entry_is(vma_entry, VMA_AREA_SYSVIPC)) {
 		int att_flags;
-		void *shmaddr = decode_pointer(vma_entry->start);
-		unsigned long shmsize = (vma_entry->end - vma_entry->start);
 		/*
 		 * See comment in open_shmem_sysv() for what SYSV_SHMEM_SKIP_FD
 		 * means and why we check for PROT_EXEC few lines below.
@@ -592,7 +529,7 @@ static unsigned long restore_mapping(VmaEntry *vma_entry)
 			att_flags = SHM_RDONLY;
 
 		pr_info("Attach SYSV shmem %d at %"PRIx64"\n", (int)vma_entry->fd, vma_entry->start);
-		return arch_shmat(vma_entry->fd, shmaddr, att_flags, shmsize);
+		return sys_shmat(vma_entry->fd, decode_pointer(vma_entry->start), att_flags);
 	}
 
 	/*
@@ -604,13 +541,8 @@ static unsigned long restore_mapping(VmaEntry *vma_entry)
 	if (vma_entry_is(vma_entry, VMA_ANON_SHARED) && (vma_entry->fd != -1UL))
 		flags &= ~MAP_ANONYMOUS;
 
-	/* See comment in premap_private_vma() for this flag change */
-	if (vma_entry_is(vma_entry, VMA_AREA_AIORING))
-		flags |= MAP_ANONYMOUS;
-
 	/* A mapping of file with MAP_SHARED is up to date */
-	if ((vma_entry->fd == -1 || !(vma_entry->flags & MAP_SHARED)) &&
-			!(vma_entry->status & VMA_NO_PROT_WRITE))
+	if (vma_entry->fd == -1 || !(vma_entry->flags & MAP_SHARED))
 		prot |= PROT_WRITE;
 
 	pr_debug("\tmmap(%"PRIx64" -> %"PRIx64", %x %x %d)\n",
@@ -627,8 +559,7 @@ static unsigned long restore_mapping(VmaEntry *vma_entry)
 			vma_entry->fd,
 			vma_entry->pgoff);
 
-	if ((vma_entry->fd != -1) &&
-			(vma_entry->status & VMA_CLOSE))
+	if (vma_entry->fd != -1)
 		sys_close(vma_entry->fd);
 
 	return addr;
@@ -639,7 +570,7 @@ static unsigned long restore_mapping(VmaEntry *vma_entry)
  * of tail. To set tail, we write to /dev/null and use the fact this
  * operation is synchronious for the device. Also, we unmap temporary
  * anonymous area, used to store content of ring buffer during restore
- * and mapped in premap_private_vma().
+ * and mapped in map_private_vma().
  */
 static int restore_aio_ring(struct rst_aio_ring *raio)
 {
@@ -786,46 +717,8 @@ static void rst_tcp_socks_all(struct task_restore_args *ta)
 		rst_tcp_repair_off(&ta->tcp_socks[i]);
 }
 
-static int enable_uffd(int uffd, unsigned long addr, unsigned long len)
+static int vma_remap(unsigned long src, unsigned long dst, unsigned long len)
 {
-	int rc;
-	struct uffdio_register uffdio_register;
-	unsigned long expected_ioctls;
-
-	/*
-	 * If uffd == -1, this means that userfaultfd is not enabled
-	 * or it is not available.
-	 */
-	if (uffd == -1)
-		return 0;
-
-	uffdio_register.range.start = addr;
-	uffdio_register.range.len = len;
-	uffdio_register.mode = UFFDIO_REGISTER_MODE_MISSING;
-
-	pr_info("lazy-pages: register: %lx, len %lx\n", addr, len);
-
-	rc = sys_ioctl(uffd, UFFDIO_REGISTER, (unsigned long) &uffdio_register);
-	if (rc != 0) {
-		pr_err("lazy-pages: register %lx failed: rc:%d, \n", addr, rc);
-		return -1;
-	}
-
-	expected_ioctls = (1 << _UFFDIO_WAKE) | (1 << _UFFDIO_COPY) | (1 << _UFFDIO_ZEROPAGE);
-
-	if ((uffdio_register.ioctls & expected_ioctls) != expected_ioctls) {
-		pr_err("lazy-pages: unexpected missing uffd ioctl for anon memory\n");
-	}
-
-	return 0;
-}
-
-
-static int vma_remap(VmaEntry *vma_entry, int uffd)
-{
-	unsigned long src = vma_premmaped_start(vma_entry);
-	unsigned long dst = vma_entry->start;
-	unsigned long len = vma_entry_len(vma_entry);
 	unsigned long guard = 0, tmp;
 
 	pr_info("Remap %lx->%lx len %lx\n", src, dst, len);
@@ -896,18 +789,6 @@ static int vma_remap(VmaEntry *vma_entry, int uffd)
 		pr_err("Unable to remap %lx -> %lx\n", src, dst);
 		return -1;
 	}
-
-	/*
-	 * If running in userfaultfd/lazy-pages mode pages with
-	 * MAP_ANONYMOUS and MAP_PRIVATE are remapped but without the
-	 * real content.
-	 * The function enable_uffd() marks the page(s) as userfaultfd
-	 * pages, so that the processes will hang until the memory is
-	 * injected via userfaultfd.
-	 */
-	if (vma_entry_can_be_lazy(vma_entry))
-		if (enable_uffd(uffd, dst, len) != 0)
-			return -1;
 
 	return 0;
 }
@@ -1003,19 +884,18 @@ static void restore_posix_timers(struct task_restore_args *args)
 		sys_timer_settime((kernel_timer_t)rt->spt.it_id, 0, &rt->val, NULL);
 	}
 }
+static void *bootstrap_start;
+static unsigned int bootstrap_len;
 
 /*
  * sys_munmap must not return here. The control process must
  * trap us on the exit from sys_munmap.
  */
 #ifdef CONFIG_VDSO
-unsigned long vdso_rt_size = 0;
+static unsigned long vdso_rt_size;
 #else
 #define vdso_rt_size	(0)
 #endif
-
-void *bootstrap_start = NULL;
-unsigned int bootstrap_len = 0;
 
 void __export_unmap(void)
 {
@@ -1089,7 +969,7 @@ static int wait_helpers(struct task_restore_args *task_args)
 		pid_t pid = task_args->helpers[i];
 
 		/* Check that a helper completed. */
-		if (sys_wait4(pid, &status, 0, NULL) == -ECHILD) {
+		if (sys_wait4(pid, &status, 0, NULL) == -1) {
 			/* It has been waited in sigchld_handler */
 			continue;
 		}
@@ -1134,34 +1014,6 @@ static int wait_zombies(struct task_restore_args *task_args)
 	return 0;
 }
 
-static bool vdso_unmapped(struct task_restore_args *args)
-{
-	unsigned int i;
-
-	/* Don't park rt-vdso or rt-vvar if dumpee doesn't have them */
-	for (i = 0; i < args->vmas_n; i++) {
-		VmaEntry *vma = &args->vmas[i];
-
-		if (vma_entry_is(vma, VMA_AREA_VDSO) ||
-				vma_entry_is(vma, VMA_AREA_VVAR))
-			return false;
-	}
-
-	return true;
-}
-
-static bool vdso_needs_parking(struct task_restore_args *args)
-{
-	/* Compatible vDSO will be mapped, not moved */
-	if (args->compatible_mode)
-		return false;
-
-	if (args->can_map_vdso)
-		return false;
-
-	return !vdso_unmapped(args);
-}
-
 /*
  * The main routine to restore task via sigreturn.
  * This one is very special, we never return there
@@ -1175,7 +1027,7 @@ long __export_restore_task(struct task_restore_args *args)
 	int i;
 	VmaEntry *vma_entry;
 	unsigned long va;
-	struct restore_vma_io *rio;
+
 	struct rt_sigframe *rt_sigframe;
 	struct prctl_mm_map prctl_map;
 	unsigned long new_sp;
@@ -1190,8 +1042,6 @@ long __export_restore_task(struct task_restore_args *args)
 	vdso_rt_size	= args->vdso_rt_size;
 #endif
 
-	fi_strategy = args->fault_strategy;
-
 	task_entries_local = args->task_entries;
 	helpers = args->helpers;
 	n_helpers = args->helpers_n;
@@ -1205,43 +1055,28 @@ long __export_restore_task(struct task_restore_args *args)
 	act.rt_sa_restorer = cr_restore_rt;
 	sys_sigaction(SIGCHLD, &act, NULL, sizeof(k_rtsigset_t));
 
-	ksigemptyset(&to_block);
+	ksigfillset(&to_block);
 	ksigaddset(&to_block, SIGCHLD);
 	ret = sys_sigprocmask(SIG_UNBLOCK, &to_block, NULL, sizeof(k_rtsigset_t));
 
-	std_log_set_fd(args->logfd);
-	std_log_set_loglevel(args->loglevel);
-	std_log_set_start(&args->logstart);
+	log_set_fd(args->logfd);
+	log_set_loglevel(args->loglevel);
+	log_set_start(&args->logstart);
 
 	pr_info("Switched to the restorer %d\n", my_pid);
 
-	if (args->uffd > -1) {
-		pr_debug("lazy-pages: uffd %d\n", args->uffd);
-	}
-
-	if (vdso_needs_parking(args)) {
-		if (vdso_do_park(&args->vdso_maps_rt,
-				args->vdso_rt_parked_at, vdso_rt_size))
-			goto core_restore_end;
-	}
+	if (vdso_do_park(&args->vdso_sym_rt, args->vdso_rt_parked_at, vdso_rt_size))
+		goto core_restore_end;
 
 	if (unmap_old_vmas((void *)args->premmapped_addr, args->premmapped_len,
 				bootstrap_start, bootstrap_len, args->task_size))
 		goto core_restore_end;
 
-	/* Map vdso that wasn't parked */
-	if (!vdso_unmapped(args) && args->can_map_vdso) {
-		if (arch_map_vdso(args->vdso_rt_parked_at,
-				args->compatible_mode) < 0) {
-			goto core_restore_end;
-		}
-	}
-
 	/* Shift private vma-s to the left */
 	for (i = 0; i < args->vmas_n; i++) {
 		vma_entry = args->vmas + i;
 
-		if (!vma_entry_is(vma_entry, VMA_PREMMAPED))
+		if (!vma_entry_is_private(vma_entry, args->task_size))
 			continue;
 
 		if (vma_entry->end >= args->task_size)
@@ -1250,7 +1085,8 @@ long __export_restore_task(struct task_restore_args *args)
 		if (vma_entry->start > vma_entry->shmid)
 			break;
 
-		if (vma_remap(vma_entry, args->uffd))
+		if (vma_remap(vma_premmaped_start(vma_entry),
+				vma_entry->start, vma_entry_len(vma_entry)))
 			goto core_restore_end;
 	}
 
@@ -1258,7 +1094,7 @@ long __export_restore_task(struct task_restore_args *args)
 	for (i = args->vmas_n - 1; i >= 0; i--) {
 		vma_entry = args->vmas + i;
 
-		if (!vma_entry_is(vma_entry, VMA_PREMMAPED))
+		if (!vma_entry_is_private(vma_entry, args->task_size))
 			continue;
 
 		if (vma_entry->start > args->task_size)
@@ -1267,26 +1103,9 @@ long __export_restore_task(struct task_restore_args *args)
 		if (vma_entry->start < vma_entry->shmid)
 			break;
 
-		if (vma_remap(vma_entry, args->uffd))
+		if (vma_remap(vma_premmaped_start(vma_entry),
+				vma_entry->start, vma_entry_len(vma_entry)))
 			goto core_restore_end;
-	}
-
-	if (args->uffd > -1) {
-		/* re-enable THP if we disabled it previously */
-		if (args->has_thp_enabled) {
-			if (sys_prctl(PR_SET_THP_DISABLE, 0, 0, 0, 0)) {
-				pr_err("Cannot re-enable THP\n");
-				goto core_restore_end;
-			}
-		}
-
-		pr_debug("lazy-pages: closing uffd %d\n", args->uffd);
-		/*
-		 * All userfaultfd configuration has finished at this point.
-		 * Let's close the UFFD file descriptor, so that the restored
-		 * process does not have an opened UFFD FD for ever.
-		 */
-		sys_close(args->uffd);
 	}
 
 	/*
@@ -1295,11 +1114,10 @@ long __export_restore_task(struct task_restore_args *args)
 	for (i = 0; i < args->vmas_n; i++) {
 		vma_entry = args->vmas + i;
 
-		if (!vma_entry_is(vma_entry, VMA_AREA_REGULAR) &&
-				!vma_entry_is(vma_entry, VMA_AREA_AIORING))
+		if (!vma_entry_is(vma_entry, VMA_AREA_REGULAR))
 			continue;
 
-		if (vma_entry_is(vma_entry, VMA_PREMMAPED))
+		if (vma_entry_is_private(vma_entry, args->task_size))
 			continue;
 
 		va = restore_mapping(vma_entry);
@@ -1310,57 +1128,20 @@ long __export_restore_task(struct task_restore_args *args)
 		}
 	}
 
-	/*
-	 * Now read the contents (if any)
-	 */
-
-	rio = args->vma_ios;
-	for (i = 0; i < args->vma_ios_n; i++) {
-		struct iovec *iovs = rio->iovs;
-		int nr = rio->nr_iovs;
-		ssize_t r;
-
-		while (nr) {
-			pr_debug("Preadv %lx:%d... (%d iovs)\n",
-					(unsigned long)iovs->iov_base,
-					(int)iovs->iov_len, nr);
-			r = sys_preadv(args->vma_ios_fd, iovs, nr, rio->off);
-			if (r < 0) {
-				pr_err("Can't read pages data (%d)\n", (int)r);
-				goto core_restore_end;
-			}
-
-			pr_debug("`- returned %ld\n", (long)r);
-			rio->off += r;
-			/* Advance the iovecs */
-			do {
-				if (iovs->iov_len <= r) {
-					pr_debug("   `- skip pagemap\n");
-					r -= iovs->iov_len;
-					iovs++;
-					nr--;
-					continue;
-				}
-
-				iovs->iov_base += r;
-				iovs->iov_len -= r;
-				break;
-			} while (nr > 0);
-		}
-
-		rio = ((void *)rio) + RIO_SIZE(rio->nr_iovs);
-	}
-
-	sys_close(args->vma_ios_fd);
-
 #ifdef CONFIG_VDSO
 	/*
 	 * Proxify vDSO.
 	 */
-	if (vdso_proxify(&args->vdso_maps_rt.sym, args->vdso_rt_parked_at,
-		     args->vmas, args->vmas_n, args->compatible_mode,
-		     fault_injected(FI_VDSO_TRAMPOLINES)))
-		goto core_restore_end;
+	for (i = 0; i < args->vmas_n; i++) {
+		if (vma_entry_is(&args->vmas[i], VMA_AREA_VDSO) ||
+		    vma_entry_is(&args->vmas[i], VMA_AREA_VVAR)) {
+			if (vdso_proxify("dumpee", &args->vdso_sym_rt,
+					 args->vdso_rt_parked_at,
+					 i, args->vmas, args->vmas_n))
+				goto core_restore_end;
+			break;
+		}
+	}
 #endif
 
 	/*
@@ -1373,8 +1154,7 @@ long __export_restore_task(struct task_restore_args *args)
 		if (!(vma_entry_is(vma_entry, VMA_AREA_REGULAR)))
 			continue;
 
-		if ((vma_entry->prot & PROT_WRITE) ||
-				(vma_entry->status & VMA_NO_PROT_WRITE))
+		if (vma_entry->prot & PROT_WRITE)
 			continue;
 
 		sys_mprotect(decode_pointer(vma_entry->start),
@@ -1537,7 +1317,7 @@ long __export_restore_task(struct task_restore_args *args)
 				continue;
 
 			new_sp = restorer_stack(thread_args[i].mz);
-			last_pid_len = std_vprint_num(last_pid_buf, sizeof(last_pid_buf), thread_args[i].pid - 1, &s);
+			last_pid_len = vprint_num(last_pid_buf, sizeof(last_pid_buf), thread_args[i].pid - 1, &s);
 			sys_lseek(fd, 0, SEEK_SET);
 			ret = sys_write(fd, s, last_pid_len);
 			if (ret < 0) {
@@ -1554,10 +1334,6 @@ long __export_restore_task(struct task_restore_args *args)
 			 */
 
 			RUN_CLONE_RESTORE_FN(ret, clone_flags, new_sp, parent_tid, thread_args, args->clone_restore_fn);
-			if (ret != thread_args[i].pid) {
-				pr_err("Unable to create a thread: %ld\n", ret);
-				goto core_restore_end;
-			}
 		}
 
 		ret = sys_flock(fd, LOCK_UN);
@@ -1600,20 +1376,7 @@ long __export_restore_task(struct task_restore_args *args)
 		goto core_restore_end;
 	}
 
-	if (!args->compatible_mode) {
-		sys_sigaction(SIGCHLD, &args->sigchld_act,
-				NULL, sizeof(k_rtsigset_t));
-	} else {
-		void *stack = alloc_compat_syscall_stack();
-
-		if (!stack) {
-			pr_err("Failed to allocate 32-bit stack for sigaction\n");
-			goto core_restore_end;
-		}
-		arch_compat_rt_sigaction(stack, SIGCHLD,
-				(void*)&args->sigchld_act);
-		free_compat_syscall_stack(stack);
-	}
+	sys_sigaction(SIGCHLD, &args->sigchld_act, NULL, sizeof(k_rtsigset_t));
 
 	ret = restore_signals(args->siginfo, args->siginfo_n, true);
 	if (ret)
@@ -1654,7 +1417,7 @@ long __export_restore_task(struct task_restore_args *args)
 	futex_wait_while_gt(&thread_inprogress, 1);
 
 	sys_close(args->proc_fd);
-	std_log_set_fd(-1);
+	log_set_fd(-1);
 
 	/*
 	 * The code that prepared the itimers makes shure the
@@ -1686,22 +1449,11 @@ long __export_restore_task(struct task_restore_args *args)
 	 * pure assembly since we don't need any additional
 	 * code insns from gcc.
 	 */
-	rst_sigreturn(new_sp, rt_sigframe);
+	rst_sigreturn(new_sp);
 
 core_restore_end:
 	futex_abort_and_wake(&task_entries_local->nr_in_progress);
 	pr_err("Restorer fail %ld\n", sys_getpid());
 	sys_exit_group(1);
 	return -1;
-}
-
-/*
- * For most of the restorer's objects -fstack-protector is disabled.
- * But we share some of them with CRIU, which may have it enabled.
- */
-void __stack_chk_fail(void)
-{
-	pr_err("Restorer stack smash detected %ld\n", sys_getpid());
-	sys_exit_group(1);
-	BUG();
 }

@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include <sched.h>
 #include <stdbool.h>
 #include <string.h>

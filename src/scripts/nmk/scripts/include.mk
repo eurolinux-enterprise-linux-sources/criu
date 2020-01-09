@@ -4,8 +4,6 @@ ifndef ____nmk_defined__msg
         include $(__nmk_dir)msg.mk
 endif
 
-.PHONY: all help test docs clean install .FORCE
-
 #
 # Common vars.
 SUBARCH := $(shell uname -m | sed       \
@@ -19,7 +17,7 @@ SUBARCH := $(shell uname -m | sed       \
                 -e s/ppc64.*/ppc64/     \
                 -e s/mips.*/mips/       \
                 -e s/sh[234].*/sh/      \
-                -e s/aarch64.*/aarch64/)
+                -e s/aarch64.*/arm64/)
 
 ARCH		?= $(SUBARCH)
 SRCARCH 	:= $(ARCH)

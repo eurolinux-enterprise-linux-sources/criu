@@ -14,11 +14,8 @@
 #include "mount.h"
 #include "dump.h"
 #include "util.h"
-#include "net.h"
-
 #include "protobuf.h"
 #include "images/pstree.pb-c.h"
-#include "crtools.h"
 
 struct pstree_item *root_item;
 static struct rb_root pid_root_rb;
@@ -212,7 +209,6 @@ struct pstree_item *__alloc_pstree_item(bool rst)
 
 		memset(item, 0, sz);
 		vm_area_list_init(&rsti(item)->vmas);
-		INIT_LIST_HEAD(&rsti(item)->vma_io);
 		item->pid = (void *)item + sizeof(*item) + sizeof(struct rst_info);
 	}
 
@@ -221,7 +217,6 @@ struct pstree_item *__alloc_pstree_item(bool rst)
 
 	item->pid->ns[0].virt = -1;
 	item->pid->real = -1;
-	item->pid->state = TASK_UNDEF;
 	item->born_sid = -1;
 	item->pid->item = item;
 	futex_init(&item->task_st);
@@ -229,15 +224,11 @@ struct pstree_item *__alloc_pstree_item(bool rst)
 	return item;
 }
 
-int init_pstree_helper(struct pstree_item *ret)
+void init_pstree_helper(struct pstree_item *ret)
 {
-	BUG_ON(!ret->parent);
 	ret->pid->state = TASK_HELPER;
 	rsti(ret)->clone_flags = CLONE_FILES | CLONE_FS;
-	if (shared_fdt_prepare(ret) < 0)
-		return -1;
 	task_entries->nr_helpers++;
-	return 0;
 }
 
 /* Deep first search on children */
@@ -435,7 +426,7 @@ void pstree_insert_pid(struct pid *pid_node)
 
 struct pstree_item *lookup_create_item(pid_t pid)
 {
-	struct pid *node;
+	struct pid *node;;
 
 	node = lookup_create_pid(pid, NULL);
 	if (!node)
@@ -479,10 +470,6 @@ static int read_pstree_ids(struct pstree_item *pi)
 
 	if (pi->ids->has_mnt_ns_id) {
 		if (rst_add_ns_id(pi->ids->mnt_ns_id, pi, &mnt_ns_desc))
-			return -1;
-	}
-	if (pi->ids->has_net_ns_id) {
-		if (rst_add_ns_id(pi->ids->net_ns_id, pi, &net_ns_desc))
 			return -1;
 	}
 
@@ -598,7 +585,7 @@ err:
 	return ret;
 }
 
-#define RESERVED_PIDS		300
+#define RESERVED_PIDS           300
 static int get_free_pid()
 {
 	static struct pid *prev, *next;
@@ -679,10 +666,7 @@ static int prepare_pstree_ids(void)
 			helper->ids = root_item->ids;
 			list_add_tail(&helper->sibling, &helpers);
 		}
-		if (init_pstree_helper(helper)) {
-			pr_err("Can't init helper\n");
-			return -1;
-		}
+		init_pstree_helper(helper);
 
 		pr_info("Add a helper %d for restoring SID %d\n",
 				vpid(helper), helper->sid);
@@ -725,8 +709,8 @@ static int prepare_pstree_ids(void)
 			parent = item->parent;
 			while (parent && vpid(parent) != item->sid) {
 				if (parent->born_sid != -1 && parent->born_sid != item->sid) {
-					pr_err("Can't figure out which sid (%d or %d)"
-						"the process %d was born with\n",
+					pr_err("Can't determinate with which sid (%d or %d)"
+						"the process %d was born\n",
 						parent->born_sid, item->sid, vpid(parent));
 					return -1;
 				}
@@ -770,16 +754,13 @@ static int prepare_pstree_ids(void)
 			continue;
 
 		helper = pid->item;
+		init_pstree_helper(helper);
 
 		helper->sid = item->sid;
 		helper->pgid = item->pgid;
 		helper->pid->ns[0].virt = item->pgid;
 		helper->parent = item;
 		helper->ids = item->ids;
-		if (init_pstree_helper(helper)) {
-			pr_err("Can't init helper\n");
-			return -1;
-		}
 		list_add(&helper->sibling, &item->children);
 		rsti(item)->pgrp_leader = helper;
 
@@ -965,22 +946,6 @@ int prepare_pstree(void)
 		ret = prepare_pstree_ids();
 
 	return ret;
-}
-
-int prepare_dummy_pstree(void)
-{
-	pid_t dummy = 0;
-
-	if (check_img_inventory() == -1)
-		return -1;
-
-	if (prepare_task_entries() == -1)
-		return -1;
-
-	if (read_pstree_image(&dummy) == -1)
-		return -1;
-
-	return 0;
 }
 
 bool restore_before_setsid(struct pstree_item *child)

@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include <unistd.h>
 #include <stdbool.h>
 #include <stdlib.h>
@@ -53,11 +54,11 @@ static int add_to_cg(const char *controller, const char *path)
 	int cgfd, l;
 
 	sprintf(subdir, "%s/%s", dirname, controller);
-	ssprintf(paux, "%s/%s", subdir, path);
+	sprintf(paux, "%s/%s", subdir, path);
 	mkdir(paux, 0600);
 
 	l = sprintf(aux, "%d", getpid());
-	ssprintf(paux, "%s/%s/tasks", subdir, path);
+	sprintf(paux, "%s/%s/tasks", subdir, path);
 
 	cgfd = open(paux, O_WRONLY);
 	if (cgfd < 0) {

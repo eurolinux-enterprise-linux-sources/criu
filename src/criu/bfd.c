@@ -91,7 +91,7 @@ static void buf_put(struct xbuf *xb)
 static int bfdopen(struct bfd *f, bool writable)
 {
 	if (buf_get(&f->b)) {
-		close_safe(&f->fd);
+		close(f->fd);
 		return -1;
 	}
 
@@ -196,11 +196,6 @@ again:
 		if (!b->sz)
 			return NULL;
 
-		if (b->sz == BUFSIZE) {
-			pr_err("The bfd buffer is too small\n");
-			ERR_PTR(-EIO);
-			return NULL;
-		}
 		/*
 		 * Last bytes may lack the \n at the
 		 * end, need to report this as full
@@ -220,7 +215,7 @@ again:
 
 	/*
 	 * small optimization -- we've scanned b->sz
-	 * symbols already, no need to re-scan them after
+	 * symols already, no need to re-scan them after
 	 * the buffer refill.
 	 */
 	ss = b->sz;

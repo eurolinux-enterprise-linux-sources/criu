@@ -1,7 +1,11 @@
-LIBDIR	:= ../lib
-LIB	:= $(LIBDIR)/libzdtmtst.a
-LDLIBS	+= $(LIB)
-CPPFLAGS += -I$(LIBDIR)
+include ../Makefile.inc
+
+LIBDIR	= ../lib
+LIB	= $(LIBDIR)/libzdtmtst.a
+LDLIBS	+= $(LIBDIR)/libzdtmtst.a
+override CPPFLAGS += -I$(LIBDIR)
+CFLAGS	= -g -O2 -Wall -Werror -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0
+CFLAGS	+= $(USERCFLAGS)
 
 TST_NOFILE	:=				\
 		busyloop00			\
@@ -10,10 +14,8 @@ TST_NOFILE	:=				\
 		caps00				\
 		wait00				\
 		zombie00			\
-		zombie01			\
 		fpu00				\
 		fpu01				\
-		fpu02				\
 		arm-neon00			\
 		futex				\
 		futex-rl			\
@@ -28,11 +30,8 @@ TST_NOFILE	:=				\
 		sched_policy00			\
 		socket_listen			\
 		socket_listen6			\
-		socket_listen4v6		\
 		socket_udp			\
-		socket_udp-corked		\
 		socket6_udp			\
-		socket_udp_shutdown		\
 		sk-freebind			\
 		sk-freebind-false		\
 		socket_udplite			\
@@ -58,48 +57,35 @@ TST_NOFILE	:=				\
 		pthread02			\
 		vdso00				\
 		vdso01				\
-		vdso02				\
-		vdso-proxy			\
 		utsname				\
 		pstree				\
 		sockets01			\
 		sockets02			\
 		sockets_spair			\
 		socket_queues			\
+		socket_queues02			\
 		socket-tcp			\
-		socket-tcp-reseted		\
 		socket-tcp6			\
-		socket-tcp4v6			\
 		socket-tcp-local		\
-		socket-tcp-reuseport		\
 		socket-tcp-nfconntrack		\
 		socket-tcp6-local		\
-		socket-tcp4v6-local		\
 		socket-tcpbuf			\
 		socket-tcpbuf-local		\
 		socket-tcpbuf6-local		\
 		socket-tcpbuf6			\
 		socket-tcp-fin-wait1		\
 		socket-tcp6-fin-wait1		\
-		socket-tcp4v6-fin-wait1		\
 		socket-tcp-fin-wait2		\
 		socket-tcp6-fin-wait2		\
-		socket-tcp4v6-fin-wait2		\
 		socket-tcp-close-wait		\
 		socket-tcp6-close-wait		\
-		socket-tcp4v6-close-wait		\
 		socket-tcp-last-ack		\
 		socket-tcp6-last-ack		\
-		socket-tcp4v6-last-ack		\
 		socket-tcp-closing		\
 		socket-tcp6-closing		\
-		socket-tcp4v6-closing		\
 		socket-tcp-closed		\
 		socket-tcp-closed-last-ack	\
 		socket-tcp6-closed		\
-		socket-tcp4v6-closed		\
-		socket-tcp-close0 		\
-		socket-tcp-close1 		\
 		socket-tcp-unconn		\
 		socket-tcp6-unconn		\
 		socket-tcp-syn-sent		\
@@ -155,7 +141,6 @@ TST_NOFILE	:=				\
 		grow_map02			\
 		grow_map03			\
 		tun				\
-		tun_ns				\
 		stopped				\
 		stopped01			\
 		stopped02			\
@@ -168,16 +153,9 @@ TST_NOFILE	:=				\
 		remap_dead_pid			\
 		remap_dead_pid_root			\
 		scm00				\
-		scm01				\
-		scm02				\
-		scm03				\
-		scm04				\
-		scm05				\
-		scm06				\
 		aio00				\
 		aio01				\
 		fd				\
-		fd01				\
 		apparmor				\
 		seccomp_strict			\
 		seccomp_filter			\
@@ -193,28 +171,14 @@ TST_NOFILE	:=				\
 		helper_zombie_child		\
 		clone_fs			\
 		macvlan			\
-		sit				\
 		cr_veth				\
 		sock_peercred			\
-		s390x_mmap_high			\
-		uffd-events			\
-		thread_different_uid_gid	\
-		pipe03				\
-		netns_sub			\
-		netns_sub_veth			\
-		unlink_multiple_largefiles	\
 #		jobctl00			\
 
 ifneq ($(SRCARCH),arm)
 ifneq ($(COMPAT_TEST),y)
         TST_NOFILE += maps03
 endif
-endif
-
-ifeq ($(SRCARCH),s390)
-        TST_NOFILE +=	s390x_regs_check	\
-			s390x_gs_threads	\
-			s390x_runtime_instr
 endif
 
 TST_FILE	=				\
@@ -234,9 +198,6 @@ TST_FILE	=				\
 		unlink_fstat01+			\
 		unlink_fstat02			\
 		unlink_fstat03			\
-		ghost_holes00			\
-		ghost_holes01			\
-		ghost_holes02			\
 		unlink_largefile		\
 		mtime_mmap			\
 		fifo				\
@@ -257,11 +218,6 @@ TST_FILE	=				\
 		sockets00			\
 		sockets03			\
 		sockets_dgram			\
-		file_lease00			\
-		file_lease01			\
-		file_lease02			\
-		file_lease03			\
-		file_lease04			\
 		file_locks00			\
 		file_locks01			\
 		file_locks02			\
@@ -292,8 +248,6 @@ TST_DIR		=				\
 		mnt_ro_bind			\
 		mount_paths			\
 		bind-mount			\
-		shared_mount_propagation	\
-		overmount_with_shared_parent	\
 		inotify00			\
 		inotify01			\
 		inotify02			\
@@ -303,15 +257,12 @@ TST_DIR		=				\
 		cgroup02			\
 		cgroup03			\
 		cgroup04			\
-		cgroup_ifpriomap		\
 		cgroup_stray		\
 		unlink_fstat04			\
-		unlink_fstat041			\
 		mntns_remap			\
 		mntns_open			\
 		mntns_link_remap		\
 		mntns_ghost			\
-		mntns_ghost01			\
 		mntns_ro_root			\
 		mntns_link_ghost		\
 		mntns_shared_bind		\
@@ -331,7 +282,6 @@ TST_DIR		=				\
 		mnt_enablefs			\
 		autofs				\
 		del_standalone_un		\
-		sk-unix-mntns			\
 
 TST_DIR_FILE	=				\
 		chroot				\
@@ -353,9 +303,8 @@ TST_STATE	=				\
 		conntracks			\
 		route_rules			\
 
-AUX_SRC	= get_smaps_bits.c ofd_file_locks.c
 
-SRC	= $(TST:%=%.c) $(AUX_SRC)
+SRC	= $(TST:%=%.c)
 OBJ	= $(SRC:%.c=%.o)
 DEP	= $(SRC:%.c=%.d)
 PID	= $(TST:%=%.pid)
@@ -363,11 +312,16 @@ OUT	= $(TST:%=%.out)
 STATE	= $(TST_STATE:%=%.state)
 STATE_OUT	= $(TST_STATE:%=%.out)
 
-include ../Makefile.inc
+%: %.c
+	$(Q)echo $@ >> .gitignore
+	$(CC) $(CFLAGS) $(CPPFLAGS) $(LDFLAGS) $(LOADLIBES) $^ $(LDLIBS) -o $@
 
 all:	$(TST) criu-rtc.so
 install: all
 .PHONY: all install
+
+inotify_system_nodel.c: inotify_system.c
+	ln -sf inotify_system.c inotify_system_nodel.c
 
 $(TST_NOFILE:%=%.pid):	%.pid:	%
 	$(<D)/$(<F) --pidfile=$@ --outfile=$<.out
@@ -435,118 +389,100 @@ wait_stop:
 		i=`expr $$i + 1`; \
 	done
 
-$(TST):	| $(LIB)
+$(TST):	$(LIB)
 
-aio00:			LDLIBS += -laio
-different_creds:	LDLIBS += -lcap
-file_locks06 file_locks07 file_locks08:	ofd_file_locks.o
-futex:			CFLAGS += -pthread
-futex:			LDFLAGS += -pthread
-futex-rl:		CFLAGS += -pthread
-futex-rl:		LDFLAGS += -pthread
-jobctl00:		LDLIBS += -lutil
-socket_listen:		LDLIBS += -lrt -pthread
-socket_aio:		LDLIBS += -lrt -pthread
-uptime_grow:		LDLIBS += -lrt -pthread
-unlink_largefile:	CFLAGS += -D_FILE_OFFSET_BITS=64 -D_LARGEFILE64_SOURCE
-inotify_system_nodel:	CFLAGS += -DNODEL
-pthread00:		LDLIBS += -pthread
-pthread01:		LDLIBS += -pthread
-pthread02:		LDLIBS += -pthread
-different_creds:	LDLIBS += -pthread
-sigpending:		LDLIBS += -pthread
-sigaltstack:		LDLIBS += -pthread
-seccomp_filter_tsync:	LDLIBS += -pthread
-shm:			CFLAGS += -DNEW_IPC_NS
-msgque:			CFLAGS += -DNEW_IPC_NS
-sem:			CFLAGS += -DNEW_IPC_NS
-posix_timers:		LDLIBS += -lrt -pthread
-remap_dead_pid_root:	CFLAGS += -DREMAP_PID_ROOT
-socket-tcp6:		CFLAGS += -D ZDTM_IPV6
-socket-tcp4v6:		CFLAGS += -D ZDTM_IPV4V6
-socket-tcpbuf6:		CFLAGS += -D ZDTM_IPV6
-socket-tcpbuf-local:	CFLAGS += -D ZDTM_TCP_LOCAL
-socket-tcpbuf6-local:	CFLAGS += -D ZDTM_TCP_LOCAL -D ZDTM_IPV6
-socket-tcp6-local:	CFLAGS += -D ZDTM_TCP_LOCAL -D ZDTM_IPV6
-socket-tcp4v6-local:	CFLAGS += -D ZDTM_TCP_LOCAL -D ZDTM_IPV4V6
-socket-tcp-local:	CFLAGS += -D ZDTM_TCP_LOCAL
-socket-tcp-nfconntrack: CFLAGS += -D ZDTM_TCP_LOCAL -DZDTM_CONNTRACK
-socket_listen6:		CFLAGS += -D ZDTM_IPV6
-socket_listen4v6:	CFLAGS += -D ZDTM_IPV4V6
-socket-tcp6-closed:	CFLAGS += -D ZDTM_IPV6
-socket-tcp6-closed:	CFLAGS += -D ZDTM_IPV4V6
-socket-tcp-closed-last-ack:	CFLAGS += -D ZDTM_TCP_LAST_ACK
-tun_ns:			CFLAGS += -DTUN_NS
-mnt_ext_manual:		CFLAGS += -D ZDTM_EXTMAP_MANUAL
-sigpending:		LDLIBS += -lrt
-vdso01:			LDLIBS += -lrt
-scm01:			CFLAGS += -DKEEP_SENT_FD
-scm02:			CFLAGS += -DSEND_BOTH
-scm04:			CFLAGS += -DSEPARATE
-mntns_link_remap:	CFLAGS += -DZDTM_LINK_REMAP
-mntns_shared_bind02:	CFLAGS += -DSHARED_BIND02
-mntns_root_bind02:	CFLAGS += -DROOT_BIND02
-maps02: get_smaps_bits.o
-mlock_setuid: get_smaps_bits.o
-inotify01:		CFLAGS += -DINOTIFY01
-unlink_fstat01+:	CFLAGS += -DUNLINK_OVER
-unlink_fstat04:		CFLAGS += -DUNLINK_FSTAT04
-unlink_fstat041:		CFLAGS += -DUNLINK_FSTAT041 -DUNLINK_FSTAT04
-ghost_holes01:		CFLAGS += -DTAIL_HOLE
-ghost_holes02:		CFLAGS += -DHEAD_HOLE
-sk-freebind-false:	CFLAGS += -DZDTM_FREEBIND_FALSE
-stopped01:		CFLAGS += -DZDTM_STOPPED_KILL
-stopped02:		CFLAGS += -DZDTM_STOPPED_TKILL
-stopped12:		CFLAGS += -DZDTM_STOPPED_KILL -DZDTM_STOPPED_TKILL
-clone_fs:		LDLIBS += -pthread
-# As generating dependencies won't work without proper includes,
-# we have to explicitly specify both .o and .d for this case:
-netns_sub_veth.o netns_sub_veth.d:	CPPFLAGS += -I/usr/include/libnl3
-netns_sub_veth:		LDLIBS += -lnl-3 -l nl-route-3
+aio00:			override LDLIBS += -laio
+different_creds:	override LDLIBS += -lcap
+futex.o:		override CFLAGS += -pthread
+futex:			override LDFLAGS += -pthread
+futex-rl.o:		override CFLAGS += -pthread
+futex-rl:		override LDFLAGS += -pthread
+jobctl00:		override LDLIBS += -lutil
+socket_listen:		override LDLIBS += -lrt -pthread
+socket_aio:		override LDLIBS += -lrt -pthread
+uptime_grow:	override LDLIBS += -lrt -pthread
+unlink_largefile:	override CFLAGS += -D_FILE_OFFSET_BITS=64 -D_LARGEFILE64_SOURCE
+inotify_system_nodel:	override CFLAGS += -DNODEL
+pthread00:		override LDLIBS += -pthread
+pthread01:		override LDLIBS += -pthread
+pthread02:		override LDLIBS += -pthread
+different_creds:	override LDLIBS += -pthread
+sigpending:		override LDLIBS += -pthread
+sigaltstack:		override LDLIBS += -pthread
+seccomp_filter_tsync:		override LDLIBS += -pthread
+shm:			override CFLAGS += -DNEW_IPC_NS
+msgque:			override CFLAGS += -DNEW_IPC_NS
+sem:			override CFLAGS += -DNEW_IPC_NS
+posix_timers:		override LDLIBS += -lrt -pthread
+remap_dead_pid_root:	override CFLAGS += -DREMAP_PID_ROOT
+socket-tcp6: override CFLAGS += -D ZDTM_IPV6
+socket-tcpbuf6: override CFLAGS += -D ZDTM_IPV6
+socket-tcpbuf-local: override CFLAGS += -D ZDTM_TCP_LOCAL
+socket-tcpbuf6-local: override CFLAGS += -D ZDTM_TCP_LOCAL -D ZDTM_IPV6
+socket-tcp6-local: override CFLAGS += -D ZDTM_TCP_LOCAL -D ZDTM_IPV6
+socket-tcp-local: override CFLAGS += -D ZDTM_TCP_LOCAL
+socket-tcp-nfconntrack: override CFLAGS += -D ZDTM_TCP_LOCAL -DZDTM_CONNTRACK
+socket_listen6: override CFLAGS += -D ZDTM_IPV6
+socket-tcp6-closed: override CFLAGS += -D ZDTM_IPV6
+socket-tcp-closed-last-ack: override CFLAGS += -D ZDTM_TCP_LAST_ACK
+mnt_ext_manual: override CFLAGS += -D ZDTM_EXTMAP_MANUAL
+sigpending:		override LDLIBS += -lrt
+vdso01:			override LDLIBS += -lrt
+mntns_link_remap:	override CFLAGS += -DZDTM_LINK_REMAP
+mntns_shared_bind02:		override CFLAGS += -DSHARED_BIND02
+mntns_root_bind02:	override CFLAGS += -DROOT_BIND02
+maps02:		get_smaps_bits.o
+mlock_setuid:		get_smaps_bits.o
+inotify01:		override CFLAGS += -DINOTIFY01
+unlink_fstat01+:	override CFLAGS += -DUNLINK_OVER
+unlink_fstat04:		override CFLAGS += -DUNLINK_FSTAT04
+sk-freebind-false:	override CFLAGS += -DZDTM_FREEBIND_FALSE
+stopped01:	override CFLAGS += -DZDTM_STOPPED_KILL
+stopped02:	override CFLAGS += -DZDTM_STOPPED_TKILL
+stopped12:	override CFLAGS += -DZDTM_STOPPED_KILL -DZDTM_STOPPED_TKILL
+clone_fs:		override LDLIBS += -pthread
 
-socket-tcp-fin-wait1:	CFLAGS += -D ZDTM_TCP_FIN_WAIT1
-socket-tcp-fin-wait2:	CFLAGS += -D ZDTM_TCP_FIN_WAIT2
-socket-tcp6-fin-wait1:	CFLAGS += -D ZDTM_TCP_FIN_WAIT1 -D ZDTM_IPV6
-socket-tcp6-fin-wait2:	CFLAGS += -D ZDTM_TCP_FIN_WAIT2 -D ZDTM_IPV6
-socket-tcp4v6-fin-wait1:	CFLAGS += -D ZDTM_TCP_FIN_WAIT1 -D ZDTM_IPV4V6
-socket-tcp4v6-fin-wait2:	CFLAGS += -D ZDTM_TCP_FIN_WAIT2 -D ZDTM_IPV4V6
-socket-tcp-close-wait:	CFLAGS += -D ZDTM_TCP_CLOSE_WAIT
-socket-tcp6-close-wait:	CFLAGS += -D ZDTM_TCP_CLOSE_WAIT -D ZDTM_IPV6
-socket-tcp4v6-close-wait:	CFLAGS += -D ZDTM_TCP_CLOSE_WAIT -D ZDTM_IPV4V6
-socket-tcp-last-ack:	CFLAGS += -D ZDTM_TCP_LAST_ACK
-socket-tcp6-last-ack:	CFLAGS += -D ZDTM_TCP_LAST_ACK -D ZDTM_IPV6
-socket-tcp6-closing:	CFLAGS += -D ZDTM_IPV6
-socket-tcp6-unconn:	CFLAGS += -D ZDTM_IPV6
-socket-tcp4v6-last-ack:	CFLAGS += -D ZDTM_TCP_LAST_ACK -D ZDTM_IPV4V6
-socket-tcp4v6-closing:	CFLAGS += -D ZDTM_IPV4V6
+socket-tcp-fin-wait1:	override CFLAGS += -D ZDTM_TCP_FIN_WAIT1
+socket-tcp-fin-wait2:	override CFLAGS += -D ZDTM_TCP_FIN_WAIT2
+socket-tcp6-fin-wait1:	override CFLAGS += -D ZDTM_TCP_FIN_WAIT1 -D ZDTM_IPV6
+socket-tcp6-fin-wait2:	override CFLAGS += -D ZDTM_TCP_FIN_WAIT2 -D ZDTM_IPV6
+socket-tcp-close-wait:	override CFLAGS += -D ZDTM_TCP_CLOSE_WAIT
+socket-tcp6-close-wait:	override CFLAGS += -D ZDTM_TCP_CLOSE_WAIT -D ZDTM_IPV6
+socket-tcp-last-ack:	override CFLAGS += -D ZDTM_TCP_LAST_ACK
+socket-tcp6-last-ack:	override CFLAGS += -D ZDTM_TCP_LAST_ACK -D ZDTM_IPV6
+socket-tcp6-closing:	override CFLAGS += -D ZDTM_IPV6
+socket-tcp6-unconn:	override CFLAGS += -D ZDTM_IPV6
 
-pty-console:		CFLAGS += -D ZDTM_DEV_CONSOLE
-
-shm-unaligned:		CFLAGS += -DZDTM_SHM_UNALIGNED
-
-s390x_regs_check:	LDFLAGS += -pthread
-s390x_gs_threads:	LDFLAGS += -pthread
-
-thread_different_uid_gid:	LDLIBS += -pthread -lcap
+pty-console:		override CFLAGS += -D ZDTM_DEV_CONSOLE
 
 $(LIB):	force
 	$(Q) $(MAKE) -C $(LIBDIR)
 
-clean-more:
-	$(RM) criu-rtc.so criu-rtc.pb-c.c criu-rtc.pb-c.h
-.PHONY: clean-more
-clean: clean-more
+gitignore-clean:
+	$(RM) -f .gitignore
+
+clean:	gitignore-clean
+	$(RM) -f $(OBJ) $(TST) *~ criu-rtc.so criu-rtc.pb-c.c criu-rtc.pb-c.h get_smaps_bits.o
+
+cleandep:	clean
+	$(RM) -f $(DEP)
+
+cleanout:
+	$(RM) -f -r *.pid *.out* *.test* *.state
+
+%.cleanout: %
+	$(Q) $(RM) -f -r $<.pid* $<.out* *$<.test* $<.*.test $<.*.state $<.state
+
+realclean:	cleandep cleanout
 
 rtc.c: criu-rtc.so
 
 criu-rtc.pb-c.c: criu-rtc.proto
 	$(Q)echo $@ >> .gitignore
 	$(Q)echo $(@:%.c=%.h) >> .gitignore
-	$(E) " PBCC     " $@
-	$(Q)protoc-c --proto_path=. --c_out=. criu-rtc.proto
+	protoc-c --proto_path=. --c_out=. criu-rtc.proto
 
 criu-rtc.so: criu-rtc.c criu-rtc.pb-c.c
-	$(E) " LD       " $@
-	$(Q)$(CC) -g -Wall -shared -nostartfiles criu-rtc.c criu-rtc.pb-c.c -o criu-rtc.so -iquote ../../../criu/include -fPIC $(filter-out -m32,$(USERCFLAGS))
+	$(CC) -g -Wall -shared -nostartfiles criu-rtc.c criu-rtc.pb-c.c -o criu-rtc.so -iquote ../../../criu/include -fPIC $(USERCFLAGS)
 
-.PHONY:	force start check_start stop wait_stop
+.PHONY:	force clean cleandep cleanout realclean start check_start stop wait_stop

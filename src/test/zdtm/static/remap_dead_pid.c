@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include <string.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -35,13 +36,12 @@ int main(int argc, char **argv)
 	}
 
 	if (pid == 0) {
+		test_msg("child is %d\n", pid);
 		/* Child process just sleeps until it is killed. All we need
 		 * here is a process to open the mountinfo of. */
 		while(1)
 			sleep(10);
 	} else {
-		test_msg("child is %d\n", pid);
-
 		int fd, ret;
 		char path[PATH_MAX];
 		pid_t result;

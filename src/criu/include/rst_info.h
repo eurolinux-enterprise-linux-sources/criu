@@ -39,8 +39,6 @@ struct rst_info {
 
 	struct vm_area_list	vmas;
 	struct _MmEntry		*mm;
-	struct list_head	vma_io;
-	unsigned int		pages_img_id;
 
 	u32			cg_set;
 
@@ -60,8 +58,6 @@ struct rst_info {
 	 * restorer blob.
 	 */
 	bool			has_seccomp;
-
-	bool			has_thp_enabled;
 
 	void			*breakpoint;
 };

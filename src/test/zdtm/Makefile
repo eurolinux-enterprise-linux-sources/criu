@@ -1,13 +1,18 @@
-SUBDIRS	:=	lib static transition
+SUBDIRS	=	lib static transition
 
-all: $(SUBDIRS)
-.PHONY: all $(SUBDIRS)
+default:	all
+.PHONY: default lib static transition
 
-$(SUBDIRS):
-	$(MAKE) -C $@ all
+lib:
+	$(MAKE) -C lib all
 
 static: lib
-transition: lib
+	$(MAKE) -C static all
 
+transition: lib
+	$(MAKE) -C transition all
+
+all: lib static transition
+	@true
 %:
 	set -e; for d in $(SUBDIRS); do $(MAKE) -C $$d $@; done

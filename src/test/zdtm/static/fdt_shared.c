@@ -1,3 +1,4 @@
+#define _GNU_SOURCE             /* See feature_test_macros(7) */
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -62,7 +63,7 @@ static pid_t clone_child(int (*fn)(void *), int flags)
 
 static int child2(void *_arg)
 {
-	char buf[sizeof(TEST_STRING)];
+	char buf[10];
 
 	forked();
 	test_waitsig();
@@ -90,7 +91,7 @@ static int child3(void *_arg)
 
 static int child(void *_arg)
 {
-	char buf[sizeof(TEST_STRING)];
+	char buf[10];
 	pid_t pid, pid2;
 	int status;
 

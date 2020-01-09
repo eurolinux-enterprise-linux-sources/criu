@@ -144,9 +144,7 @@ static void inline mutex_lock(mutex_t *m)
 
 	while ((c = atomic_inc(&m->raw))) {
 		ret = sys_futex(&m->raw, FUTEX_WAIT, c + 1, NULL, NULL, 0);
-		if (ret < 0)
-			pr_perror("futex");
-		BUG_ON(ret < 0 && errno != -EWOULDBLOCK);
+		BUG_ON(ret < 0 && ret != -EWOULDBLOCK);
 	}
 }
 

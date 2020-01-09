@@ -1,3 +1,5 @@
+#define _GNU_SOURCE
+
 #include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -5,6 +7,8 @@
 #include <limits.h>
 #include <string.h>
 #include <signal.h>
+
+#include <bits/signum.h>
 
 #include <sys/wait.h>
 #include <sys/vfs.h>
@@ -30,7 +34,6 @@ TEST_OPTION(dirname, string, "directory name", 1);
 #define INDIRECT_MNT_DIR		"mnt"
 
 int autofs_dev;
-task_waiter_t t;
 
 static char *xvstrcat(char *str, const char *fmt, va_list args)
 {
@@ -218,21 +221,18 @@ static int check_fd(struct autofs_params *p)
 		ret++;
 	}
 	if (st.st_size != p->fd_stat.st_size) {
-		pr_err("%s: st_size differs: %lld != %lld\n", p->mountpoint,
-				(long long)st.st_size,
-				(long long)p->fd_stat.st_size);
+		pr_err("%s: st_size differs: %ld != %ld\n", p->mountpoint,
+				st.st_size, p->fd_stat.st_size);
 		ret++;
 	}
 	if (st.st_blksize != p->fd_stat.st_blksize) {
-		pr_err("%s: st_blksize differs %lld != %lld:\n", p->mountpoint,
-				(long long)st.st_blksize,
-				(long long)p->fd_stat.st_blksize);
+		pr_err("%s: st_blksize differs %ld != %ld:\n", p->mountpoint,
+				(long)st.st_blksize, (long)p->fd_stat.st_blksize);
 		ret++;
 	}
 	if (st.st_blocks != p->fd_stat.st_blocks) {
-		pr_err("%s: st_blocks differs: %lld != %lld\n", p->mountpoint,
-				(long long)st.st_blocks,
-				(long long)p->fd_stat.st_blocks);
+		pr_err("%s: st_blocks differs: %ld != %ld\n", p->mountpoint,
+				st.st_blocks, p->fd_stat.st_blocks);
 		ret++;
 	}
 
@@ -458,7 +458,7 @@ static int automountd_loop(int pipe, const char *mountpoint, struct autofs_param
 {
 	union autofs_v5_packet_union *packet;
 	ssize_t bytes;
-	size_t psize = sizeof(*packet);
+	size_t psize = sizeof(*packet) + 1;
 	int err = 0;
 
 	packet = malloc(psize);
@@ -471,7 +471,7 @@ static int automountd_loop(int pipe, const char *mountpoint, struct autofs_param
 	siginterrupt(SIGUSR2, 1);
 
 	while (!stop && !err) {
-		memset(packet, 0, psize);
+		memset(packet, 0, sizeof(*packet));
 
 		bytes = read(pipe, packet, psize);
 		if (bytes < 0) {
@@ -481,9 +481,12 @@ static int automountd_loop(int pipe, const char *mountpoint, struct autofs_param
 			}
 			continue;
 		}
-		if (bytes != psize) {
-			pr_err("read less than expected: %zd < %zd\n",
-					bytes, psize);
+		if (bytes == psize) {
+			pr_err("read more that expected\n");
+			return -EINVAL;
+		}
+		if (bytes != sizeof(*packet)) {
+			pr_err("read less than expected: %zd\n", bytes);
 			return -EINVAL;
 		}
 		err = automountd_serve(mountpoint, param, packet);
@@ -565,7 +568,6 @@ static int automountd(struct autofs_params *p, int control_fd)
 		goto err;
 	}
 	close(control_fd);
-	task_waiter_complete(&t, getpid());
 	return automountd_loop(pipes[0], autofs_path, p);
 
 err:
@@ -597,7 +599,6 @@ static int start_automounter(struct autofs_params *p)
 			close(control_fd[0]);
 			exit(automountd(p, control_fd[1]));
 	}
-	task_waiter_wait4(&t, pid);
 	p->pid = pid;
 
 	close(control_fd[1]);
@@ -875,8 +876,6 @@ int main(int argc, char **argv)
 	int ret = 0;
 
 	test_init(argc, argv);
-
-	task_waiter_init(&t);
 
 	if (mkdir(dirname, 0777) < 0) {
 		pr_perror("failed to create %s directory", dirname);

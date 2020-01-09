@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <errno.h>
 #include <unistd.h>
@@ -20,23 +21,9 @@
 #include "ns.h"
 
 futex_t sig_received;
-static struct {
-	futex_t stage;
-} *test_shared_state;
-
-enum {
-	TEST_INIT_STAGE = 0,
-	TEST_RUNNING_STAGE,
-	TEST_FINI_STAGE,
-	TEST_FAIL_STAGE,
-};
-
-static int parent;
 
 static void sig_hand(int signo)
 {
-	if (parent)
-		futex_set_and_wake(&test_shared_state->stage, TEST_FAIL_STAGE);
 	futex_set_and_wake(&sig_received, signo);
 }
 
@@ -222,26 +209,16 @@ void test_init(int argc, char **argv)
 	setup_outfile();
 	redir_stdfds();
 
-	test_shared_state = mmap(NULL, PAGE_SIZE, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_SHARED, 0, 0);
-	if (test_shared_state == MAP_FAILED) {
-		pr_perror("Unable to map a shared memory");
-		exit(1);
-	}
-
-	futex_init(&test_shared_state->stage);
-	futex_set(&test_shared_state->stage, TEST_INIT_STAGE);
-
 	pid = fork();
 	if (pid < 0) {
 		pr_perror("Daemonizing failed");
 		exit(1);
 	}
 
-	parent = 1;
 	if (pid) {	/* parent will exit when the child is ready */
-		futex_wait_while(&test_shared_state->stage, TEST_INIT_STAGE);
+		test_waitsig();
 
-		if (futex_get(&test_shared_state->stage) == TEST_FAIL_STAGE) {
+		if (futex_get(&sig_received) == SIGCHLD) {
 			int ret;
 			if (waitpid(pid, &ret, 0) != pid) {
 				pr_perror("Unable to wait %d", pid);
@@ -263,7 +240,6 @@ void test_init(int argc, char **argv)
 
 		_exit(0);
 	}
-	parent = 0;
 
 	if (setsid() < 0) {
 		pr_perror("Can't become session group leader");
@@ -284,7 +260,21 @@ void test_init(int argc, char **argv)
 
 void test_daemon()
 {
-	futex_set_and_wake(&test_shared_state->stage, TEST_RUNNING_STAGE);
+	pid_t ppid;
+
+	ppid = getppid();
+	if (ppid <= 1) {
+		pr_perror("Test orphaned");
+		goto out;
+	}
+
+	if (kill(ppid, SIGTERM))
+		goto out;
+	return;
+out:
+	/* kill out our process group for safety */
+	kill(0, SIGKILL);
+	exit(1);
 }
 
 int test_go(void)
@@ -295,18 +285,4 @@ int test_go(void)
 void test_waitsig(void)
 {
 	futex_wait_while(&sig_received, 0);
-}
-
-pid_t sys_clone_unified(unsigned long flags, void *child_stack, void *parent_tid,
-			void *child_tid, unsigned long newtls)
-{
-#ifdef __x86_64__
-	return (pid_t)syscall(__NR_clone, flags, child_stack, parent_tid, child_tid, newtls);
-#elif (__i386__ || __arm__ || __aarch64__ ||__powerpc64__)
-	return (pid_t)syscall(__NR_clone, flags, child_stack, parent_tid, newtls, child_tid);
-#elif __s390x__
-	return (pid_t)syscall(__NR_clone, child_stack, flags, parent_tid, child_tid, newtls);
-#else
-#error "Unsupported architecture"
-#endif
 }

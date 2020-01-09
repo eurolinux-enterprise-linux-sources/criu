@@ -43,7 +43,7 @@ LDFLAGS		:= $(filter-out $(LDFLAGS-MASK),$(LDFLAGS))
 #
 # Accumulate common flags.
 define nmk-ccflags
-        $(filter-out $(CFLAGS_REMOVE_$(@F)), $(CFLAGS) $(ccflags-y) $(CFLAGS_$(@F)))
+        $(CFLAGS) $(ccflags-y) $(CFLAGS_$(@F))
 endef
 
 define nmk-asflags
@@ -89,7 +89,7 @@ endif
 #
 # Prepare the unique entries.
 obj-y           := $(sort $(call uniq,$(obj-y)))
-lib-y           := $(filter-out $(obj-y),$(lib-y))
+lib-y           := $(filter-out $(obj-y),$(sort $(call uniq,$(lib-y))))
 
 #
 # Add subdir path
@@ -142,7 +142,7 @@ endif
 define gen-ld-target-rule
 $(1): $(3)
 	$$(call msg-link, $$@)
-	$$(Q) $$(LD) $(2) -o $$@ $(4)
+	$$(Q) $$(LD) $(2) -r -o $$@ $(4)
 endef
 
 define gen-ar-target-rule
@@ -281,7 +281,8 @@ endif
 
 #
 # Main phony rule.
-all: $(all-y) ;
+all: $(all-y)
+	@true
 .PHONY: all
 
 #

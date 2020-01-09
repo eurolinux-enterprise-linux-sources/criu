@@ -4,7 +4,6 @@
 #include <fcntl.h>
 #include <stdbool.h>
 
-#include "common/config.h"
 #include "common/list.h"
 #include "pid.h"
 #include "shmem.h"
@@ -16,7 +15,8 @@
 #include "rst-malloc.h"
 #include "vma.h"
 #include "mem.h"
-#include <compel/plugins/std/syscall-codes.h>
+#include "config.h"
+#include "syscall-codes.h"
 #include "bitops.h"
 #include "log.h"
 #include "types.h"
@@ -31,7 +31,7 @@
 #endif
 
 /*
- * Hash table and routines for keeping shmid -> shmem_xinfo mappings
+ * Hash table and routines for keeping shmid -> shmem_xinfo mappings 
  */
 
 /*
@@ -66,7 +66,7 @@ struct shmem_info {
 			int		fd;
 
 			/*
-			 * 0. lock is initialized to zero
+			 * 0. lock is initilized to zero
 			 * 1. the master opens a descriptor and set lock to 1
 			 * 2. slaves open their descriptors and increment lock
 			 * 3. the master waits all slaves on lock. After that
@@ -218,8 +218,6 @@ static void update_shmem_pmaps(struct shmem_info *si, u64 *map, VmaEntry *vma)
 		shmem_pfn = vma_pfn + DIV_ROUND_UP(vma->pgoff, PAGE_SIZE);
 		if (map[vma_pfn] & PME_SOFT_DIRTY)
 			set_pstate(si->pstate_map, shmem_pfn, PST_DIRTY);
-		else if (page_is_zero(map[vma_pfn]))
-			set_pstate(si->pstate_map, shmem_pfn, PST_ZERO);
 		else
 			set_pstate(si->pstate_map, shmem_pfn, PST_DUMP);
 	}
@@ -272,7 +270,7 @@ int fixup_sysv_shmems(void)
 			}
 
 			/*
-			 * See comment in open_shmem_sysv() about this PROT_EXEC
+			 * See comment in open_shmem_sysv() about this PROT_EXEC 
 			 */
 			if (si->want_write)
 				att->first->prot |= PROT_EXEC;
@@ -324,7 +322,7 @@ static int open_shmem_sysv(int pid, struct vma_area *vma)
 	 * whether to create the segment rw or ro, but the
 	 * first vma can have different protection. So the
 	 * segment ro-ness is marked with PROT_EXEC bit in
-	 * the first vma. Unfortunately, we only know this
+	 * the first vma. Unfortunatelly, we only know this
 	 * after we scan all the vmas, so this bit is set
 	 * at the end in fixup_sysv_shmems().
 	 */
@@ -438,7 +436,7 @@ int collect_shmem(int pid, struct vma_area *vma)
 	return 0;
 }
 
-static int shmem_wait_and_open(struct shmem_info *si, VmaEntry *vi)
+static int shmem_wait_and_open(int pid, struct shmem_info *si, VmaEntry *vi)
 {
 	char path[128];
 	int ret;
@@ -459,12 +457,12 @@ static int shmem_wait_and_open(struct shmem_info *si, VmaEntry *vi)
 	return 0;
 }
 
-static int do_restore_shmem_content(void *addr, unsigned long size, unsigned long shmid)
+static int restore_shmem_content(void *addr, struct shmem_info *si)
 {
 	int ret = 0;
 	struct page_read pr;
 
-	ret = open_page_read(shmid, &pr, PR_SHMEM);
+	ret = open_page_read(si->shmid, &pr, PR_SHMEM);
 	if (ret <= 0)
 		return -1;
 
@@ -479,7 +477,7 @@ static int do_restore_shmem_content(void *addr, unsigned long size, unsigned lon
 		vaddr = (unsigned long)decode_pointer(pr.pe->vaddr);
 		nr_pages = pr.pe->nr_pages;
 
-		if (vaddr + nr_pages * PAGE_SIZE > size)
+		if (vaddr + nr_pages * PAGE_SIZE > si->size)
 			break;
 
 		pr.read_pages(&pr, vaddr, nr_pages, addr + vaddr, 0);
@@ -487,16 +485,6 @@ static int do_restore_shmem_content(void *addr, unsigned long size, unsigned lon
 
 	pr.close(&pr);
 	return ret;
-}
-
-static int restore_shmem_content(void *addr, struct shmem_info *si)
-{
-	return do_restore_shmem_content(addr, si->size, si->shmid);
-}
-
-int restore_sysv_shmem_content(void *addr, unsigned long size, unsigned long shmid)
-{
-	return do_restore_shmem_content(addr, round_up(size, PAGE_SIZE), shmid);
 }
 
 static int open_shmem(int pid, struct vma_area *vma)
@@ -517,7 +505,7 @@ static int open_shmem(int pid, struct vma_area *vma)
 	BUG_ON(si->pid == SYSVIPC_SHMEM_PID);
 
 	if (si->pid != pid)
-		return shmem_wait_and_open(si, vi);
+		return shmem_wait_and_open(pid, si, vi);
 
 	if (si->fd != -1) {
 		f = dup(si->fd);
@@ -597,9 +585,6 @@ int add_shmem_area(pid_t pid, VmaEntry *vma, u64 *map)
 	struct shmem_info *si;
 	unsigned long size = vma->pgoff + (vma->end - vma->start);
 
-	if (vma_entry_is(vma, VMA_AREA_SYSVIPC))
-		pid = SYSVIPC_SHMEM_PID;
-
 	si = shmem_find(vma->shmid);
 	if (si) {
 		if (si->size < size) {
@@ -628,7 +613,7 @@ int add_shmem_area(pid_t pid, VmaEntry *vma, u64 *map)
 	return 0;
 }
 
-static int dump_pages(struct page_pipe *pp, struct page_xfer *xfer)
+static int dump_pages(struct page_pipe *pp, struct page_xfer *xfer, void *addr)
 {
 	struct page_pipe_buf *ppb;
 
@@ -640,7 +625,7 @@ static int dump_pages(struct page_pipe *pp, struct page_xfer *xfer)
 			return -1;
 		}
 
-	return page_xfer_dump_pages(xfer, pp);
+	return page_xfer_dump_pages(xfer, pp, (unsigned long)addr);
 }
 
 static int next_data_segment(int fd, unsigned long pfn,
@@ -670,24 +655,36 @@ static int next_data_segment(int fd, unsigned long pfn,
 	return 0;
 }
 
-static int do_dump_one_shmem(int fd, void *addr, struct shmem_info *si)
+static int dump_one_shmem(struct shmem_info *si)
 {
 	struct page_pipe *pp;
 	struct page_xfer xfer;
-	int err, ret = -1;
+	int err, ret = -1, fd;
+	void *addr = NULL;
 	unsigned long pfn, nrpages, next_data_pnf = 0, next_hole_pfn = 0;
+
+	pr_info("Dumping shared memory %ld\n", si->shmid);
+
+	fd = open_proc(si->pid, "map_files/%lx-%lx", si->start, si->end);
+	if (fd < 0)
+		goto err;
+
+	addr = mmap(NULL, si->size, PROT_READ, MAP_SHARED, fd, 0);
+	if (addr == MAP_FAILED) {
+		pr_err("Can't map shmem 0x%lx (0x%lx-0x%lx)\n",
+				si->shmid, si->start, si->end);
+		goto err;
+	}
 
 	nrpages = (si->size + PAGE_SIZE - 1) / PAGE_SIZE;
 
 	pp = create_page_pipe((nrpages + 1) / 2, NULL, PP_CHUNK_MODE);
 	if (!pp)
-		goto err;
+		goto err_unmap;
 
 	err = open_page_xfer(&xfer, CR_FD_SHMEM_PAGEMAP, si->shmid);
 	if (err)
 		goto err_pp;
-
-	xfer.offset = (unsigned long)addr;
 
 	for (pfn = 0; pfn < nrpages; pfn++) {
 		unsigned int pgstate = PST_DIRTY;
@@ -698,7 +695,7 @@ static int do_dump_one_shmem(int fd, void *addr, struct shmem_info *si)
 		    next_data_segment(fd, pfn, &next_data_pnf, &next_hole_pfn))
 			goto err_xfer;
 
-		if (si->pstate_map && is_shmem_tracking_en()) {
+		if (is_shmem_tracking_en()) {
 			pgstate = get_pstate(si->pstate_map, pfn);
 			use_mc = pgstate == PST_DONT_DUMP;
 		}
@@ -715,12 +712,12 @@ again:
 		if (pgstate == PST_ZERO)
 			ret = 0;
 		else if (xfer.parent && page_in_parent(pgstate == PST_DIRTY))
-			ret = page_pipe_add_hole(pp, pgaddr, PP_HOLE_PARENT);
+			ret = page_pipe_add_hole(pp, pgaddr);
 		else
-			ret = page_pipe_add_page(pp, pgaddr, 0);
+			ret = page_pipe_add_page(pp, pgaddr);
 
 		if (ret == -EAGAIN) {
-			ret = dump_pages(pp, &xfer);
+			ret = dump_pages(pp, &xfer, addr);
 			if (ret)
 				goto err_xfer;
 			page_pipe_reinit(pp);
@@ -729,65 +726,16 @@ again:
 			goto err_xfer;
 	}
 
-	ret = dump_pages(pp, &xfer);
+	ret = dump_pages(pp, &xfer, addr);
 
 err_xfer:
 	xfer.close(&xfer);
 err_pp:
 	destroy_page_pipe(pp);
+err_unmap:
+	munmap(addr,  si->size);
 err:
-	return ret;
-}
-
-static int dump_one_shmem(struct shmem_info *si)
-{
-	int fd, ret = -1;
-	void *addr;
-
-	pr_info("Dumping shared memory %ld\n", si->shmid);
-
-	fd = open_proc(si->pid, "map_files/%lx-%lx", si->start, si->end);
-	if (fd < 0)
-		goto err;
-
-	addr = mmap(NULL, si->size, PROT_READ, MAP_SHARED, fd, 0);
-	if (addr == MAP_FAILED) {
-		pr_err("Can't map shmem 0x%lx (0x%lx-0x%lx)\n",
-				si->shmid, si->start, si->end);
-		goto errc;
-	}
-
-	ret = do_dump_one_shmem(fd, addr, si);
-
-	munmap(addr, si->size);
-errc:
-	close(fd);
-err:
-	return ret;
-}
-
-int dump_one_sysv_shmem(void *addr, unsigned long size, unsigned long shmid)
-{
-	int fd, ret;
-	struct shmem_info *si, det;
-
-	si = shmem_find(shmid);
-	if (!si) {
-		pr_info("Detached shmem...\n");
-		det.pid = SYSVIPC_SHMEM_PID;
-		det.shmid = shmid;
-		det.size = round_up(size, PAGE_SIZE);
-		det.pstate_map = NULL;
-		si = &det;
-	}
-
-	fd = open_proc(PROC_SELF, "map_files/%lx-%lx",
-			(unsigned long)addr, (unsigned long)addr + si->size);
-	if (fd < 0)
-		return -1;
-
-	ret = do_dump_one_shmem(fd, addr, si);
-	close(fd);
+	close_safe(&fd);
 	return ret;
 }
 
@@ -797,8 +745,6 @@ int cr_dump_shmem(void)
 	struct shmem_info *si;
 
 	for_each_shmem(i, si) {
-		if (si->pid == SYSVIPC_SHMEM_PID)
-			continue;
 		ret = dump_one_shmem(si);
 		if (ret)
 			goto out;

@@ -19,20 +19,17 @@
 
 #include <dlfcn.h>
 
-#include <sys/utsname.h>
-
-#include <sys/time.h>
-#include <sys/resource.h>
-
 #include "int.h"
 #include "page.h"
 #include "common/compiler.h"
 #include "crtools.h"
 #include "cr_options.h"
 #include "external.h"
+#include "sockets.h"
 #include "files.h"
 #include "sk-inet.h"
 #include "net.h"
+#include "netfilter.h"
 #include "version.h"
 #include "page-xfer.h"
 #include "tty.h"
@@ -52,10 +49,11 @@
 #include "fault-injection.h"
 #include "lsm.h"
 #include "proc_parse.h"
-#include "kerndat.h"
 
 #include "setproctitle.h"
 #include "sysctl.h"
+
+#include "../soccr/soccr.h"
 
 struct cr_options opts;
 
@@ -211,27 +209,8 @@ bool deprecated_ok(char *what)
 	return false;
 }
 
-static void rlimit_unlimit_nofile_self(void)
-{
-	struct rlimit new;
-
-	new.rlim_cur = kdat.sysctl_nr_open;
-	new.rlim_max = kdat.sysctl_nr_open;
-
-	if (prlimit(getpid(), RLIMIT_NOFILE, &new, NULL)) {
-		pr_perror("rlimir: Can't setup RLIMIT_NOFILE for self");
-		return;
-	} else
-		pr_debug("rlimit: RLIMIT_NOFILE unlimited for self\n");
-}
-
 int main(int argc, char *argv[], char *envp[])
 {
-
-#define BOOL_OPT(OPT_NAME, SAVE_TO) \
-		{OPT_NAME, no_argument, SAVE_TO, true},\
-		{"no-" OPT_NAME, no_argument, SAVE_TO, false}
-
 	pid_t pid = 0, tree_id = 0;
 	int ret = -1;
 	bool usage_error = true;
@@ -246,9 +225,9 @@ int main(int argc, char *argv[], char *envp[])
 		{ "pid",			required_argument,	0, 'p'	},
 		{ "leave-stopped",		no_argument,		0, 's'	},
 		{ "leave-running",		no_argument,		0, 'R'	},
-		BOOL_OPT("restore-detached", &opts.restore_detach),
-		BOOL_OPT("restore-sibling", &opts.restore_sibling),
-		BOOL_OPT("daemon", &opts.restore_detach),
+		{ "restore-detached",		no_argument,		0, 'd'	},
+		{ "restore-sibling",		no_argument,		0, 'S'	},
+		{ "daemon",			no_argument,		0, 'd'	},
 		{ "contents",			no_argument,		0, 'c'	},
 		{ "file",			required_argument,	0, 'f'	},
 		{ "fields",			required_argument,	0, 'F'	},
@@ -259,27 +238,27 @@ int main(int argc, char *argv[], char *envp[])
 		{ "root",			required_argument,	0, 'r'	},
 		{ USK_EXT_PARAM,		optional_argument,	0, 'x'	},
 		{ "help",			no_argument,		0, 'h'	},
-		BOOL_OPT(SK_EST_PARAM, &opts.tcp_established_ok),
+		{ SK_EST_PARAM,			no_argument,		0, 1042	},
 		{ "close",			required_argument,	0, 1043	},
-		BOOL_OPT("log-pid", &opts.log_file_per_pid),
+		{ "log-pid",			no_argument,		0, 1044	},
 		{ "version",			no_argument,		0, 'V'	},
-		BOOL_OPT("evasive-devices", &opts.evasive_devices),
+		{ "evasive-devices",		no_argument,		0, 1045	},
 		{ "pidfile",			required_argument,	0, 1046	},
 		{ "veth-pair",			required_argument,	0, 1047	},
 		{ "action-script",		required_argument,	0, 1049	},
-		BOOL_OPT(LREMAP_PARAM, &opts.link_remap_ok),
-		BOOL_OPT(OPT_SHELL_JOB, &opts.shell_job),
-		BOOL_OPT(OPT_FILE_LOCKS, &opts.handle_file_locks),
-		BOOL_OPT("page-server", &opts.use_page_server),
+		{ LREMAP_PARAM,			no_argument,		0, 1041	},
+		{ OPT_SHELL_JOB,		no_argument,		0, 'j'	},
+		{ OPT_FILE_LOCKS,		no_argument,		0, 'l'	},
+		{ "page-server",		no_argument,		0, 1050	},
 		{ "address",			required_argument,	0, 1051	},
 		{ "port",			required_argument,	0, 1052	},
 		{ "prev-images-dir",		required_argument,	0, 1053	},
 		{ "ms",				no_argument,		0, 1054	},
-		BOOL_OPT("track-mem", &opts.track_mem),
-		BOOL_OPT("auto-dedup", &opts.auto_dedup),
+		{ "track-mem",			no_argument,		0, 1055	},
+		{ "auto-dedup",			no_argument,		0, 1056	},
 		{ "libdir",			required_argument,	0, 'L'	},
 		{ "cpu-cap",			optional_argument,	0, 1057	},
-		BOOL_OPT("force-irmap", &opts.force_irmap),
+		{ "force-irmap",		no_argument,		0, 1058	},
 		{ "ext-mount-map",		required_argument,	0, 'M'	},
 		{ "exec-cmd",			no_argument,		0, 1059	},
 		{ "manage-cgroups",		optional_argument,	0, 1060	},
@@ -288,8 +267,8 @@ int main(int argc, char *argv[], char *envp[])
 		{ "feature",			required_argument,	0, 1063	},
 		{ "skip-mnt",			required_argument,	0, 1064 },
 		{ "enable-fs",			required_argument,	0, 1065 },
-		{ "enable-external-sharing", 	no_argument, 		&opts.enable_external_sharing, true	},
-		{ "enable-external-masters", 	no_argument, 		&opts.enable_external_masters, true	},
+		{ "enable-external-sharing", 	no_argument, 		0, 1066 },
+		{ "enable-external-masters", 	no_argument, 		0, 1067 },
 		{ "freeze-cgroup",		required_argument,	0, 1068 },
 		{ "ghost-limit",		required_argument,	0, 1069 },
 		{ "irmap-scan-path",		required_argument,	0, 1070 },
@@ -297,31 +276,23 @@ int main(int argc, char *argv[], char *envp[])
 		{ "timeout",			required_argument,	0, 1072 },
 		{ "external",			required_argument,	0, 1073	},
 		{ "empty-ns",			required_argument,	0, 1074	},
-		{ "lazy-pages",			no_argument,		0, 1076 },
-		BOOL_OPT("extra", &opts.check_extra_features),
-		BOOL_OPT("experimental", &opts.check_experimental_features),
+		{ "extra",			no_argument,		0, 1077	},
+		{ "experimental",		no_argument,		0, 1078	},
 		{ "all",			no_argument,		0, 1079	},
 		{ "cgroup-props",		required_argument,	0, 1080	},
 		{ "cgroup-props-file",		required_argument,	0, 1081	},
 		{ "cgroup-dump-controller",	required_argument,	0, 1082	},
-		BOOL_OPT(SK_INFLIGHT_PARAM, &opts.tcp_skip_in_flight),
-		BOOL_OPT("deprecated", &opts.deprecated_ok),
-		BOOL_OPT("display-stats", &opts.display_stats),
-		BOOL_OPT("weak-sysctls", &opts.weak_sysctls),
+		{ SK_INFLIGHT_PARAM,		no_argument,		0, 1083	},
+		{ "deprecated",			no_argument,		0, 1084 },
+		{ "display-stats",		no_argument,		0, 1086 },
+		{ "weak-sysctls",		no_argument,		0, 1087 },
 		{ "status-fd",			required_argument,	0, 1088 },
-		BOOL_OPT(SK_CLOSE_PARAM, &opts.tcp_close),
-		{ "verbosity",			optional_argument,	0, 'v'	},
 		{ },
 	};
-
-#undef BOOL_OPT
 
 	BUILD_BUG_ON(PAGE_SIZE != PAGE_IMAGE_SIZE);
 	BUILD_BUG_ON(CTL_32 != SYSCTL_TYPE__CTL_32);
 	BUILD_BUG_ON(__CTL_STR != SYSCTL_TYPE__CTL_STR);
-	/* We use it for fd overlap handling in clone_service_fd() */
-	BUG_ON(get_service_fd(SERVICE_FD_MIN+1) <
-	       get_service_fd(SERVICE_FD_MAX-1));
 
 	if (fault_injection_init())
 		return 1;
@@ -334,28 +305,7 @@ int main(int argc, char *argv[], char *envp[])
 
 	init_opts();
 
-	/*
-	 * Service fd engine implies that file descritprs
-	 * used won't be borrowed by the rest of the code
-	 * and default 1024 limit is not enough for high
-	 * loaded test/containers. Thus use kdat engine
-	 * to fetch current system level limit for numbers
-	 * of files allowed to open up and lift up own
-	 * limits.
-	 *
-	 * Note we have to do it before the service fd
-	 * get inited and we dont exit with errors here
-	 * because in worst scenario where clash of fd
-	 * happen we simply exit with explicit error
-	 * during real action stage.
-	 */
-	if (!kerndat_files_stat(true))
-		rlimit_unlimit_nofile_self();
-
 	if (init_service_fd())
-		return 1;
-
-	if (kerndat_init())
 		return 1;
 
 	if (!strcmp(argv[1], "swrk")) {
@@ -376,8 +326,6 @@ int main(int argc, char *argv[], char *envp[])
 		opt = getopt_long(argc, argv, short_opts, long_opts, &idx);
 		if (opt == -1)
 			break;
-		if (!opt)
-			continue;
 
 		switch (opt) {
 		case 's':
@@ -442,6 +390,14 @@ int main(int argc, char *argv[], char *envp[])
 			} else
 				log_level++;
 			break;
+		case 1041:
+			pr_info("Will allow link remaps on FS\n");
+			opts.link_remap_ok = true;
+			break;
+		case 1042:
+			pr_info("Will dump TCP connections\n");
+			opts.tcp_established_ok = true;
+			break;
 		case 1043: {
 			int fd;
 
@@ -450,6 +406,12 @@ int main(int argc, char *argv[], char *envp[])
 			close(fd);
 			break;
 		}
+		case 1044:
+			opts.log_file_per_pid = 1;
+			break;
+		case 1045:
+			opts.evasive_devices = true;
+			break;
 		case 1046:
 			opts.pidfile = optarg;
 			break;
@@ -471,6 +433,9 @@ int main(int argc, char *argv[], char *envp[])
 				return 1;
 
 			break;
+		case 1050:
+			opts.use_page_server = true;
+			break;
 		case 1051:
 			opts.addr = optarg;
 			break;
@@ -487,6 +452,12 @@ int main(int argc, char *argv[], char *envp[])
 			break;
 		case 1053:
 			opts.img_parent = optarg;
+			break;
+		case 1055:
+			opts.track_mem = true;
+			break;
+		case 1056:
+			opts.auto_dedup = true;
 			break;
 		case 1057:
 			if (parse_cpu_cap(&opts, optarg))
@@ -545,6 +516,12 @@ int main(int argc, char *argv[], char *envp[])
 			if (!add_fsname_auto(optarg))
 				return 1;
 			break;
+		case 1066:
+			opts.enable_external_sharing = true;
+			break;
+		case 1067:
+			opts.enable_external_masters = true;
+			break;
 		case 1068:
 			opts.freeze_cgroup = optarg;
 			break;
@@ -556,14 +533,11 @@ int main(int argc, char *argv[], char *envp[])
 				return -1;
 			break;
 		case 1071:
-			opts.lsm_profile = optarg;
-			opts.lsm_supplied = true;
+			if (parse_lsm_arg(optarg) < 0)
+				return -1;
 			break;
 		case 1072:
 			opts.timeout = atoi(optarg);
-			break;
-		case 1076:
-			opts.lazy_pages = true;
 			break;
 		case 'M':
 			{
@@ -591,10 +565,15 @@ int main(int argc, char *argv[], char *envp[])
 			if (!strcmp("net", optarg))
 				opts.empty_ns |= CLONE_NEWNET;
 			else {
-				pr_err("Unsupported empty namespace: %s\n",
-						optarg);
+				pr_err("Unsupported empty namespace: %s", optarg);
 				return 1;
 			}
+			break;
+		case 1077:
+			opts.check_extra_features = true;
+			break;
+		case 1078:
+			opts.check_experimental_features = true;
 			break;
 		case 1079:
 			opts.check_extra_features = true;
@@ -609,6 +588,21 @@ int main(int argc, char *argv[], char *envp[])
 		case 1082:
 			if (!cgp_add_dump_controller(optarg))
 				return 1;
+			break;
+		case 1083:
+			pr_msg("Will skip in-flight TCP connections\n");
+			opts.tcp_skip_in_flight = true;
+			break;
+		case 1084:
+			pr_msg("Turn deprecated stuff ON\n");
+			opts.deprecated_ok = true;
+			break;
+		case 1086:
+			opts.display_stats = true;
+			break;
+		case 1087:
+			pr_msg("Will skip non-existant sysctls on restore\n");
+			opts.weak_sysctls = true;
 			break;
 		case 1088:
 			if (sscanf(optarg, "%d", &opts.status_fd) != 1) {
@@ -628,17 +622,6 @@ int main(int argc, char *argv[], char *envp[])
 			goto usage;
 		}
 	}
-
-	if (opts.deprecated_ok)
-		pr_msg("Turn deprecated stuff ON\n");
-	if (opts.tcp_skip_in_flight)
-		pr_msg("Will skip in-flight TCP connections\n");
-	if (opts.tcp_established_ok)
-		pr_info("Will dump TCP connections\n");
-	if (opts.link_remap_ok)
-		pr_info("Will allow link remaps on FS\n");
-	if (opts.weak_sysctls)
-		pr_msg("Will skip non-existant sysctls on restore\n");
 
 	if (getenv("CRIU_DEPRECATED")) {
 		pr_msg("Turn deprecated stuff ON via env\n");
@@ -661,11 +644,6 @@ int main(int argc, char *argv[], char *envp[])
 	if (optind >= argc) {
 		pr_msg("Error: command is required\n");
 		goto usage;
-	}
-
-	if (!strcmp(argv[optind], "exec")) {
-		pr_msg("The \"exec\" action is deprecated by the Compel library.\n");
-		return -1;
 	}
 
 	has_sub_command = (argc - optind) > 1;
@@ -693,7 +671,8 @@ int main(int argc, char *argv[], char *envp[])
 		opts.exec_cmd[argc - optind - 1] = NULL;
 	} else {
 		/* No subcommands except for cpuinfo and restore --exec-cmd */
-		if (strcmp(argv[optind], "cpuinfo") && has_sub_command) {
+		if ((strcmp(argv[optind], "cpuinfo") && strcmp(argv[optind], "exec"))
+				&& has_sub_command) {
 			pr_msg("Error: excessive parameter%s for command %s\n",
 				(argc - optind) > 2 ? "s" : "", argv[optind]);
 			goto usage;
@@ -726,7 +705,9 @@ int main(int argc, char *argv[], char *envp[])
 
 	if (log_init(opts.output))
 		return 1;
+	libsoccr_set_log(log_level, print_on_level);
 
+	pr_debug("Version: %s (gitid %s)\n", CRIU_VERSION, CRIU_GITID);
 	if (opts.deprecated_ok)
 		pr_debug("DEPRECATED ON\n");
 
@@ -743,6 +724,9 @@ int main(int argc, char *argv[], char *envp[])
 		pr_info("Will do snapshot from %s\n", opts.img_parent);
 
 	if (!strcmp(argv[optind], "dump")) {
+		preload_socket_modules();
+		preload_netfilter_modules();
+
 		if (!tree_id)
 			goto opt_pid_missing;
 		return cr_dump_tasks(tree_id);
@@ -756,6 +740,7 @@ int main(int argc, char *argv[], char *envp[])
 	}
 
 	if (!strcmp(argv[optind], "restore")) {
+		preload_netfilter_modules();
 		if (tree_id)
 			pr_warn("Using -t with criu restore is obsoleted\n");
 
@@ -776,14 +761,19 @@ int main(int argc, char *argv[], char *envp[])
 		return -1;
 	}
 
-	if (!strcmp(argv[optind], "lazy-pages"))
-		return cr_lazy_pages(opts.daemon_mode) != 0;
-
 	if (!strcmp(argv[optind], "check"))
 		return cr_check() != 0;
 
+	if (!strcmp(argv[optind], "exec")) {
+		if (!pid)
+			pid = tree_id; /* old usage */
+		if (!pid)
+			goto opt_pid_missing;
+		return cr_exec(pid, argv + optind + 1) != 0;
+	}
+
 	if (!strcmp(argv[optind], "page-server"))
-		return cr_page_server(opts.daemon_mode, false, -1) != 0;
+		return cr_page_server(opts.daemon_mode, -1) != 0;
 
 	if (!strcmp(argv[optind], "service"))
 		return cr_service(opts.daemon_mode);
@@ -809,16 +799,17 @@ usage:
 "  criu dump|pre-dump -t PID [<options>]\n"
 "  criu restore [<options>]\n"
 "  criu check [--feature FEAT]\n"
+"  criu exec -p PID <syscall-string>\n"
 "  criu page-server\n"
 "  criu service [<options>]\n"
 "  criu dedup\n"
-"  criu lazy-pages -D DIR [<options>]\n"
 "\n"
 "Commands:\n"
 "  dump           checkpoint a process/tree identified by pid\n"
 "  pre-dump       pre-dump task(s) minimizing their frozen time\n"
 "  restore        restore a process/tree\n"
 "  check          checks whether the kernel support is up-to-date\n"
+"  exec           execute a system call by other task\n"
 "  page-server    launch page server\n"
 "  service        launch service\n"
 "  dedup          remove duplicates in memory dump\n"
@@ -832,11 +823,6 @@ usage:
 	}
 
 	pr_msg("\n"
-
-"Most of the true / false long options (the ones without arguments) can be\n"
-"prefixed with --no- to negate the option (example: --display-stats and\n"
-"--no-display-stats).\n"
-"\n"
 "Dump/Restore options:\n"
 "\n"
 "* Generic:\n"
@@ -856,10 +842,6 @@ usage:
 "                        restore making it the parent of the restored process\n"
 "  --freeze-cgroup       use cgroup freezer to collect processes\n"
 "  --weak-sysctls        skip restoring sysctls that are not available\n"
-"  --lazy-pages          restore pages on demand\n"
-"                        this requires running a second instance of criu\n"
-"                        in lazy-pages mode: 'criu lazy-pages -D DIR'\n"
-"                        --lazy-pages and lazy-pages mode require userfaultfd\n"
 "\n"
 "* External resources support:\n"
 "  --external RES        dump objects from this list as external resources:\n"
@@ -879,7 +861,6 @@ usage:
 "* Special resources support:\n"
 "     --" SK_EST_PARAM "  checkpoint/restore established TCP connections\n"
 "     --" SK_INFLIGHT_PARAM "   skip (ignore) in-flight TCP connections\n"
-"     --" SK_CLOSE_PARAM "        restore connected TCP sockets in closed state\n"
 "  -r|--root PATH        change the root filesystem (when run in mount namespace)\n"
 "  --evasive-devices     use any path to a device file if the original one\n"
 "                        is inaccessible\n"
@@ -945,8 +926,8 @@ usage:
 "* Logging:\n"
 "  -o|--log-file FILE    log file name\n"
 "     --log-pid          enable per-process logging to separate FILE.pid files\n"
-"  -v[v...]|--verbosity  increase verbosity (can use multiple v)\n"
-"  -vNUM|--verbosity=NUM set verbosity to NUM (higher level means more output):\n"
+"  -v[v...]            increase verbosity (can use multiple v)\n"
+"  -vNUM               set verbosity to NUM (higher level means more output):\n"
 "                          -v1 - only errors and messages\n"
 "                          -v2 - also warnings (default level)\n"
 "                          -v3 - also information messages and timestamps\n"

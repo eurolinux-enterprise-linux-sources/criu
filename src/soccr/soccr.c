@@ -1,11 +1,13 @@
-#include <errno.h>
-#include <libnet.h>
-#include <linux/sockios.h>
-#include <linux/types.h>
 #include <netinet/tcp.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <errno.h>
+#include <linux/sockios.h>
+#include <libnet.h>
+#include <assert.h>
+#include <errno.h>
+
 #include "soccr.h"
 
 #ifndef SIOCOUTQNSD
@@ -14,17 +16,17 @@
 #endif
 
 enum {
-	TCPF_ESTABLISHED = (1 << 1),
-	TCPF_SYN_SENT    = (1 << 2),
-	TCPF_SYN_RECV    = (1 << 3),
-	TCPF_FIN_WAIT1   = (1 << 4),
-	TCPF_FIN_WAIT2   = (1 << 5),
-	TCPF_TIME_WAIT   = (1 << 6),
-	TCPF_CLOSE       = (1 << 7),
-	TCPF_CLOSE_WAIT  = (1 << 8),
-	TCPF_LAST_ACK    = (1 << 9),
-	TCPF_LISTEN      = (1 << 10),
-	TCPF_CLOSING     = (1 << 11),
+        TCPF_ESTABLISHED = (1 << 1),
+        TCPF_SYN_SENT    = (1 << 2),
+        TCPF_SYN_RECV    = (1 << 3),
+        TCPF_FIN_WAIT1   = (1 << 4),
+        TCPF_FIN_WAIT2   = (1 << 5),
+        TCPF_TIME_WAIT   = (1 << 6),
+        TCPF_CLOSE       = (1 << 7),
+        TCPF_CLOSE_WAIT  = (1 << 8),
+        TCPF_LAST_ACK    = (1 << 9),
+        TCPF_LISTEN      = (1 << 10),
+        TCPF_CLOSING     = (1 << 11),
 };
 
 /*
@@ -74,7 +76,7 @@ void libsoccr_set_log(unsigned int level, void (*fn)(unsigned int level, const c
 	log = fn;
 }
 
-#define loge(msg, ...) do { if (log && (log_level >= SOCCR_LOG_ERR)) log(SOCCR_LOG_ERR, "Error (%s:%d): " msg, __FILE__, __LINE__, ##__VA_ARGS__); } while (0)
+#define loge(msg, ...) do { if (log && (log_level >= SOCCR_LOG_ERR)) log(SOCCR_LOG_ERR, "Error: " msg, ##__VA_ARGS__); } while (0)
 #define logerr(msg, ...) loge(msg ": %s\n", ##__VA_ARGS__, strerror(errno))
 #define logd(msg, ...) do { if (log && (log_level >= SOCCR_LOG_DBG)) log(SOCCR_LOG_DBG, "Debug: " msg, ##__VA_ARGS__); } while (0)
 
@@ -119,10 +121,8 @@ struct libsoccr_sk *libsoccr_pause(int fd)
 	struct libsoccr_sk *ret;
 
 	ret = malloc(sizeof(*ret));
-	if (!ret) {
-		loge("Unable to allocate memory\n");
+	if (!ret)
 		return NULL;
-	}
 
 	if (tcp_repair_on(fd) < 0) {
 		free(ret);
@@ -157,18 +157,7 @@ void libsoccr_release(struct libsoccr_sk *sk)
 	free(sk);
 }
 
-struct soccr_tcp_info {
-        __u8    tcpi_state;
-        __u8    tcpi_ca_state;
-        __u8    tcpi_retransmits;
-        __u8    tcpi_probes;
-        __u8    tcpi_backoff;
-        __u8    tcpi_options;
-        __u8    tcpi_snd_wscale : 4, tcpi_rcv_wscale : 4;
-};
-
-static int refresh_sk(struct libsoccr_sk *sk,
-			struct libsoccr_sk_data *data, struct soccr_tcp_info *ti)
+static int refresh_sk(struct libsoccr_sk *sk, struct libsoccr_sk_data *data, struct tcp_info *ti)
 {
 	int size;
 	socklen_t olen = sizeof(*ti);
@@ -209,18 +198,6 @@ static int refresh_sk(struct libsoccr_sk *sk,
 
 	data->unsq_len = size;
 
-	if (data->state == TCP_CLOSE) {
-		/* A connection could be reseted. In thise case a sent queue
-		 * may contain some data. A user can't read this data, so let's
-		 * ignore them. Otherwise we will need to add a logic whether
-		 * the send queue contains a fin packet or not and decide whether
-		 * a fin or reset packet has to be sent to restore a state
-		 */
-
-		data->unsq_len = 0;
-		data->outq_len = 0;
-	}
-
 	/* Don't account the fin packet. It doesn't countain real data. */
 	if ((1 << data->state) & (SNDQ_FIRST_FIN | SNDQ_SECOND_FIN)) {
 		if (data->outq_len)
@@ -238,8 +215,7 @@ static int refresh_sk(struct libsoccr_sk *sk,
 	return 0;
 }
 
-static int get_stream_options(struct libsoccr_sk *sk,
-		struct libsoccr_sk_data *data, struct soccr_tcp_info *ti)
+static int get_stream_options(struct libsoccr_sk *sk, struct libsoccr_sk_data *data, struct tcp_info *ti)
 {
 	int ret;
 	socklen_t auxl;
@@ -345,10 +321,8 @@ static int get_queue(int sk, int queue_id,
 		 * make sure there are len bytes for real
 		 */
 		buf = malloc(len + 1);
-		if (!buf) {
-			loge("Unable to allocate memory\n");
+		if (!buf)
 			goto err_buf;
-		}
 
 		ret = recv(sk, buf, len + 1, MSG_PEEK | MSG_DONTWAIT);
 		if (ret != len)
@@ -377,12 +351,10 @@ err_recv:
 
 int libsoccr_save(struct libsoccr_sk *sk, struct libsoccr_sk_data *data, unsigned data_size)
 {
-	struct soccr_tcp_info ti;
+	struct tcp_info ti;
 
-	if (!data || data_size < SOCR_DATA_MIN_SIZE) {
-		loge("Invalid input parameters\n");
+	if (!data || data_size < SOCR_DATA_MIN_SIZE)
 		return -1;
-	}
 
 	memset(data, 0, data_size);
 
@@ -398,10 +370,10 @@ int libsoccr_save(struct libsoccr_sk *sk, struct libsoccr_sk_data *data, unsigne
 	sk->flags |= SK_FLAG_FREE_SQ | SK_FLAG_FREE_RQ;
 
 	if (get_queue(sk->fd, TCP_RECV_QUEUE, &data->inq_seq, data->inq_len, &sk->recv_queue))
-		return -5;
+		return -4;
 
 	if (get_queue(sk->fd, TCP_SEND_QUEUE, &data->outq_seq, data->outq_len, &sk->send_queue))
-		return -6;
+		return -5;
 
 	return sizeof(struct libsoccr_sk_data);
 }
@@ -471,22 +443,16 @@ static int libsoccr_set_sk_data_noq(struct libsoccr_sk *sk,
 	int onr = 0;
 	__u32 seq;
 
-	if (!data || data_size < SOCR_DATA_MIN_SIZE) {
-		loge("Invalid input parameters\n");
+	if (!data || data_size < SOCR_DATA_MIN_SIZE)
 		return -1;
-	}
 
-	if (!sk->dst_addr || !sk->src_addr) {
-		loge("Destination or/and source addresses aren't set\n");
+	if (!sk->dst_addr || !sk->src_addr)
 		return -1;
-	}
 
 	mstate = 1 << data->state;
 
-	if (data->state == TCP_LISTEN) {
-		loge("Unable to handle listen sockets\n");
+	if (data->state == TCP_LISTEN)
 		return -1;
-	}
 
 	if (sk->src_addr->sa.sa_family == AF_INET)
 		addr_size = sizeof(sk->src_addr->v4);
@@ -494,7 +460,7 @@ static int libsoccr_set_sk_data_noq(struct libsoccr_sk *sk,
 		addr_size = sizeof(sk->src_addr->v6);
 
 	if (bind(sk->fd, &sk->src_addr->sa, addr_size)) {
-		logerr("Can't bind inet socket back");
+		loge("Can't bind inet socket back\n");
 		return -1;
 	}
 
@@ -580,50 +546,29 @@ static int libsoccr_set_sk_data_noq(struct libsoccr_sk *sk,
 	return 0;
 }
 
-/* IPv4-Mapped IPv6 Addresses */
-static int ipv6_addr_mapped(union libsoccr_addr *addr)
-{
-	return (addr->v6.sin6_addr.s6_addr32[2] == htonl(0x0000ffff));
-}
-
 static int send_fin(struct libsoccr_sk *sk, struct libsoccr_sk_data *data,
 		unsigned data_size, uint8_t flags)
 {
-	uint32_t src_v4 = sk->src_addr->v4.sin_addr.s_addr;
-	uint32_t dst_v4 = sk->dst_addr->v4.sin_addr.s_addr;
-	int ret, exit_code = -1, family;
+	int ret, exit_code = -1;
 	char errbuf[LIBNET_ERRBUF_SIZE];
-	int mark = SOCCR_MARK;
+	int mark = SOCCR_MARK;;
 	int libnet_type;
 	libnet_t *l;
 
-	family = sk->dst_addr->sa.sa_family;
-
-	if (family == AF_INET6 && ipv6_addr_mapped(sk->dst_addr)) {
-		/* TCP over IPv4 */
-		family = AF_INET;
-		dst_v4 = sk->dst_addr->v6.sin6_addr.s6_addr32[3];
-		src_v4 = sk->src_addr->v6.sin6_addr.s6_addr32[3];
-	}
-
-	if (family == AF_INET6)
+	if (sk->dst_addr->sa.sa_family == AF_INET6)
 		libnet_type = LIBNET_RAW6;
 	else
 		libnet_type = LIBNET_RAW4;
 
 	l = libnet_init(
-		libnet_type,		/* injection type */
-		NULL,			/* network interface */
-		errbuf);		/* errbuf */
-	if (l == NULL) {
-		loge("libnet_init failed (%s)\n", errbuf);
+		libnet_type,                            /* injection type */
+		NULL,                                   /* network interface */
+		errbuf);                                /* errbuf */
+	if (l == NULL)
 		return -1;
-	}
 
-	if (setsockopt(l->fd, SOL_SOCKET, SO_MARK, &mark, sizeof(mark))) {
-		logerr("Can't set SO_MARK (%d) for socket\n", mark);
+	if (setsockopt(l->fd, SOL_SOCKET, SO_MARK, &mark, sizeof(mark)))
 		goto err;
-	}
 
 	ret = libnet_build_tcp(
 		ntohs(sk->dst_addr->v4.sin_port),		/* source port */
@@ -644,7 +589,7 @@ static int send_fin(struct libsoccr_sk *sk, struct libsoccr_sk_data *data,
 		goto err;
 	}
 
-	if (family == AF_INET6) {
+	if (sk->dst_addr->sa.sa_family == AF_INET6) {
 		struct libnet_in6_addr src, dst;
 
 		memcpy(&dst, &sk->dst_addr->v6.sin6_addr, sizeof(dst));
@@ -661,7 +606,7 @@ static int send_fin(struct libsoccr_sk *sk, struct libsoccr_sk_data *data,
 			0,		/* payload size */
 			l,		/* libnet handle */
 			0);		/* libnet id */
-	} else if (family == AF_INET)
+	} else if (sk->dst_addr->sa.sa_family == AF_INET)
 		ret = libnet_build_ipv4(
 			LIBNET_IPV4_H + LIBNET_TCP_H + 20,	/* length */
 			0,			/* TOS */
@@ -670,14 +615,14 @@ static int send_fin(struct libsoccr_sk *sk, struct libsoccr_sk_data *data,
 			64,			/* TTL */
 			IPPROTO_TCP,		/* protocol */
 			0,			/* checksum */
-			dst_v4,			/* source IP */
-			src_v4,			/* destination IP */
+			sk->dst_addr->v4.sin_addr.s_addr,	/* source IP */
+			sk->src_addr->v4.sin_addr.s_addr,	/* destination IP */
 			NULL,			/* payload */
 			0,			/* payload size */
 			l,			/* libnet handle */
 			0);			/* libnet id */
 	else {
-		loge("Unknown socket family\n");
+		loge("Unknown socket family");
 		goto err;
 	}
 	if (ret == -1) {
@@ -687,7 +632,7 @@ static int send_fin(struct libsoccr_sk *sk, struct libsoccr_sk_data *data,
 
 	ret = libnet_write(l);
 	if (ret == -1) {
-		loge("Unable to send a fin packet: %s\n", libnet_geterror(l));
+		loge("Unable to send a fin packet: %s", libnet_geterror(l));
 		goto err;
 	}
 

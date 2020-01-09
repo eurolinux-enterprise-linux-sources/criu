@@ -2,7 +2,7 @@
 #define __CR_OPTIONS_H__
 
 #include <stdbool.h>
-#include "common/config.h"
+#include "config.h"
 #include "common/list.h"
 
 /*
@@ -12,7 +12,7 @@
 #define CPU_CAP_ALL		(-1u)
 #define CPU_CAP_FPU		(1u)		/* Only FPU capability required */
 #define CPU_CAP_CPU		(2u)		/* Strict CPU capability required */
-#define CPU_CAP_INS (4u)			/* Instructions CPU capability */
+#define CPU_CAP_INS		(4u)		/* Instructions CPU capatibility */
 #define CPU_CAP_DEFAULT		(CPU_CAP_FPU)
 
 struct cg_root_opt {
@@ -51,22 +51,21 @@ struct cr_options {
 	int			final_state;
 	char			*show_dump_file;
 	char			*show_fmt;
-	int			check_extra_features;
-	int			check_experimental_features;
+	bool			check_extra_features;
+	bool			check_experimental_features;
 	bool			show_pages_content;
 	union {
-		int		restore_detach;
+		bool		restore_detach;
 		bool		daemon_mode;
 	};
-	int			restore_sibling;
+	bool			restore_sibling;
 	bool			ext_unix_sk;
-	int			shell_job;
-	int			handle_file_locks;
-	int			tcp_established_ok;
-	int			tcp_close;
-	int			evasive_devices;
-	int			link_remap_ok;
-	int			log_file_per_pid;
+	bool			shell_job;
+	bool			handle_file_locks;
+	bool			tcp_established_ok;
+	bool			evasive_devices;
+	bool			link_remap_ok;
+	bool			log_file_per_pid;
 	bool			swrk_restore;
 	char			*output;
 	char			*root;
@@ -77,15 +76,15 @@ struct cr_options {
 	struct list_head	external;
 	struct list_head	join_ns;
 	char			*libdir;
-	int			use_page_server;
+	bool			use_page_server;
 	unsigned short		port;
 	char			*addr;
 	int			ps_socket;
-	int			track_mem;
+	bool			track_mem;
 	char			*img_parent;
-	int			auto_dedup;
+	bool			auto_dedup;
 	unsigned int		cpu_cap;
-	int			force_irmap;
+	bool			force_irmap;
 	char			**exec_cmd;
 	unsigned int		manage_cgroups;
 	char			*new_global_cg_root;
@@ -93,9 +92,9 @@ struct cr_options {
 	char			*cgroup_props_file;
 	struct list_head	new_cgroup_roots;
 	bool			autodetect_ext_mounts;
-	int			enable_external_sharing;
-	int			enable_external_masters;
-	bool			aufs;		/* auto-detected, not via cli */
+	bool			enable_external_sharing;
+	bool			enable_external_masters;
+	bool			aufs;		/* auto-deteced, not via cli */
 	bool			overlayfs;
 #ifdef CONFIG_BINFMT_MISC_VIRTUALIZED
 	bool			has_binfmt_misc; /* auto-detected */
@@ -106,8 +105,7 @@ struct cr_options {
 	char			*lsm_profile;
 	unsigned int		timeout;
 	unsigned int		empty_ns;
-	int			tcp_skip_in_flight;
-	bool			lazy_pages;
+	bool			tcp_skip_in_flight;
 	char			*work_dir;
 
 	/*
@@ -116,9 +114,9 @@ struct cr_options {
 	 * the deprecated stuff is not working, but it's still possible
 	 * to turn one ON while the code is in.
 	 */
-	int			deprecated_ok;
-	int			display_stats;
-	int			weak_sysctls;
+	bool			deprecated_ok;
+	bool			display_stats;
+	bool			weak_sysctls;
 	int			status_fd;
 	bool			orphan_pts_master;
 };

@@ -5,9 +5,8 @@
 #include <asm/elf.h>
 #include <asm/types.h>
 #include "asm/types.h"
-#include <compel/asm/infect-types.h>
 
-#include <compel/asm/sigframe.h>
+#include "sigframe.h"
 
 /*
  * Clone trampoline
@@ -48,7 +47,6 @@
 		  "r"(&thread_args[i])		/* %6 */		\
 		: "memory","0","3","4","5","6","7","14","15")
 
-#define arch_map_vdso(map, compat)		-1
 
 int restore_gpregs(struct rt_sigframe *f, UserPpc64RegsEntry *r);
 int restore_nonsigframe_gpregs(UserPpc64RegsEntry *r);
@@ -56,20 +54,19 @@ int restore_nonsigframe_gpregs(UserPpc64RegsEntry *r);
 /* Nothing to do, TLS is accessed through r13 */
 static inline void restore_tls(tls_t *ptls) { (void)ptls; }
 
+static inline int ptrace_set_breakpoint(pid_t pid, void *addr)
+{
+        return 0;
+}
+
+static inline int ptrace_flush_breakpoints(pid_t pid)
+{
+        return 0;
+}
+
 /*
  * Defined in arch/ppc64/syscall-common-ppc64.S
  */
 unsigned long sys_shmat(int shmid, const void *shmaddr, int shmflg);
-
-static inline void *alloc_compat_syscall_stack(void) { return NULL; }
-static inline void free_compat_syscall_stack(void *stack32) { }
-static inline int arch_compat_rt_sigaction(void *stack, int sig, void *act)
-{
-	return -1;
-}
-static inline int set_compat_robust_list(uint32_t head_ptr, uint32_t len)
-{
-	return -1;
-}
 
 #endif /*__CR_ASM_RESTORER_H__*/

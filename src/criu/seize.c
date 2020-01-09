@@ -15,13 +15,11 @@
 #include "cr-errno.h"
 #include "pstree.h"
 #include "criu-log.h"
-#include <compel/ptrace.h>
-#include "proc_parse.h"
+#include "ptrace.h"
 #include "seize.h"
 #include "stats.h"
 #include "xmalloc.h"
 #include "util.h"
-#include <compel/compel.h>
 
 #define NR_ATTEMPTS 5
 
@@ -130,7 +128,7 @@ static int seize_cgroup_tree(char *root_path, const char *state)
 			return -1;
 		}
 
-		if (!compel_interrupt_task(pid)) {
+		if (!seize_catch_task(pid)) {
 			pr_debug("SEIZE %d: success\n", pid);
 			processes_to_wait++;
 		} else if (state == frozen) {
@@ -142,7 +140,7 @@ static int seize_cgroup_tree(char *root_path, const char *state)
 			if (stat(buf, &st) == -1 && errno == ENOENT)
 				continue;
 			/*
-			 * fails when meets a zombie, or exiting process:
+			 * fails when meets a zombie, or eixting process:
 			 * there is a small race in a kernel -- the process
 			 * may start exiting and we are trying to freeze it
 			 * before it compete exit procedure. The caller simply
@@ -350,7 +348,7 @@ static int freeze_processes(void)
 		nr_attempts = (10 * 1000000) / step_ms;
 	}
 
-	pr_debug("freezing processes: %lu attempts with %lu ms steps\n",
+	pr_debug("freezing processes: %lu attempst with %lu ms steps\n",
 		 nr_attempts, step_ms);
 
 	snprintf(path, sizeof(path), "%s/freezer.state", opts.freeze_cgroup);
@@ -482,7 +480,7 @@ static int collect_children(struct pstree_item *item)
 
 		if (!opts.freeze_cgroup)
 			/* fails when meets a zombie */
-			compel_interrupt_task(pid);
+			seize_catch_task(pid);
 
 		creds = xzalloc(sizeof(*creds));
 		if (!creds) {
@@ -490,7 +488,7 @@ static int collect_children(struct pstree_item *item)
 			goto free;
 		}
 
-		ret = compel_wait_task(pid, item->pid->real, parse_pid_status, NULL, &creds->s, NULL);
+		ret = seize_wait_task(pid, item->pid->real, creds);
 		if (ret < 0) {
 			/*
 			 * Here is a race window between parse_children() and seize(),
@@ -538,7 +536,7 @@ static void unseize_task_and_threads(const struct pstree_item *item, int st)
 	 * the item->state is the state task was in when we seized one.
 	 */
 
-	compel_resume_task(item->pid->real, item->pid->state, st);
+	unseize_task(item->pid->real, item->pid->state, st);
 
 	if (st == TASK_DEAD)
 		return;
@@ -629,20 +627,28 @@ static inline bool thread_collected(struct pstree_item *i, pid_t tid)
 static bool creds_dumpable(struct proc_status_creds *parent,
 				struct proc_status_creds *child)
 {
+	const size_t size = sizeof(struct proc_status_creds) -
+			offsetof(struct proc_status_creds, cap_inh);
+
 	/*
+	 * The comparison rules are the following
+	 *
+	 *  - CAPs can be different
 	 *  - seccomp filters should be passed via
 	 *    semantic comparison (FIXME) but for
 	 *    now we require them to be exactly
 	 *    identical
+	 *  - the rest of members must match
 	 */
-	if (parent->s.seccomp_mode != child->s.seccomp_mode ||
-	    parent->last_filter != child->last_filter) {
+
+	if (memcmp(parent, child, size)) {
 		if (!pr_quelled(LOG_DEBUG)) {
 			pr_debug("Creds undumpable (parent:child)\n"
 				 "  uids:               %d:%d %d:%d %d:%d %d:%d\n"
 				 "  gids:               %d:%d %d:%d %d:%d %d:%d\n"
 				 "  state:              %d:%d"
 				 "  ppid:               %d:%d\n"
+				 "  sigpnd:             %llu:%llu\n"
 				 "  shdpnd:             %llu:%llu\n"
 				 "  seccomp_mode:       %d:%d\n"
 				 "  last_filter:        %u:%u\n",
@@ -654,10 +660,11 @@ static bool creds_dumpable(struct proc_status_creds *parent,
 				 parent->gids[1], child->gids[1],
 				 parent->gids[2], child->gids[2],
 				 parent->gids[3], child->gids[3],
-				 parent->s.state, child->s.state,
-				 parent->s.ppid, child->s.ppid,
-				 parent->s.shdpnd, child->s.shdpnd,
-				 parent->s.seccomp_mode, child->s.seccomp_mode,
+				 parent->state, child->state,
+				 parent->ppid, child->ppid,
+				 parent->sigpnd, child->sigpnd,
+				 parent->shdpnd, child->shdpnd,
+				 parent->seccomp_mode, child->seccomp_mode,
 				 parent->last_filter, child->last_filter);
 		}
 		return false;
@@ -704,10 +711,10 @@ static int collect_threads(struct pstree_item *item)
 		pr_info("\tSeizing %d's %d thread\n",
 				item->pid->real, pid);
 
-		if (!opts.freeze_cgroup && compel_interrupt_task(pid))
+		if (!opts.freeze_cgroup && seize_catch_task(pid))
 			continue;
 
-		ret = compel_wait_task(pid, item_ppid(item), parse_pid_status, NULL, &t_creds.s, NULL);
+		ret = seize_wait_task(pid, item_ppid(item), &t_creds);
 		if (ret < 0) {
 			/*
 			 * Here is a race window between parse_threads() and seize(),
@@ -837,7 +844,7 @@ int collect_pstree(void)
 	if (opts.freeze_cgroup && freeze_processes())
 		goto err;
 
-	if (!opts.freeze_cgroup && compel_interrupt_task(pid)) {
+	if (!opts.freeze_cgroup && seize_catch_task(pid)) {
 		set_cr_errno(ESRCH);
 		goto err;
 	}
@@ -846,7 +853,7 @@ int collect_pstree(void)
 	if (!creds)
 		goto err;
 
-	ret = compel_wait_task(pid, -1, parse_pid_status, NULL, &creds->s, NULL);
+	ret = seize_wait_task(pid, -1, creds);
 	if (ret < 0)
 		goto err;
 

@@ -1,4 +1,6 @@
 
+#define _GNU_SOURCE
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <ctype.h>
@@ -52,11 +54,8 @@ int main(int argc, char *argv[])
 	unlink(path);
 
 	addr.sun_family = AF_UNIX;
-	addrlen = strlen(path);
-	if (addrlen >= sizeof(addr.sun_path))
-		return 1;
-	memcpy(addr.sun_path, path, addrlen);
-	addrlen += sizeof(addr.sun_family);
+	strncpy(addr.sun_path, path, sizeof(addr.sun_path));
+	addrlen = sizeof(addr.sun_family) + strlen(path);
 
 	ssk_icon[0] = socket(AF_UNIX, SOCK_STREAM, 0);
 	ssk_icon[1] = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -66,7 +65,7 @@ int main(int argc, char *argv[])
 		exit(1);
 	}
 
-	ret = bind(ssk_icon[0], (struct sockaddr *) &addr, addrlen);
+	ret = bind(ssk_icon[0], &addr, addrlen);
 	if (ret) {
 		fail("bind\n");
 		exit(1);
@@ -90,7 +89,7 @@ int main(int argc, char *argv[])
 		exit(1);
 	}
 
-	ret = connect(ssk_icon[2], (struct sockaddr *) &addr, addrlen);
+	ret = connect(ssk_icon[2], &addr, addrlen);
 	if (ret) {
 		fail("connect\n");
 		exit(1);
@@ -102,7 +101,7 @@ int main(int argc, char *argv[])
 		exit(1);
 	}
 
-	ret = connect(ssk_icon[1], (struct sockaddr *) &addr, addrlen);
+	ret = connect(ssk_icon[1], &addr, addrlen);
 	if (ret) {
 		fail("connect\n");
 		exit(1);

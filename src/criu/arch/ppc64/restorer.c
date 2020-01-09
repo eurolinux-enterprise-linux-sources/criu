@@ -2,9 +2,9 @@
 
 #include "restorer.h"
 #include "asm/restorer.h"
-#include <compel/asm/fpu.h>
+#include "asm/fpu.h"
 
-#include <compel/plugins/std/syscall.h>
+#include "syscall.h"
 #include "log.h"
 
 int restore_nonsigframe_gpregs(UserPpc64RegsEntry *r)

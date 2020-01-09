@@ -1,10 +1,8 @@
 #include "common/asm/linkage.h"
 
-.syntax unified
-
 ENTRY(test_and_set_bit)
 	ands    ip, r1, #3
-	strbne  r1, [ip]                @ assert word-aligned
+	strneb  r1, [ip]                @ assert word-aligned
 	mov     r2, #1
 	and     r3, r0, #31             @ Get bit offset
 	mov     r0, r0, lsr #5

@@ -6,22 +6,17 @@ ARCH_DIR		:= criu/arch/$(SRCARCH)
 PIE_DIR			:= criu/pie
 export ARCH_DIR PIE_DIR
 
-ifeq ($(filter clean mrproper,$(MAKECMDGOALS)),)
-	COMPEL_UAPI_INCLUDES	:= $(shell $(COMPEL_BIN) includes)
-	export COMPEL_UAPI_INCLUDES
-	COMPEL_LIBS		:= $(shell $(COMPEL_BIN) --static libs)
-endif
-
 #
 # General flags.
 ccflags-y		+= -fno-strict-aliasing
-ccflags-y		+= -iquote criu/include
-ccflags-y		+= -iquote include
-ccflags-y		+= -iquote images
-ccflags-y		+= -iquote $(ARCH_DIR)/include
-ccflags-y		+= -iquote .
+ccflags-y		+= -iquote $(SRC_DIR)/criu/include
+ccflags-y		+= -iquote $(SRC_DIR)/include
+ccflags-y		+= -iquote $(SRC_DIR)/images
+ccflags-y		+= -iquote $(SRC_DIR)/criu/pie
+ccflags-y		+= -iquote $(SRC_DIR)/$(ARCH_DIR)
+ccflags-y		+= -iquote $(SRC_DIR)/$(ARCH_DIR)/include
+ccflags-y		+= -iquote $(SRC_DIR)/
 ccflags-y		+= -I/usr/include/libnl3
-ccflags-y		+= $(COMPEL_UAPI_INCLUDES)
 
 export ccflags-y
 
@@ -35,45 +30,60 @@ include $(__nmk_dir)msg.mk
 
 #
 # Needed libraries checks
-include criu/Makefile.packages
+include $(SRC_DIR)/criu/Makefile.packages
+
+#
+# System calls library.
+SYSCALL-LIB		:= $(ARCH_DIR)/syscalls.built-in.o
+syscalls_lib:
+	$(Q) $(MAKE) $(call build-as,Makefile.syscalls,$(ARCH_DIR)) all
+.PHONY: syscalls_lib
 
 #
 # Architecture dependent part.
 ARCH-LIB		:= $(ARCH_DIR)/crtools.built-in.o
-$(ARCH-LIB): .FORCE
+$(ARCH-LIB): syscalls_lib
 	$(Q) $(MAKE) $(build)=$(ARCH_DIR) all
 
 #
+# piegen tool needed for PIE code.
+ifeq ($(piegen-y),y)
+piegen-bin		:= criu/pie/piegen/piegen
+
+criu/pie/piegen/%: $(CONFIG_HEADER)
+	$(Q) CC=$(HOSTCC) LD=$(HOSTLD) CFLAGS="$(ccflags-y) $(HOSTCFLAGS) $(WARNINGS) $(DEFINES)" $(MAKE) $(build)=criu/pie/piegen $@
+$(piegen-bin): criu/pie/piegen/built-in.o
+	$(call msg-link, $@)
+	$(Q) $(HOSTCC) $(HOSTCFLAGS) $^ $(LDFLAGS) -o $@
+endif
+
+#
 # PIE library code.
-criu/pie/pie.lib.a: $(ARCH-LIB) .FORCE
+criu/pie/lib.a: $(ARCH-LIB)
 	$(Q) $(MAKE) $(call build-as,Makefile.library,criu/pie) all
 
 #
 # PIE code blobs themseves.
-pie: criu/pie/pie.lib.a
+pie: $(piegen-bin) criu/pie/lib.a
 	$(Q) $(MAKE) $(build)=criu/pie all
 .PHONY: pie
 
-criu/pie/Makefile: ;
-criu/pie/Makefile.library: ;
-criu/pie/%: pie ;
+criu/pie/%: pie
+	@true
 
 #
 # CRIU executable
-PROGRAM-BUILTINS	+= criu/pie/pie.lib.a
+PROGRAM-BUILTINS	+= criu/pie/lib.a
 PROGRAM-BUILTINS	+= images/built-in.o
 PROGRAM-BUILTINS	+= $(obj)/built-in.o
 PROGRAM-BUILTINS	+= $(ARCH-LIB)
 PROGRAM-BUILTINS	+= soccr/libsoccr.a
-PROGRAM-BUILTINS	+= $(COMPEL_LIBS)
 
 $(obj)/built-in.o: pie
 	$(Q) $(MAKE) $(call build-as,Makefile.crtools,criu) all
 
-
-$(obj)/Makefile: ;
-$(obj)/Makefile.crtools: ;
-$(obj)/Makefile.packages: ;
+$(obj)/Makefile:
+	@true
 
 $(obj)/%: pie
 	$(Q) $(MAKE) $(call build-as,Makefile.crtools,criu) $@
@@ -88,11 +98,14 @@ $(obj)/criu: $(PROGRAM-BUILTINS)
 subclean:
 	$(Q) $(RM) $(obj)/*.{gcda,gcno,gcov}
 	$(Q) $(RM) $(obj)/pie/*.{gcda,gcno,gcov}
+	$(Q) $(RM) $(obj)/pie/piegen/*.{gcda,gcno,gcov}
 	$(Q) $(RM) -r $(obj)/gcov
+	$(Q) $(MAKE) $(call build-as,Makefile.syscalls,$(ARCH_DIR)) clean
 	$(Q) $(MAKE) $(build)=$(ARCH_DIR) clean
 	$(Q) $(MAKE) $(call build-as,Makefile.library,$(PIE_DIR)) clean
 	$(Q) $(MAKE) $(call build-as,Makefile.crtools,criu) clean
 	$(Q) $(MAKE) $(build)=$(PIE_DIR) clean
+	$(Q) $(MAKE) $(build)=$(PIE_DIR)/piegen clean
 .PHONY: subclean
 cleanup-y      += $(obj)/criu
 clean: subclean
@@ -100,15 +113,17 @@ clean: subclean
 #
 # Delete all generated files
 subproper:
+	$(Q) $(MAKE) $(call build-as,Makefile.syscalls,$(ARCH_DIR)) mrproper
 	$(Q) $(MAKE) $(build)=$(ARCH_DIR) mrproper
 	$(Q) $(MAKE) $(call build-as,Makefile.library,$(PIE_DIR)) mrproper
 	$(Q) $(MAKE) $(call build-as,Makefile.crtools,criu) mrproper
 	$(Q) $(MAKE) $(build)=$(PIE_DIR) mrproper
+	$(Q) $(MAKE) $(build)=$(PIE_DIR)/piegen mrproper
 .PHONY: subproper
 mrproper: subproper
 
-UAPI_HEADERS := criu/include/criu-plugin.h
-UAPI_HEADERS += criu/include/criu-log.h
+UAPI_HEADERS := $(SRC_DIR)/criu/include/criu-plugin.h
+UAPI_HEADERS += $(SRC_DIR)/criu/include/criu-log.h
 
 install: $(obj)/criu
 	$(E) "  INSTALL " $(obj)/criu
@@ -117,7 +132,7 @@ install: $(obj)/criu
 	$(Q) mkdir -p $(DESTDIR)$(INCLUDEDIR)/criu/
 	$(Q) install -m 644 $(UAPI_HEADERS) $(DESTDIR)$(INCLUDEDIR)/criu/
 	$(Q) mkdir -p $(DESTDIR)$(LIBEXECDIR)/criu/scripts
-	$(Q) install -m 755 scripts/systemd-autofs-restart.sh $(DESTDIR)$(LIBEXECDIR)/criu/scripts
+	$(Q) install -m 755 $(SRC_DIR)/scripts/systemd-autofs-restart.sh $(DESTDIR)$(LIBEXECDIR)/criu/scripts
 .PHONY: install
 
 uninstall:

@@ -1,4 +1,3 @@
-#include <sched.h>
 #include <unistd.h>
 #include <sys/socket.h>
 #include <linux/netlink.h>
@@ -25,9 +24,6 @@
 #include "net.h"
 #include "xmalloc.h"
 #include "fs-magic.h"
-#include "pstree.h"
-#include "util.h"
-#include "fdstore.h"
 
 #ifndef SOCK_DIAG_BY_FAMILY
 #define SOCK_DIAG_BY_FAMILY 20
@@ -120,7 +116,7 @@ bool socket_test_collect_bit(unsigned int family, unsigned int proto)
 	return test_bit(nr, socket_cl_bits) != 0;
 }
 
-static int probe_recv_one(struct nlmsghdr *h, struct ns_id *ns, void *arg)
+static int probe_recv_one(struct nlmsghdr *h, void *arg)
 {
 	pr_err("PROBE RECEIVED\n");
 	return -1;
@@ -139,7 +135,7 @@ static int probe_err(int err, void *arg)
 
 static inline void probe_diag(int nl, struct sock_diag_req *req, int expected_err)
 {
-	do_rtnl_req(nl, req, req->hdr.nlmsg_len, probe_recv_one, probe_err, NULL, &expected_err);
+	do_rtnl_req(nl, req, req->hdr.nlmsg_len, probe_recv_one, probe_err, &expected_err);
 }
 
 void preload_socket_modules(void)
@@ -357,14 +353,13 @@ struct socket_desc *lookup_socket(unsigned ino, int family, int proto)
 	return NULL;
 }
 
-int sk_collect_one(unsigned ino, int family, struct socket_desc *d, struct ns_id *ns)
+int sk_collect_one(unsigned ino, int family, struct socket_desc *d)
 {
 	struct socket_desc **chain;
 
 	d->ino		= ino;
 	d->family	= family;
 	d->already_dumped = 0;
-	d->sk_ns	= ns;
 
 	chain = &sockets[ino % SK_HASH_SIZE];
 	d->next = *chain;
@@ -529,10 +524,6 @@ int dump_socket_opts(int sk, SkOptsEntry *soe)
 	soe->reuseaddr = val ? true : false;
 	soe->has_reuseaddr = true;
 
-	ret |= dump_opt(sk, SOL_SOCKET, SO_REUSEPORT, &val);
-	soe->so_reuseport = val ? true : false;
-	soe->has_so_reuseport = true;
-
 	ret |= dump_opt(sk, SOL_SOCKET, SO_PASSCRED, &val);
 	soe->has_so_passcred = true;
 	soe->so_passcred = val ? true : false;
@@ -561,7 +552,7 @@ void release_skopts(SkOptsEntry *soe)
 	xfree(soe->so_bound_dev);
 }
 
-int dump_socket(struct fd_parms *p, int lfd, FdinfoEntry *e)
+int dump_socket(struct fd_parms *p, int lfd, struct cr_img *img)
 {
 	int family;
 	const struct fdtype_ops *ops;
@@ -590,10 +581,10 @@ int dump_socket(struct fd_parms *p, int lfd, FdinfoEntry *e)
 		return -1;
 	}
 
-	return do_dump_gen_file(p, lfd, ops, e);
+	return do_dump_gen_file(p, lfd, ops, img);
 }
 
-static int inet_receive_one(struct nlmsghdr *h, struct ns_id *ns, void *arg)
+static int inet_receive_one(struct nlmsghdr *h, void *arg)
 {
 	struct inet_diag_req_v2 *i = arg;
 	int type;
@@ -611,16 +602,15 @@ static int inet_receive_one(struct nlmsghdr *h, struct ns_id *ns, void *arg)
 		return -1;
 	}
 
-	return inet_collect_one(h, i->sdiag_family, type, ns);
+	return inet_collect_one(h, i->sdiag_family, type);
 }
 
 static int do_collect_req(int nl, struct sock_diag_req *req, int size,
-		int (*receive_callback)(struct nlmsghdr *h, struct ns_id *ns, void *),
-		struct ns_id *ns, void *arg)
+		int (*receive_callback)(struct nlmsghdr *h, void *), void *arg)
 {
 	int tmp;
 
-	tmp = do_rtnl_req(nl, req, size, receive_callback, NULL, ns, arg);
+	tmp = do_rtnl_req(nl, req, size, receive_callback, NULL, arg);
 
 	if (tmp == 0)
 		set_collect_bit(req->r.n.sdiag_family, req->r.n.sdiag_protocol);
@@ -646,7 +636,7 @@ int collect_sockets(struct ns_id *ns)
 	req.r.u.udiag_show	= UDIAG_SHOW_NAME | UDIAG_SHOW_VFS |
 				  UDIAG_SHOW_PEER | UDIAG_SHOW_ICONS |
 				  UDIAG_SHOW_RQLEN;
-	tmp = do_collect_req(nl, &req, sizeof(req), unix_receive_one, ns, NULL);
+	tmp = do_collect_req(nl, &req, sizeof(req), unix_receive_one, NULL);
 	if (tmp)
 		err = tmp;
 
@@ -659,7 +649,7 @@ int collect_sockets(struct ns_id *ns)
 					(1 << TCP_FIN_WAIT1) | (1 << TCP_FIN_WAIT2) |
 					(1 << TCP_CLOSE_WAIT) | (1 << TCP_LAST_ACK) |
 					(1 << TCP_CLOSING) | (1 << TCP_SYN_SENT);
-	tmp = do_collect_req(nl, &req, sizeof(req), inet_receive_one, ns, &req.r.i);
+	tmp = do_collect_req(nl, &req, sizeof(req), inet_receive_one, &req.r.i);
 	if (tmp)
 		err = tmp;
 
@@ -668,7 +658,7 @@ int collect_sockets(struct ns_id *ns)
 	req.r.i.sdiag_protocol	= IPPROTO_UDP;
 	req.r.i.idiag_ext	= 0;
 	req.r.i.idiag_states	= -1; /* All */
-	tmp = do_collect_req(nl, &req, sizeof(req), inet_receive_one, ns, &req.r.i);
+	tmp = do_collect_req(nl, &req, sizeof(req), inet_receive_one, &req.r.i);
 	if (tmp)
 		err = tmp;
 
@@ -677,7 +667,7 @@ int collect_sockets(struct ns_id *ns)
 	req.r.i.sdiag_protocol	= IPPROTO_UDPLITE;
 	req.r.i.idiag_ext	= 0;
 	req.r.i.idiag_states	= -1; /* All */
-	tmp = do_collect_req(nl, &req, sizeof(req), inet_receive_one, ns, &req.r.i);
+	tmp = do_collect_req(nl, &req, sizeof(req), inet_receive_one, &req.r.i);
 	if (tmp)
 		err = tmp;
 
@@ -690,7 +680,7 @@ int collect_sockets(struct ns_id *ns)
 					(1 << TCP_FIN_WAIT1) | (1 << TCP_FIN_WAIT2) |
 					(1 << TCP_CLOSE_WAIT) | (1 << TCP_LAST_ACK) |
 					(1 << TCP_CLOSING) | (1 << TCP_SYN_SENT);
-	tmp = do_collect_req(nl, &req, sizeof(req), inet_receive_one, ns, &req.r.i);
+	tmp = do_collect_req(nl, &req, sizeof(req), inet_receive_one, &req.r.i);
 	if (tmp)
 		err = tmp;
 
@@ -699,7 +689,7 @@ int collect_sockets(struct ns_id *ns)
 	req.r.i.sdiag_protocol	= IPPROTO_UDP;
 	req.r.i.idiag_ext	= 0;
 	req.r.i.idiag_states	= -1; /* All */
-	tmp = do_collect_req(nl, &req, sizeof(req), inet_receive_one, ns, &req.r.i);
+	tmp = do_collect_req(nl, &req, sizeof(req), inet_receive_one, &req.r.i);
 	if (tmp)
 		err = tmp;
 
@@ -708,7 +698,7 @@ int collect_sockets(struct ns_id *ns)
 	req.r.i.sdiag_protocol	= IPPROTO_UDPLITE;
 	req.r.i.idiag_ext	= 0;
 	req.r.i.idiag_states	= -1; /* All */
-	tmp = do_collect_req(nl, &req, sizeof(req), inet_receive_one, ns, &req.r.i);
+	tmp = do_collect_req(nl, &req, sizeof(req), inet_receive_one, &req.r.i);
 	if (tmp)
 		err = tmp;
 
@@ -716,7 +706,7 @@ int collect_sockets(struct ns_id *ns)
 	req.r.p.sdiag_protocol	= 0;
 	req.r.p.pdiag_show	= PACKET_SHOW_INFO | PACKET_SHOW_MCLIST |
 					PACKET_SHOW_FANOUT | PACKET_SHOW_RING_CFG;
-	tmp = do_collect_req(nl, &req, sizeof(req), packet_receive_one, ns, NULL);
+	tmp = do_collect_req(nl, &req, sizeof(req), packet_receive_one, NULL);
 	if (tmp) {
 		pr_warn("The current kernel doesn't support packet_diag\n");
 		if (ns->ns_pid == 0 || tmp != -ENOENT) /* Fedora 19 */
@@ -726,7 +716,7 @@ int collect_sockets(struct ns_id *ns)
 	req.r.n.sdiag_family	= AF_NETLINK;
 	req.r.n.sdiag_protocol	= NDIAG_PROTO_ALL;
 	req.r.n.ndiag_show	= NDIAG_SHOW_GROUPS;
-	tmp = do_collect_req(nl, &req, sizeof(req), netlink_receive_one, ns, NULL);
+	tmp = do_collect_req(nl, &req, sizeof(req), netlink_receive_one, NULL);
 	if (tmp) {
 		pr_warn("The current kernel doesn't support netlink_diag\n");
 		if (ns->ns_pid == 0 || tmp != -ENOENT) /* Fedora 19 */
@@ -747,43 +737,4 @@ int collect_sockets(struct ns_id *ns)
 	}
 
 	return err;
-}
-
-static uint32_t last_ns_id = 0;
-
-int set_netns(uint32_t ns_id)
-{
-	struct ns_id *ns;
-	int nsfd;
-
-	if (!(root_ns_mask & CLONE_NEWNET))
-		return 0;
-
-	if (ns_id == last_ns_id)
-		return 0;
-
-	/*
-	 * The 0 ns_id means that it was not set. We need
-	 * this to be compatible with old images.
-	 */
-	if (ns_id == 0)
-		ns = net_get_root_ns();
-	else
-		ns = lookup_ns_by_id(ns_id, &net_ns_desc);
-	if (ns == NULL) {
-		pr_err("Unable to find a network namespace\n");
-		return -1;
-	}
-	nsfd = fdstore_get(ns->net.nsfd_id);
-	if (nsfd < 0)
-		return -1;
-	if (setns(nsfd, CLONE_NEWNET)) {
-		pr_perror("Unable to switch a network namespace");
-		close(nsfd);
-		return -1;
-	}
-	last_ns_id = ns_id;
-	close(nsfd);
-
-	return 0;
 }

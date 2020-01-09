@@ -1,13 +1,7 @@
 #ifndef __CR_KERNDAT_H__
 #define __CR_KERNDAT_H__
 
-#include <stdbool.h>
 #include "int.h"
-#include "common/config.h"
-#include "asm/kerndat.h"
-#ifdef CONFIG_VDSO
-#include "util-vdso.h"
-#endif
 
 struct stat;
 
@@ -17,10 +11,11 @@ struct stat;
  */
 
 extern int kerndat_init(void);
+extern int kerndat_init_rst(void);
+extern int kerndat_init_cr_exec(void);
 extern int kerndat_get_dirty_track(void);
 extern int kerndat_fdinfo_has_lock(void);
-extern int kerndat_loginuid(void);
-extern int kerndat_files_stat(bool early);
+extern int kerndat_loginuid(bool only_dump);
 
 enum pagemap_func {
 	PM_UNKNOWN,
@@ -29,14 +24,7 @@ enum pagemap_func {
 	PM_FULL,
 };
 
-enum loginuid_func {
-	LUID_NONE,
-	LUID_READ,
-	LUID_FULL,
-};
-
 struct kerndat_s {
-	u32 magic1, magic2;
 	dev_t shmem_dev;
 	int last_cap;
 	u64 zero_page_pfn;
@@ -45,34 +33,11 @@ struct kerndat_s {
 	bool has_fdinfo_lock;
 	unsigned long task_size;
 	bool ipv6;
-	enum loginuid_func luid;
-	bool compat_cr;
-	bool sk_ns;
-	bool sk_unix_file;
-	bool tun_ns;
+	bool has_loginuid;
 	enum pagemap_func pmap;
 	unsigned int has_xtlocks;
 	unsigned long mmap_min_addr;
 	bool has_tcp_half_closed;
-	bool stack_guard_gap_hidden;
-	int lsm;
-	bool has_uffd;
-	unsigned long uffd_features;
-	bool has_thp_disable;
-	bool can_map_vdso;
-	bool vdso_hint_reliable;
-#ifdef CONFIG_VDSO
-	struct vdso_symtable	vdso_sym;
-#ifdef CONFIG_COMPAT
-	struct vdso_symtable	vdso_sym_compat;
-#endif
-#endif
-	bool has_nsid;
-	bool has_link_nsid;
-	unsigned int sysctl_nr_open;
-	unsigned long files_stat_max_files;
-	bool x86_has_ptrace_fpu_xsave_bug;
-	bool has_inotify_setnextwd;
 };
 
 extern struct kerndat_s kdat;
@@ -94,6 +59,5 @@ enum {
 extern int kerndat_fs_virtualized(unsigned int which, u32 kdev);
 
 extern int kerndat_tcp_repair();
-extern int kerndat_uffd(void);
 
 #endif /* __CR_KERNDAT_H__ */

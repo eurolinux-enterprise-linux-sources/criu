@@ -83,8 +83,7 @@ int main(int argc, char **argv)
 		test_msg("found cgroup at %s\n", aux);
 
 		for (i = 0; i < 2; i++) {
-			ssprintf(paux, "%s/%s/%s.%d", aux, subname, empty, i);
-
+			sprintf(paux, "%s/%s/%s.%d", aux, subname, empty, i);
 			if (stat(paux, &st)) {
 				fail("couldn't stat %s\n", paux);
 				ret = -1;
