@@ -1,0 +1,105 @@
+From ed8fecd12d7ce37d7ebdc35837e184caba7a14b4 Mon Sep 17 00:00:00 2001
+From: Adrian Reber <areber@redhat.com>
+Date: Mon, 20 Jun 2016 23:15:00 +0300
+Subject: [PATCH] criu: add RPC interface for skip in-flight connections
+
+For the previously added option to skip in-flight connections this adds
+that option to the RPC interface. The skip in-flight connections is also
+described in criu.txt.
+
+Signed-off-by: Adrian Reber <areber@redhat.com>
+Signed-off-by: Pavel Emelyanov <xemul@virtuozzo.com>
+---
+ Documentation/criu.txt |  7 +++++++
+ criu/cr-service.c      |  3 +++
+ images/rpc.proto       |  1 +
+ lib/c/criu.c           | 11 +++++++++++
+ lib/c/criu.h           |  2 ++
+ 5 files changed, 24 insertions(+)
+
+diff --git a/Documentation/criu.txt b/Documentation/criu.txt
+index 55f05c0..39a6685 100644
+--- a/Documentation/criu.txt
++++ b/Documentation/criu.txt
+@@ -199,6 +199,13 @@ Thus for command line argument the example above will look like:
+ *--tcp-established*::
+     Checkpoint established TCP connections.
+ 
++*--skip-in-flight*::
++    This option skips in-flight TCP connections. If TCP connections
++    are found which are not yet completely established, criu will
++    ignore these connections in favor of erroring out.
++    The TCP stack on the client side is expected to handle the
++    re-connect gracefully.
++
+ *--veth-pair* '<IN>'*=*'<OUT>'::
+     Correspondence between outside and inside names of veth devices.
+ 
+diff --git a/criu/cr-service.c b/criu/cr-service.c
+index 0dc9c0c..0672a83 100644
+--- a/criu/cr-service.c
++++ b/criu/cr-service.c
+@@ -322,6 +322,9 @@ static int setup_opts_from_req(int sk, CriuOpts *req)
+ 	if (req->has_tcp_established)
+ 		opts.tcp_established_ok = req->tcp_established;
+ 
++	if (req->has_tcp_skip_in_flight)
++		opts.tcp_skip_in_flight = req->tcp_skip_in_flight;
++
+ 	if (req->has_evasive_devices)
+ 		opts.evasive_devices = req->evasive_devices;
+ 
+diff --git a/images/rpc.proto b/images/rpc.proto
+index 1f74dcf..27583c1 100644
+--- a/images/rpc.proto
++++ b/images/rpc.proto
+@@ -104,6 +104,7 @@ message criu_opts {
+ 	repeated string			external	= 37;
+ 	optional uint32			empty_ns	= 38;
+ 	repeated join_namespace		join_ns		= 39;
++	optional bool			tcp_skip_in_flight	= 46;
+ }
+ 
+ message criu_dump_resp {
+diff --git a/lib/c/criu.c b/lib/c/criu.c
+index 05425a3..e75268c 100644
+--- a/lib/c/criu.c
++++ b/lib/c/criu.c
+@@ -309,6 +309,17 @@ void criu_set_tcp_established(bool tcp_established)
+ 	criu_local_set_tcp_established(global_opts, tcp_established);
+ }
+ 
++void criu_local_set_tcp_skip_in_flight(criu_opts *opts, bool tcp_skip_in_flight)
++{
++	opts->rpc->has_tcp_skip_in_flight	= true;
++	opts->rpc->tcp_skip_in_flight		= tcp_skip_in_flight;
++}
++
++void criu_set_tcp_skip_in_flight(bool tcp_skip_in_flight)
++{
++	criu_local_set_tcp_skip_in_flight(global_opts, tcp_skip_in_flight);
++}
++
+ void criu_local_set_evasive_devices(criu_opts *opts, bool evasive_devices)
+ {
+ 	opts->rpc->has_evasive_devices	= true;
+diff --git a/lib/c/criu.h b/lib/c/criu.h
+index 7ed1750..c28369f 100644
+--- a/lib/c/criu.h
++++ b/lib/c/criu.h
+@@ -65,6 +65,7 @@ void criu_set_leave_running(bool leave_running);
+ void criu_set_ext_unix_sk(bool ext_unix_sk);
+ int criu_add_unix_sk(unsigned int inode);
+ void criu_set_tcp_established(bool tcp_established);
++void criu_set_tcp_skip_in_flight(bool tcp_skip_in_flight);
+ void criu_set_evasive_devices(bool evasive_devices);
+ void criu_set_shell_job(bool shell_job);
+ void criu_set_file_locks(bool file_locks);
+@@ -169,6 +170,7 @@ void criu_local_set_leave_running(criu_opts *opts, bool leave_running);
+ void criu_local_set_ext_unix_sk(criu_opts *opts, bool ext_unix_sk);
+ int criu_local_add_unix_sk(criu_opts *opts, unsigned int inode);
+ void criu_local_set_tcp_established(criu_opts *opts, bool tcp_established);
++void criu_local_set_tcp_skip_in_flight(criu_opts *opts, bool tcp_skip_in_flight);
+ void criu_local_set_evasive_devices(criu_opts *opts, bool evasive_devices);
+ void criu_local_set_shell_job(criu_opts *opts, bool shell_job);
+ void criu_local_set_file_locks(criu_opts *opts, bool file_locks);
