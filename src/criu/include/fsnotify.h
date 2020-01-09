@@ -1,7 +1,6 @@
 #ifndef __CR_FSNOTIFY_H__
 #define __CR_FSNOTIFY_H__
 
-#include "asm/types.h"
 #include "files.h"
 
 #include "protobuf.h"
@@ -9,10 +8,9 @@
 
 #define KERNEL_FS_EVENT_ON_CHILD 0x08000000
 
-struct fsnotify_params {
-	u32	faflags;
-	u32	evflags;
-};
+#ifndef INOTIFY_IOC_SETNEXTWD
+#define INOTIFY_IOC_SETNEXTWD  _IOW('I', 0, __s32)
+#endif
 
 extern int is_inotify_link(char *link);
 extern int is_fanotify_link(char *link);

@@ -6,17 +6,25 @@ ifndef ____nmk_defined__build
 src		:= $(obj)
 src-makefile	:= $(call objectify,$(makefile))
 obj-y		:=
+obj-e		:=
+builtin-name	:=
+builtin-target	:=
 lib-y		:=
+lib-e		:=
+lib-name	:=
+lib-target	:=
+hostprogs-y	:=
+libso-y		:=
+ld_flags	:=
+ldflags-so	:=
+arflags-y	:=
 target          :=
 deps-y		:=
 all-y		:=
-builtin-name	:=
-lib-name	:=
-ld_flags	:=
 cleanup-y	:=
 mrproper-y	:=
+target		:=
 objdirs		:=
-libso-y	        :=
 
 MAKECMDGOALS := $(call uniq,$(MAKECMDGOALS))
 
@@ -24,10 +32,26 @@ ifndef obj
         $(error obj is undefined)
 endif
 
+ifndef __nmk-makefile-deps
+        # Add top-make - it isn't included into this build.mk
+        __nmk-makefile-deps := Makefile
+endif
+__nmk-makefile-deps += $(src-makefile)
+export __nmk-makefile-deps
+
+#
+# Filter out any -Wl,XXX option: some of build farms
+# assumes that we're using $(CC) for building built-in
+# targets (and they have all rights to). But we're
+# using $(LD) directly instead so filter out -Wl
+# flags to make maintainer's life easier.
+LDFLAGS-MASK	:= -Wl,%
+LDFLAGS		:= $(filter-out $(LDFLAGS-MASK),$(LDFLAGS))
+
 #
 # Accumulate common flags.
 define nmk-ccflags
-        $(CFLAGS) $(ccflags-y) $(CFLAGS_$(@F))
+        $(filter-out $(CFLAGS_REMOVE_$(@F)), $(CFLAGS) $(ccflags-y) $(CFLAGS_$(@F)))
 endef
 
 define nmk-asflags
@@ -41,25 +65,25 @@ endef
 #
 # General rules.
 define gen-cc-rules
-$(1).o: $(2).c $(src-makefile)
+$(1).o: $(2).c $(__nmk-makefile-deps)
 	$$(call msg-cc, $$@)
 	$$(Q) $$(CC) -c $$(strip $$(nmk-ccflags)) $$< -o $$@
-$(1).i: $(2).c $(src-makefile)
+$(1).i: $(2).c $(__nmk-makefile-deps)
 	$$(call msg-cc, $$@)
 	$$(Q) $$(CC) -E $$(strip $$(nmk-ccflags)) $$< -o $$@
-$(1).s: $(2).c $(src-makefile)
+$(1).s: $(2).c $(__nmk-makefile-deps)
 	$$(call msg-cc, $$@)
 	$$(Q) $$(CC) -S -fverbose-asm $$(strip $$(nmk-ccflags)) $$< -o $$@
-$(1).d: $(2).c $(src-makefile)
+$(1).d: $(2).c $(__nmk-makefile-deps)
 	$$(call msg-dep, $$@)
 	$$(Q) $$(CC) -M -MT $$@ -MT $$(patsubst %.d,%.o,$$@) $$(strip $$(nmk-ccflags)) $$< -o $$@
-$(1).o: $(2).S $(src-makefile)
+$(1).o: $(2).S $(__nmk-makefile-deps)
 	$$(call msg-cc, $$@)
 	$$(Q) $$(CC) -c $$(strip $$(nmk-asflags)) $$< -o $$@
-$(1).i: $(2).S $(src-makefile)
+$(1).i: $(2).S $(__nmk-makefile-deps)
 	$$(call msg-cc, $$@)
 	$$(Q) $$(CC) -E $$(strip $$(nmk-asflags)) $$< -o $$@
-$(1).d: $(2).S $(src-makefile)
+$(1).d: $(2).S $(__nmk-makefile-deps)
 	$$(call msg-dep, $$@)
 	$$(Q) $$(CC) -M -MT $$@ -MT $$(patsubst %.d,%.o,$$@) $$(strip $$(nmk-asflags)) $$< -o $$@
 endef
@@ -73,7 +97,7 @@ endif
 #
 # Prepare the unique entries.
 obj-y           := $(sort $(call uniq,$(obj-y)))
-lib-y           := $(filter-out $(obj-y),$(sort $(call uniq,$(lib-y))))
+lib-y           := $(filter-out $(obj-y),$(lib-y))
 
 #
 # Add subdir path
@@ -87,7 +111,7 @@ builtin-name	:= $(strip $(builtin-name))
 
 #
 # Link flags.
-ld_flags	:= $(strip $(LDFLAGS) $(ldflags-y))
+ldflags-y	:= $(strip $(LDFLAGS) $(ldflags-y))
 
 #
 # $(obj) related rules.
@@ -96,7 +120,6 @@ $(eval $(call gen-cc-rules,$(obj)/%,$(obj)/%))
 #
 # Prepare targets.
 ifneq ($(lib-y),)
-        lib-target :=
         ifneq ($(lib-name),)
                 lib-target := $(obj)/$(lib-name)
         else
@@ -109,7 +132,6 @@ ifneq ($(lib-y),)
 endif
 
 ifneq ($(obj-y),)
-        builtin-target :=
         ifneq ($(builtin-name),)
                 builtin-target := $(obj)/$(builtin-name)
         else
@@ -126,7 +148,7 @@ endif
 define gen-ld-target-rule
 $(1): $(3)
 	$$(call msg-link, $$@)
-	$$(Q) $$(LD) $(2) -r -o $$@ $(4)
+	$$(Q) $$(LD) $(2) -o $$@ $(4)
 endef
 
 define gen-ar-target-rule
@@ -140,8 +162,8 @@ endef
 ifdef builtin-target
         $(eval $(call gen-ld-target-rule,                               \
                         $(builtin-target),                              \
-                        $(ld_flags),                                    \
-                        $(obj-y) $(src-makefile),                       \
+                        $(ldflags-y),                                   \
+                        $(obj-y) $(__nmk-makefile-deps),                \
                         $(obj-y) $(call objectify,$(obj-e))))
 endif
 
@@ -149,7 +171,7 @@ ifdef lib-target
         $(eval $(call gen-ar-target-rule,                               \
                         $(lib-target),                                  \
                         $(ARFLAGS) $(arflags-y),                        \
-                        $(lib-y) $(src-makefile),                       \
+                        $(lib-y) $(__nmk-makefile-deps),                \
                         $(lib-y) $(call objectify,$(lib-e))))
 endif
 
@@ -159,9 +181,9 @@ define gen-custom-target-rule
         ifneq ($($(1)-obj-y),)
                 $(eval $(call gen-ld-target-rule,                       \
                                 $(obj)/$(1).built-in.o,                 \
-                                $(ld_flags) $(LDFLAGS_$(1)),            \
+                                $(ldflags-y) $(LDFLAGS_$(1)),           \
                                 $(call objectify,$($(1)-obj-y))         \
-                                $(src-makefile),                        \
+                                $(__nmk-makefile-deps),                 \
                                 $(call objectify,$($(1)-obj-y))         \
                                 $(call objectify,$($(1)-obj-e))))
                 all-y += $(obj)/$(1).built-in.o
@@ -174,7 +196,7 @@ define gen-custom-target-rule
                                 $(obj)/$(1).lib.a,                      \
                                 $(ARFLAGS) $($(1)-arflags-y),           \
                                 $(call objectify,$($(1)-lib-y))         \
-                                $(src-makefile),                        \
+                                $(__nmk-makefile-deps),                 \
                                 $(call objectify,$($(1)-lib-y)))        \
                                 $(call objectify,$($(1)-lib-e)))
                 all-y += $(obj)/$(1).lib.a
@@ -194,16 +216,16 @@ $(foreach t,$(objdirs),$(eval $(call gen-cc-rules,$(t)/%,$(t)/%)))
 #
 # Host programs.
 define gen-host-cc-rules
-$(addprefix $(obj)/,$(1)): $(obj)/%.o: $(obj)/%.c $(src-makefile)
+$(addprefix $(obj)/,$(1)): $(obj)/%.o: $(obj)/%.c $(__nmk-makefile-deps)
 	$$(call msg-host-cc, $$@)
 	$$(Q) $$(HOSTCC) -c $$(strip $$(nmk-host-ccflags)) $$< -o $$@
-$(patsubst %.o,%.i,$(addprefix $(obj)/,$(1))): $(obj)/%.i: $(obj)/%.c $(src-makefile)
+$(patsubst %.o,%.i,$(addprefix $(obj)/,$(1))): $(obj)/%.i: $(obj)/%.c $(__nmk-makefile-deps)
 	$$(call msg-host-cc, $$@)
 	$$(Q) $$(HOSTCC) -E $$(strip $$(nmk-host-ccflags)) $$< -o $$@
-$(patsubst %.o,%.s,$(addprefix $(obj)/,$(1))): $(obj)/%.s: $(obj)/%.c $(src-makefile)
+$(patsubst %.o,%.s,$(addprefix $(obj)/,$(1))): $(obj)/%.s: $(obj)/%.c $(__nmk-makefile-deps)
 	$$(call msg-host-cc, $$@)
 	$$(Q) $$(HOSTCC) -S -fverbose-asm $$(strip $$(nmk-host-ccflags)) $$< -o $$@
-$(patsubst %.o,%.d,$(addprefix $(obj)/,$(1))): $(obj)/%.d: $(obj)/%.c $(src-makefile)
+$(patsubst %.o,%.d,$(addprefix $(obj)/,$(1))): $(obj)/%.d: $(obj)/%.c $(__nmk-makefile-deps)
 	$$(call msg-host-dep, $$@)
 	$$(Q) $$(HOSTCC) -M -MT $$@ -MT $$(patsubst %.d,%.o,$$@) $$(strip $$(nmk-host-ccflags)) $$< -o $$@
 endef
@@ -212,9 +234,9 @@ define gen-host-rules
         $(eval $(call gen-host-cc-rules,$($(1)-objs)))
         all-y += $(addprefix $(obj)/,$($(1)-objs))
         cleanup-y += $(call cleanify,$(addprefix $(obj)/,$($(1)-objs)))
-$(obj)/$(1): $(addprefix $(obj)/,$($(1)-objs)) $(src-makefile)
+$(obj)/$(1): $(addprefix $(obj)/,$($(1)-objs)) $(__nmk-makefile-deps)
 	$$(call msg-host-link, $$@)
-	$$(Q) $$(HOSTCC) $$(HOSTCFLAGS) $(addprefix $(obj)/,$($(1)-objs)) $$(HOSTLDFLAGS) $$(HOSTLDFLAGS_$$(@F))-o $$@
+	$$(Q) $$(HOSTCC) $$(HOSTCFLAGS) $(addprefix $(obj)/,$($(1)-objs)) $$(HOSTLDFLAGS) $$(HOSTLDFLAGS_$$(@F)) -o $$@
 all-y += $(obj)/$(1)
 cleanup-y += $(obj)/$(1)
 endef
@@ -223,7 +245,7 @@ $(foreach t,$(hostprogs-y),$(eval $(call gen-host-rules,$(t))))
 #
 # Dynamic library linking.
 define gen-so-link-rules
-$(call objectify,$(1)).so:  $(call objectify,$($(1)-objs)) $(src-makefile)
+$(call objectify,$(1)).so:  $(call objectify,$($(1)-objs)) $(__nmk-makefile-deps)
 	$$(call msg-link, $$@)
 	$$(Q) $$(CC) -shared $$(ldflags-so) $$(LDFLAGS) $$(LDFLAGS_$$(@F)) -o $$@ $(call objectify,$($(1)-objs))
 all-y += $(call objectify,$(1)).so
@@ -233,28 +255,49 @@ $(foreach t,$(libso-y),$(eval $(call gen-so-link-rules,$(t))))
 
 #
 # Figure out if the target we're building needs deps to include.
+define collect-builtin-deps
+        ifeq ($(1),$(2))
+                deps-y += $(obj-y:.o=.d)
+        endif
+endef
+define collect-lib-deps
+        ifeq ($(1),$(2))
+                deps-y += $(lib-y:.o=.d)
+        endif
+endef
+define collect-hostprogs-deps
+        ifeq ($(1),$(2))
+                deps-y += $(addprefix $(obj)/,$($(1)-objs:.o=.d))
+        endif
+endef
+define collect-target-deps
+        ifeq ($(1),$(2))
+                deps-y += $(call objectify,$($(t)-lib-y:.o=.d))
+                deps-y += $(call objectify,$($(t)-obj-y:.o=.d))
+        endif
+endef
 define collect-deps
-        ifneq ($(filter-out %.d,$(1)),)
-                ifneq ($(filter %.o %.i %.s,$(1)),)
-                        deps-y += $(addsuffix .d,$(basename $(1)))
+        ifneq ($(filter all,$(1)),)
+                $(eval $(call collect-builtin-deps,$(builtin-target),$(builtin-target)))
+                $(eval $(call collect-lib-deps,$(lib-target),$(lib-target)))
+                $(foreach t,$(hostprogs-y),$(eval $(call collect-hostprogs-deps,$(t),$(t))))
+                $(foreach t,$(target),$(eval $(call collect-target-deps,$(t),$(t))))
+        else
+                ifneq ($(filter-out %.d $(builtin-target) $(lib-target) $(hostprogs-y) $(target),$(1)),)
+                        ifneq ($(filter %.o %.i %.s,$(1)),)
+                                deps-y += $(addsuffix .d,$(basename $(1)))
+                        endif
+                else
+                        $(eval $(call collect-builtin-deps,$(builtin-target),$(1)))
+                        $(eval $(call collect-lib-deps,$(lib-target),$(1)))
+                        $(foreach t,$(hostprogs-y),$(eval $(call collect-hostprogs-deps,$(t),$(1))))
+                        $(foreach t,$(target),$(eval $(call collect-target-deps,$(t),$(1))))
                 endif
-        endif
-        ifeq ($(builtin-target),$(1))
-                deps-y += $(obj-y:.o=.d)
-        endif
-        ifeq ($(lib-target),$(1))
-                deps-y += $(lib-y:.o=.d)
-        endif
-        ifneq ($(filter all $(all-y) $(hostprogs-y),$(1)),)
-                deps-y += $(obj-y:.o=.d)
-                deps-y += $(lib-y:.o=.d)
-                deps-y += $(foreach t,$(target),$(call objectify,$($(t)-lib-y:.o=.d)) $(call objectify,$($(t)-obj-y:.o=.d)))
-                deps-y += $(foreach t,$(hostprogs-y),$(addprefix $(obj)/,$($(t)-objs:.o=.d)))
         endif
 endef
 
 ifneq ($(MAKECMDGOALS),)
-        ifneq ($(MAKECMDGOALS),clean)
+        ifneq ($(filter-out clean mrproper,$(MAKECMDGOALS)),)
                 $(foreach goal,$(MAKECMDGOALS),$(eval $(call collect-deps,$(goal))))
                 deps-y := $(call uniq,$(deps-y))
                 ifneq ($(deps-y),)
@@ -265,8 +308,7 @@ endif
 
 #
 # Main phony rule.
-all: $(all-y)
-	@true
+all: $(all-y) ;
 .PHONY: all
 
 #
@@ -284,7 +326,5 @@ mrproper: clean
 
 #
 # Footer.
-$(__nmk_dir)scripts/build.mk:
-	@true
 ____nmk_defined__build = y
 endif

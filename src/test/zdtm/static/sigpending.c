@@ -1,4 +1,3 @@
-#define _GNU_SOURCE
 #include <signal.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -28,6 +27,40 @@ static int thread_nr;
 #ifndef offsetof
 # define offsetof(TYPE, MEMBER) ((size_t) &((TYPE *)0)->MEMBER)
 #endif
+
+/* cr_siginfo is declared to get an offset of _sifields */
+union cr_siginfo {
+	struct {
+		int si_signo;
+		int si_errno;
+		int si_code;
+
+		union {
+			int _pad[10];
+			/* ... */
+		} _sifields;
+	} _info;
+	siginfo_t info;
+};
+typedef union cr_siginfo cr_siginfo_t;
+
+#define siginf_body(s) (&((cr_siginfo_t *)(s))->_info._sifields)
+
+/*
+ * The kernel puts only relevant union member when signal arrives,
+ * leaving _si_fields to be filled with junk from stack. Check only
+ * first 12 bytes:
+ *	// POSIX.1b signals.
+ *	struct
+ *	  {
+ *	    __pid_t si_pid;	// Sending process ID.
+ *	    __uid_t si_uid;	// Real user ID of sending process.
+ *	    sigval_t si_sigval;	// Signal value.
+ *	  } _rt;
+ * Look at __copy_siginfo_to_user32() for more information.
+ */
+# define _si_fields_sz 12
+#define siginfo_filled (offsetof(cr_siginfo_t, _info._sifields) + _si_fields_sz)
 
 static pthread_mutex_t exit_lock;
 static pthread_mutex_t init_lock;
@@ -71,13 +104,12 @@ static void sig_handler(int signal, siginfo_t *info, void *data)
 		}
 
 		crc = ~0;
-		if (datachk((uint8_t *) &info->_sifields,
-			    sizeof(siginfo_t) - offsetof(siginfo_t, _sifields), &crc)) {
+		if (datachk((uint8_t *) siginf_body(info), _si_fields_sz, &crc)) {
 			fail("CRC mismatch\n");
 			return;
 		}
 
-		 if (memcmp(info, src, sizeof(siginfo_t))) {
+		 if (memcmp(info, src, siginfo_filled)) {
 			fail("Source and received info are differ\n");
 			return;
 		}
@@ -154,8 +186,7 @@ int send_siginfo(int signo, pid_t pid, pid_t tid, int group, siginfo_t *info)
 	info->si_code = si_code;
 	si_code--;
 	info->si_signo = signo;
-	datagen((uint8_t *) &info->_sifields,
-		    sizeof(siginfo_t) - offsetof(siginfo_t, _sifields), &crc);
+	datagen((uint8_t *) siginf_body(info), _si_fields_sz, &crc);
 
 	sent_sigs++;
 
@@ -170,6 +201,7 @@ int main(int argc, char ** argv)
 	sigset_t blockmask, oldset, newset;
 	struct sigaction act;
 	pthread_t pthrd;
+	siginfo_t infop;
 	int i;
 
 	memset(&oldset, 0, sizeof(oldset));
@@ -209,7 +241,7 @@ int main(int argc, char ** argv)
 
 	if(child == 0)
 		return 5; /* SIGCHLD */
-	if (waitid(P_PID, child, NULL, WNOWAIT | WEXITED)) {
+	if (waitid(P_PID, child, &infop, WNOWAIT | WEXITED)) {
 		pr_perror("waitid");
 		return 1;
 	}

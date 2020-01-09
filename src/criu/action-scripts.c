@@ -4,14 +4,18 @@
 #include <stdlib.h>
 
 #include "cr_options.h"
-#include "list.h"
+#include "common/list.h"
 #include "xmalloc.h"
 #include "log.h"
 #include "servicefd.h"
 #include "cr-service.h"
 #include "action-scripts.h"
 #include "pstree.h"
-#include "bug.h"
+#include "common/bug.h"
+#include "util.h"
+#include <sys/un.h>
+#include <sys/socket.h>
+#include "common/scm.h"
 
 static const char *action_names[ACT_MAX] = {
 	[ ACT_PRE_DUMP ]	= "pre-dump",
@@ -22,7 +26,9 @@ static const char *action_names[ACT_MAX] = {
 	[ ACT_NET_UNLOCK ]	= "network-unlock",
 	[ ACT_SETUP_NS ]	= "setup-namespaces",
 	[ ACT_POST_SETUP_NS ]	= "post-setup-namespaces",
+	[ ACT_PRE_RESUME ]	= "pre-resume",
 	[ ACT_POST_RESUME ]	= "post-resume",
+	[ ACT_ORPHAN_PTS_MASTER ] = "orphan-pts-master",
 };
 
 struct script {
@@ -37,14 +43,12 @@ enum {
 };
 
 static int scripts_mode = SCRIPTS_NONE;
-static int rpc_sk;
 static LIST_HEAD(scripts);
 
 static int run_shell_scripts(const char *action)
 {
-	int ret = 0;
+	int retval = 0;
 	struct script *script;
-	char image_dir[PATH_MAX];
 	static unsigned env_set = 0;
 
 #define ENV_IMGDIR	0x1
@@ -56,6 +60,7 @@ static int run_shell_scripts(const char *action)
 	}
 
 	if (!(env_set & ENV_IMGDIR)) {
+		char image_dir[PATH_MAX];
 		sprintf(image_dir, "/proc/%ld/fd/%d", (long) getpid(), get_service_fd(IMG_FD_OFF));
 		if (setenv("CRTOOLS_IMAGE_DIR", image_dir, 1)) {
 			pr_perror("Can't set CRTOOLS_IMAGE_DIR=%s", image_dir);
@@ -66,10 +71,10 @@ static int run_shell_scripts(const char *action)
 
 	if (!(env_set & ENV_ROOTPID) && root_item) {
 		int pid;
-		char root_item_pid[16];
 
-		pid = root_item->pid.real;
+		pid = root_item->pid->real;
 		if (pid != -1) {
+			char root_item_pid[16];
 			snprintf(root_item_pid, sizeof(root_item_pid), "%d", pid);
 			if (setenv("CRTOOLS_INIT_PID", root_item_pid, 1)) {
 				pr_perror("Can't set CRTOOLS_INIT_PID=%s", root_item_pid);
@@ -80,13 +85,34 @@ static int run_shell_scripts(const char *action)
 	}
 
 	list_for_each_entry(script, &scripts, node) {
+		int err;
 		pr_debug("\t[%s]\n", script->path);
-		ret |= system(script->path);
+		err = cr_system(-1, -1, -1, script->path,
+				(char *[]) { script->path, NULL }, 0);
+		if (err)
+			pr_err("Script %s exited with %d\n", script->path, err);
+		retval |= err;
 	}
 
 	unsetenv("CRTOOLS_SCRIPT_ACTION");
 
-	return ret;
+	return retval;
+}
+
+int rpc_send_fd(enum script_actions act, int fd)
+{
+	const char *action = action_names[act];
+	int rpc_sk;
+
+	if (scripts_mode != SCRIPTS_RPC)
+		return -1;
+
+	rpc_sk = get_service_fd(RPC_SK_OFF);
+	if (rpc_sk < 0)
+		return -1;
+
+	pr_debug("\tRPC\n");
+	return send_criu_rpc_script(act, (char *)action, rpc_sk, fd);
 }
 
 int run_scripts(enum script_actions act)
@@ -100,8 +126,7 @@ int run_scripts(enum script_actions act)
 		return 0;
 
 	if (scripts_mode == SCRIPTS_RPC) {
-		pr_debug("\tRPC\n");
-		ret = send_criu_rpc_script(act, (char *)action, rpc_sk);
+		ret = rpc_send_fd(act, -1);
 		goto out;
 	}
 
@@ -139,6 +164,8 @@ int add_rpc_notify(int sk)
 	BUG_ON(scripts_mode == SCRIPTS_SHELL);
 	scripts_mode = SCRIPTS_RPC;
 
-	rpc_sk = sk;
+	if (install_service_fd(RPC_SK_OFF, dup(sk)) < 0)
+		return -1;
+
 	return 0;
 }

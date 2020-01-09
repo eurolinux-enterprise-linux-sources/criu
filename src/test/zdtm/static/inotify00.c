@@ -1,4 +1,3 @@
-#define _GNU_SOURCE         /* See feature_test_macros(7) */
 #include <unistd.h>
 #include <limits.h>
 
@@ -12,7 +11,6 @@
 #include <sys/inotify.h>
 #include <unistd.h>
 #include <stdlib.h>
-#include <dirent.h>
 #include <signal.h>
 #include <sched.h>
 #include <sys/mount.h>

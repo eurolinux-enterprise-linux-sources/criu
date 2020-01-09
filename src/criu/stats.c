@@ -1,10 +1,13 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/time.h>
-#include "asm/atomic.h"
+#include "int.h"
+#include "atomic.h"
+#include "cr_options.h"
 #include "rst-malloc.h"
 #include "protobuf.h"
 #include "stats.h"
+#include "util.h"
 #include "image.h"
 #include "images/stats.pb-c.h"
 
@@ -100,6 +103,40 @@ static void encode_time(int t, u_int32_t *to)
 	*to = tm->total.tv_sec * USEC_PER_SEC + tm->total.tv_usec;
 }
 
+static void display_stats(int what, StatsEntry *stats)
+{
+	if (what == DUMP_STATS) {
+		pr_msg("Displaying dump stats:\n");
+		pr_msg("Freezing time: %d us\n", stats->dump->freezing_time);
+		pr_msg("Frozen time: %d us\n", stats->dump->frozen_time);
+		pr_msg("Memory dump time: %d us\n", stats->dump->memdump_time);
+		pr_msg("Memory write time: %d us\n", stats->dump->memwrite_time);
+		if (stats->dump->has_irmap_resolve)
+			pr_msg("IRMAP resolve time: %d us\n", stats->dump->irmap_resolve);
+		pr_msg("Memory pages scanned: %" PRIu64 " (0x%" PRIx64 ")\n", stats->dump->pages_scanned,
+				stats->dump->pages_scanned);
+		pr_msg("Memory pages skipped from parent: %" PRIu64 " (0x%" PRIx64 ")\n",
+				stats->dump->pages_skipped_parent,
+				stats->dump->pages_skipped_parent);
+		pr_msg("Memory pages written: %" PRIu64 " (0x%" PRIx64 ")\n", stats->dump->pages_written,
+				stats->dump->pages_written);
+		pr_msg("Lazy memory pages: %" PRIu64 " (0x%" PRIx64 ")\n", stats->dump->pages_lazy,
+				stats->dump->pages_lazy);
+	} else if (what == RESTORE_STATS) {
+		pr_msg("Displaying restore stats:\n");
+		pr_msg("Pages compared: %" PRIu64 " (0x%" PRIx64 ")\n", stats->restore->pages_compared,
+				stats->restore->pages_compared);
+		pr_msg("Pages skipped COW: %" PRIu64 " (0x%" PRIx64 ")\n", stats->restore->pages_skipped_cow,
+				stats->restore->pages_skipped_cow);
+		if (stats->restore->has_pages_restored)
+			pr_msg("Pages restored: %" PRIu64 " (0x%" PRIx64 ")\n", stats->restore->pages_restored,
+					stats->restore->pages_restored);
+		pr_msg("Restore time: %d us\n", stats->restore->restore_time);
+		pr_msg("Forking time: %d us\n", stats->restore->forking_time);
+	} else
+		return;
+}
+
 void write_stats(int what)
 {
 	StatsEntry stats = STATS_ENTRY__INIT;
@@ -122,6 +159,11 @@ void write_stats(int what)
 		ds_entry.pages_scanned = dstats->counts[CNT_PAGES_SCANNED];
 		ds_entry.pages_skipped_parent = dstats->counts[CNT_PAGES_SKIPPED_PARENT];
 		ds_entry.pages_written = dstats->counts[CNT_PAGES_WRITTEN];
+		ds_entry.pages_lazy = dstats->counts[CNT_PAGES_LAZY];
+		ds_entry.page_pipes = dstats->counts[CNT_PAGE_PIPES];
+		ds_entry.has_page_pipes = true;
+		ds_entry.page_pipe_bufs = dstats->counts[CNT_PAGE_PIPE_BUFS];
+		ds_entry.has_page_pipe_bufs = true;
 
 		name = "dump";
 	} else if (what == RESTORE_STATS) {
@@ -144,6 +186,9 @@ void write_stats(int what)
 		pb_write_one(img, &stats, PB_STATS);
 		close_image(img);
 	}
+
+	if (opts.display_stats)
+		display_stats(what, &stats);
 }
 
 int init_stats(int what)

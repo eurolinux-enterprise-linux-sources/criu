@@ -3,10 +3,6 @@ export __nmk_dir
 
 include $(__nmk_dir)include.mk
 
-MAKEFLAGS := -r -R --no-print-directory
-
-.PHONY: all help test docs clean install
-
 help:
 	@echo '    Targets:'
 	@echo '      install dir=<dir>  - Install scripts into directory <dir>'
@@ -29,8 +25,7 @@ install:
 	@cp scripts/tools.mk $(dir)
 	@cp scripts/utils.mk $(dir)
 
-all:
-	@true
+all: ;
 
 clean:
 	$(call msg-clean, "nmk")

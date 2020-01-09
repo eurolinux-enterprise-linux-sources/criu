@@ -4,6 +4,7 @@ proto-obj-y	+= core-x86.o
 proto-obj-y	+= core-arm.o
 proto-obj-y	+= core-aarch64.o
 proto-obj-y	+= core-ppc64.o
+proto-obj-y	+= core-s390.o
 proto-obj-y	+= cpuinfo.o
 proto-obj-y	+= inventory.o
 proto-obj-y	+= fdinfo.o
@@ -59,6 +60,9 @@ proto-obj-y	+= seccomp.o
 proto-obj-y	+= binfmt-misc.o
 proto-obj-y	+= time.o
 proto-obj-y	+= sysctl.o
+proto-obj-y	+= autofs.o
+proto-obj-y	+= macvlan.o
+proto-obj-y	+= sit.o
 
 CFLAGS		+= -iquote $(obj)/
 
@@ -73,10 +77,12 @@ $(shell grep "^[[:blank:]]*import[[:blank:]]" $(1)      |       \
         sort | uniq)
 endef
 
+makefile-deps := Makefile $(obj)/Makefile
+
 #
 # Generates rules needed to compile protobuf files.
 define gen-proto-rules
-$(obj)/$(1).pb-c.c $(obj)/$(1).pb-c.h: $(obj)/$(1).proto $(addsuffix .pb-c.c,$(addprefix $(obj)/,$(2)))
+$(obj)/$(1).pb-c.c $(obj)/$(1).pb-c.h: $(obj)/$(1).proto $(addsuffix .pb-c.c,$(addprefix $(obj)/,$(2))) $(makefile-deps)
 	$$(E) "  PBCC    " $$@
 	$$(Q) protoc-c --proto_path=$(obj)/ --c_out=$(obj)/ $$<
 ifeq ($(PROTOUFIX),y)
@@ -84,9 +90,9 @@ ifeq ($(PROTOUFIX),y)
 	$$(Q) sed -i -e 's/4294967295/0xFFFFFFFF/g' $$(patsubst %.c,%.h,$$@)
 	$$(Q) sed -i -e 's/4294967295/0xFFFFFFFF/g' $$(patsubst %.h,%.c,$$@)
 endif
-$(obj)/$(1).pb-c.d: $(obj)/$(1).pb-c.c $(addsuffix .pb-c.d,$(addprefix $(obj)/,$(2)))
+$(obj)/$(1).pb-c.d: $(obj)/$(1).pb-c.c $(addsuffix .pb-c.d,$(addprefix $(obj)/,$(2))) $(makefile-deps)
 	$$(E) "  DEP     " $$@
-	$$(Q) $$(CC) -M -MT $$@ -MT $(patsubst %.d,%.o,$$@) $$(CFLAGS) $$< -o $$@
+	$$(Q) $$(CC) -M -MT $$@ -MT $$(patsubst %.d,%.o,$$@) $$(CFLAGS) $$< -o $$@
 endef
 
 $(foreach file, $(proto-obj-y),                                                 \
@@ -101,6 +107,7 @@ $(obj)/%.o: $(obj)/%.pb-c.c $(obj)/%.pb-c.h
 $(obj)/built-in.o: $(addprefix $(obj)/,$(proto-obj-y))
 	$(E) "  LINK    " $@
 	$(Q) $(LD) $(ldflags-y) -r -o $@ $^
+cleanup-y += $(obj)/built-in.o
 
 ifneq ($(MAKECMDGOALS),clean)
 ifneq ($(MAKECMDGOALS),mrproper)
@@ -108,9 +115,7 @@ ifneq ($(MAKECMDGOALS),mrproper)
 endif
 endif
 
-mrproper-y += $(obj)/*.pb-c.c $(obj)/*.pb-c.h
-cleanup-y += $(obj)/*.o $(obj)/*.d $(obj)/*.s $(obj)/*.i
-cleanup-y += $(obj)/google/protobuf/*.d
-cleanup-y += $(obj)/google/protobuf/*.h
-cleanup-y += $(obj)/google/protobuf/*.c
-cleanup-y += $(obj)/google/protobuf/*.o
+cleanup-y += $(call cleanify,$(addprefix $(obj)/,$(proto-obj-y)))
+cleanup-y += $(call cleanify,$(addprefix $(obj)/,$(proto-obj-y:.o=.pb-c.o)))
+mrproper-y += $(addprefix $(obj)/,$(proto-obj-y:.o=.pb-c.c))
+mrproper-y += $(addprefix $(obj)/,$(proto-obj-y:.o=.pb-c.h))

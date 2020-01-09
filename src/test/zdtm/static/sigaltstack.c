@@ -1,5 +1,3 @@
-#define _GNU_SOURCE
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <signal.h>
@@ -43,7 +41,7 @@ static int sascmp(stack_t *old, stack_t *new)
 
 static void show_ss(char *prefix, stack_t *s)
 {
-	test_msg("%20s: at %p (size %#8x flags %#2x)\n",
+	test_msg("%20s: at %p (size %8zu flags %#2x)\n",
 		 prefix, s->ss_sp, s->ss_size, s->ss_flags);
 }
 
@@ -66,7 +64,7 @@ static void *thread_func(void *arg)
 	sas_state[SAS_THRD_OLD] = (stack_t) {
 		.ss_size	= sizeof(stack_thread) - 8,
 		.ss_sp		= stack_thread,
-		.ss_flags	= SS_ONSTACK,
+		.ss_flags	= 0,
 	};
 
 	struct sigaction sa = {
@@ -108,7 +106,7 @@ int main(int argc, char *argv[])
 	sas_state[SAS_MAIN_OLD] = (stack_t) {
 		.ss_size	= sizeof(stack_main) - 8,
 		.ss_sp		= stack_main,
-		.ss_flags	= SS_ONSTACK,
+		.ss_flags	= 0,
 	};
 
 	struct sigaction sa = {
@@ -152,6 +150,9 @@ int main(int argc, char *argv[])
 		exit(-1);
 	}
 	task_waiter_fini(&t);
+
+	sas_state[SAS_THRD_OLD].ss_flags = SS_ONSTACK;
+	sas_state[SAS_MAIN_OLD].ss_flags = SS_ONSTACK;
 
 	show_ss("main old", &sas_state[SAS_MAIN_OLD]);
 	show_ss("main new", &sas_state[SAS_MAIN_NEW]);

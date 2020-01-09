@@ -1,4 +1,3 @@
-#define _GNU_SOURCE
 #include <sys/mman.h>
 #include <sched.h>
 #include <unistd.h>
@@ -199,7 +198,7 @@ static int send_command(int id, enum commands op, int arg1, int arg2)
 	}
 
 	if (status) {
-		pr_perror("The command(%d, %d, %d) failed");
+		pr_perror("The command(%d, %d, %d) failed", op, arg1, arg2);
 		goto err;
 	}
 

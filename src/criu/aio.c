@@ -11,8 +11,9 @@
 #include "parasite.h"
 #include "parasite-syscall.h"
 #include "images/mm.pb-c.h"
+#include <compel/compel.h>
 
-#define NR_IOEVENTS_IN_NPAGES(npages) ((PAGE_SIZE * npages - sizeof(struct aio_ring)) / sizeof(struct io_event))
+#define NR_IOEVENTS_IN_NPAGES(npages) ((PAGE_SIZE * (npages) - sizeof(struct aio_ring)) / sizeof(struct io_event))
 
 int dump_aio_ring(MmEntry *mme, struct vma_area *vma)
 {
@@ -31,8 +32,10 @@ int dump_aio_ring(MmEntry *mme, struct vma_area *vma)
 	re->id = vma->e->start;
 	re->ring_len = vma->e->end - vma->e->start;
 	re->nr_req = aio_estimate_nr_reqs(re->ring_len);
-	if (!re->nr_req)
+	if (!re->nr_req) {
+		xfree(re);
 		return -1;
+	}
 	mme->aios[nr] = re;
 	mme->n_aios = nr + 1;
 	pr_info("Dumping AIO ring @%"PRIx64"-%"PRIx64"\n",
@@ -102,7 +105,7 @@ int parasite_collect_aios(struct parasite_ctl *ctl, struct vm_area_list *vmas)
 	 *    creation.
 	 */
 
-	aa = parasite_args_s(ctl, aio_rings_args_size(vmas));
+	aa = compel_parasite_args_s(ctl, aio_rings_args_size(vmas));
 	pa = &aa->ring[0];
 	list_for_each_entry(vma, &vmas->h, list) {
 		if (!vma_area_is(vma, VMA_AREA_AIORING))
@@ -116,7 +119,7 @@ int parasite_collect_aios(struct parasite_ctl *ctl, struct vm_area_list *vmas)
 	}
 	aa->nr_rings = vmas->nr_aios;
 
-	if (parasite_execute_daemon(PARASITE_CMD_CHECK_AIOS, ctl))
+	if (compel_rpc_call_sync(PARASITE_CMD_CHECK_AIOS, ctl))
 		return -1;
 
 	return 0;

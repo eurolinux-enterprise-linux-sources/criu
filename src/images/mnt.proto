@@ -1,3 +1,5 @@
+syntax = "proto2";
+
 import "opts.proto";
 
 enum fstype {
@@ -19,8 +21,13 @@ enum fstype {
 	FUSE			= 15;
 	AUTO			= 16;
 	OVERLAYFS		= 17;
-	// AUTOFS		= 18; RESERVED in criu-dev branch
+	AUTOFS			= 18;
 	TRACEFS			= 19;
+
+	/* These three are reserved for NFS support */
+	// RPC_PIPEFS		= 20;
+	// NFS			= 21;
+	// NFS4			= 22;
 };
 
 message mnt_entry {
@@ -46,4 +53,6 @@ message mnt_entry {
 
 	optional bool		deleted			= 16;
 	optional uint32		sb_flags		= 17 [(criu).hex = true];
+	/* user defined mapping for external mount */
+	optional string		ext_key			= 18;
 }

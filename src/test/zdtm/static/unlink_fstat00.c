@@ -9,6 +9,14 @@
 
 #include "zdtmtst.h"
 
+#ifndef __O_TMPFILE
+#define __O_TMPFILE 020000000
+#endif
+
+#ifndef O_TMPFILE
+#define O_TMPFILE (__O_TMPFILE | O_DIRECTORY)
+#endif
+
 const char *test_doc	= "Open, unlink, change size, seek, migrate, check size";
 
 #ifdef UNLINK_FSTAT04
@@ -40,7 +48,11 @@ int main(int argc, char ** argv)
 
 	mkdir(dirname, 0700);
 #endif
+#ifndef UNLINK_FSTAT041
 	fd = open(filename, O_RDWR | O_CREAT | O_TRUNC, 0644);
+#else
+	fd = open(dirname, O_RDWR | O_TMPFILE, 0644);
+#endif
 	if (fd < 0) {
 		pr_perror("can't open %s", filename);
 		exit(1);
@@ -58,13 +70,15 @@ int main(int argc, char ** argv)
 		goto failed;
 	}
 
+#ifndef UNLINK_FSTAT041
 	if (unlink(filename) < 0) {
 		pr_perror("can't unlink %s", filename);
 		goto failed;
 	}
+#endif
 	/* Change file size */
 	if (fst.st_size != 0) {
-		pr_perror("%s file size eq %d", fst.st_size);
+		pr_perror("%s file size eq %ld", filename, (long)fst.st_size);
 		goto failed;
 	}
 
@@ -111,12 +125,14 @@ int main(int argc, char ** argv)
 
 	/* Check file size */
 	if (fst.st_size != fsize) {
-		fail("(via fstat): file size changed to %d", fst.st_size);
+		fail("(via fstat): file size changed to %ld",
+				(long)fst.st_size);
 		goto failed;
 	}
 	fst.st_size = lseek(fd, 0, SEEK_END);
 	if (fst.st_size != fsize) {
-		fail("(via lseek): file size changed to %d", fst.st_size);
+		fail("(via lseek): file size changed to %ld",
+				(long)fst.st_size);
 		goto failed;
 	}
 	/* Check mode */

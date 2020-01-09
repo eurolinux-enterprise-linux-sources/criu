@@ -10,14 +10,18 @@
 #include <sys/stat.h>
 #include <sys/mman.h>
 
-#include "asm/string.h"
-#include "asm/types.h"
-
 #include "image.h"
 #include "util-vdso.h"
 #include "vma.h"
 #include "log.h"
-#include "bug.h"
+#include "common/bug.h"
+
+#ifdef CR_NOGLIBC
+# include <compel/plugins/std/string.h>
+#else
+# include <string.h>
+# define std_strncmp strncmp
+#endif
 
 #ifdef LOG_PREFIX
 # undef LOG_PREFIX
@@ -64,27 +68,33 @@ static unsigned long elf_hash(const unsigned char *name)
 	return h;
 }
 
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+#define BORD ELFDATA2MSB /* 0x02 */
+#else
+#define BORD ELFDATA2LSB /* 0x01 */
+#endif
+
 static int has_elf_identity(Ehdr_t *ehdr)
 {
 	/*
 	 * See Elf specification for this magic values.
 	 */
-#if defined(CONFIG_X86_32)
+#if defined(CONFIG_VDSO_32)
 	static const char elf_ident[] = {
-		0x7f, 0x45, 0x4c, 0x46, 0x01, 0x01, 0x01, 0x00,
+		0x7f, 0x45, 0x4c, 0x46, 0x01, BORD, 0x01, 0x00,
 		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 	};
 #else
 	static const char elf_ident[] = {
-		0x7f, 0x45, 0x4c, 0x46, 0x02, 0x01, 0x01, 0x00,
+		0x7f, 0x45, 0x4c, 0x46, 0x02, BORD, 0x01, 0x00,
 		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 	};
 #endif
 
 	BUILD_BUG_ON(sizeof(elf_ident) != sizeof(ehdr->e_ident));
 
-	if (builtin_memcmp(ehdr->e_ident, elf_ident, sizeof(elf_ident))) {
-		pr_err("Elf header magic mismatch\n");
+	if (memcmp(ehdr->e_ident, elf_ident, sizeof(elf_ident))) {
+		pr_err("ELF header magic mismatch\n");
 		return false;
 	}
 
@@ -198,16 +208,24 @@ err_oob:
 	return -EFAULT;
 }
 
+/* On s390x Hash_t is 64 bit */
+#ifdef __s390x__
+typedef unsigned long Hash_t;
+#else
+typedef Word_t Hash_t;
+#endif
+
 static void parse_elf_symbols(uintptr_t mem, size_t size, Phdr_t *load,
 		struct vdso_symtable *t, uintptr_t dynsymbol_names,
-		Word_t *hash, Dyn_t *dyn_symtab)
+		Hash_t *hash, Dyn_t *dyn_symtab)
 {
 	const char *vdso_symbols[VDSO_SYMBOL_MAX] = {
 		ARCH_VDSO_SYMBOLS
 	};
+	const size_t vdso_symbol_length = sizeof(t->symbols[0].name);
 
-	Word_t nbucket, nchain;
-	Word_t *bucket, *chain;
+	Hash_t nbucket, nchain;
+	Hash_t *bucket, *chain;
 
 	unsigned int i, j, k;
 	uintptr_t addr;
@@ -239,14 +257,14 @@ static void parse_elf_symbols(uintptr_t mem, size_t size, Phdr_t *load,
 				continue;
 
 			addr = dynsymbol_names + sym->st_name;
-			if (__ptr_struct_oob(addr, VDSO_SYMBOL_MAX, mem, size))
+			if (__ptr_struct_oob(addr, vdso_symbol_length, mem, size))
 				continue;
 			name = (void *)addr;
 
-			if (builtin_strncmp(name, symbol, VDSO_SYMBOL_MAX))
+			if (std_strncmp(name, symbol, vdso_symbol_length))
 				continue;
 
-			builtin_memcpy(t->symbols[i].name, name, VDSO_SYMBOL_MAX);
+			memcpy(t->symbols[i].name, name, vdso_symbol_length);
 			t->symbols[i].offset = (unsigned long)sym->st_value - load->p_vaddr;
 			break;
 		}
@@ -259,7 +277,7 @@ int vdso_fill_symtable(uintptr_t mem, size_t size, struct vdso_symtable *t)
 	Dyn_t *dyn_strtab = NULL;
 	Dyn_t *dyn_symtab = NULL;
 	Dyn_t *dyn_hash = NULL;
-	Word_t *hash = NULL;
+	Hash_t *hash = NULL;
 
 	uintptr_t dynsymbol_names;
 	uintptr_t addr;

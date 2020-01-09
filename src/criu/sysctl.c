@@ -7,7 +7,6 @@
 #include <sys/wait.h>
 #include <sched.h>
 
-#include "asm/types.h"
 #include "namespaces.h"
 #include "sysctl.h"
 #include "util.h"
@@ -130,12 +129,13 @@ sysctl_read_char(int fd, struct sysctl_req *req, char *arg, int nr)
 	int ret = -1;
 
 	pr_debug("%s nr %d\n", req->name, nr);
-	ret = read(fd, arg, nr);
+	ret = read(fd, arg, nr - 1);
 	if (ret < 0) {
 		if (errno != EIO ||  !(req->flags & CTL_FLAGS_READ_EIO_SKIP))
 			pr_perror("Can't read %s", req->name);
 		goto err;
 	}
+	arg[ret]='\0';
 	ret = 0;
 
 err:
@@ -351,23 +351,15 @@ out:
 
 static int __nonuserns_sysctl_op(struct sysctl_req *req, size_t nr_req, int op)
 {
-	int dir, ret, exit_code = -1;;
-
-	dir = open("/proc/sys", O_RDONLY, O_DIRECTORY);
-	if (dir < 0) {
-		pr_perror("Can't open sysctl dir");
-		return -1;
-	}
+	int ret, exit_code = -1;
 
 	while (nr_req--) {
-		int fd, flags;
+		int fd;
 
 		if (op == CTL_READ)
-			flags = O_RDONLY;
+			fd = do_open_proc(PROC_GEN, O_RDONLY, "sys/%s", req->name);
 		else
-			flags = O_WRONLY;
-
-		fd = openat(dir, req->name, flags);
+			fd = do_open_proc(PROC_GEN, O_RDWR, "sys/%s", req->name);
 		if (fd < 0) {
 			if (errno == ENOENT && (req->flags & CTL_FLAGS_OPTIONAL)) {
 				req++;
@@ -394,7 +386,6 @@ static int __nonuserns_sysctl_op(struct sysctl_req *req, size_t nr_req, int op)
 
 	exit_code = 0;
 out:
-	close(dir);
 	return exit_code;
 }
 

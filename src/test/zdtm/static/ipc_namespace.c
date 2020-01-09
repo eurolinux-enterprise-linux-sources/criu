@@ -7,14 +7,15 @@
 #include <linux/sem.h>
 #include <linux/shm.h>
 #include <fcntl.h>
+#include <limits.h>
 
 #include "zdtmtst.h"
 
 #define CLONE_NEWIPC		0x08000000
 
-extern int msgctl (int __msqid, int __cmd, struct msqid_ds *__buf) __THROW;
-extern int semctl (int __semid, int __semnum, int __cmd, ...) __THROW;
-extern int shmctl (int __shmid, int __cmd, struct shmid_ds *__buf) __THROW;
+extern int msgctl (int __msqid, int __cmd, struct msqid_ds *__buf);
+extern int semctl (int __semid, int __semnum, int __cmd, ...);
+extern int shmctl (int __shmid, int __cmd, struct shmid_ds *__buf);
 
 struct ipc_ids {
 	int in_use;						/* TODO: Check for 0 */
@@ -36,6 +37,9 @@ struct ipc_ns {
 	int		msg_bytes;   // +
 	int		msg_hdrs;    // +
 	int		auto_msgmni; // +
+	int		msg_next_id; // +
+	int		sem_next_id; // +
+	int		shm_next_id; // +
 
 	size_t		shm_ctlmax;
 	size_t		shm_ctlall;
@@ -47,9 +51,11 @@ struct ipc_ns {
 
 //	unsigned int    mq_queues_count;
 
-	unsigned int    mq_queues_max;   /* initialized to DFLT_QUEUESMAX */
-	unsigned int    mq_msg_max;      /* initialized to DFLT_MSGMAX */
-	unsigned int    mq_msgsize_max;  /* initialized to DFLT_MSGSIZEMAX */
+	unsigned int    mq_queues_max;       /* initialized to DFLT_QUEUESMAX */
+	unsigned int    mq_msg_max;          /* initialized to DFLT_MSGMAX */
+	unsigned int    mq_msgsize_max;      /* initialized to DFLT_MSGSIZEMAX */
+	unsigned int    mq_msg_default;      /* initialized to DFLT_MSG */
+	unsigned int    mq_msgsize_default;  /* initialized to DFLT_MSGSIZE */
 
 	struct user_ns *user_ns;
 };
@@ -71,7 +77,7 @@ static int read_ipc_sysctl(char *name, int *data, size_t size)
 
 	fd = open(name, O_RDONLY);
 	if (fd < 0) {
-		pr_perror("Can't open %d", name);
+		pr_perror("Can't open %s", name);
 		return fd;
 	}
 	ret = read(fd, buf, 32);
@@ -108,6 +114,31 @@ static int get_messages_info(struct ipc_ns *ipc)
 	if (read_ipc_sysctl("/proc/sys/kernel/auto_msgmni",
 			&ipc->auto_msgmni, sizeof(ipc->auto_msgmni)))
 		return -1;
+	if (read_ipc_sysctl("/proc/sys/kernel/msg_next_id",
+			&ipc->msg_next_id, sizeof(ipc->msg_next_id)))
+		return -1;
+	if (read_ipc_sysctl("/proc/sys/kernel/sem_next_id",
+			&ipc->sem_next_id, sizeof(ipc->sem_next_id)))
+		return -1;
+	if (read_ipc_sysctl("/proc/sys/kernel/shm_next_id",
+			&ipc->shm_next_id, sizeof(ipc->shm_next_id)))
+		return -1;
+	if (read_ipc_sysctl("/proc/sys/fs/mqueue/queues_max",
+			(int *)&ipc->mq_queues_max, sizeof(ipc->mq_queues_max)))
+		return -1;
+	if (read_ipc_sysctl("/proc/sys/fs/mqueue/msg_max",
+			(int *)&ipc->mq_msg_max, sizeof(ipc->mq_msg_max)))
+		return -1;
+	if (read_ipc_sysctl("/proc/sys/fs/mqueue/msgsize_max",
+			(int *)&ipc->mq_msgsize_max, sizeof(ipc->mq_msgsize_max)))
+		return -1;
+	if (read_ipc_sysctl("/proc/sys/fs/mqueue/msg_default",
+			(int *)&ipc->mq_msg_default, sizeof(ipc->mq_msg_default)))
+		return -1;
+	if (read_ipc_sysctl("/proc/sys/fs/mqueue/msgsize_default",
+			(int *)&ipc->mq_msgsize_default, sizeof(ipc->mq_msgsize_default)))
+		return -1;
+
 	return 0;
 }
 
@@ -157,15 +188,6 @@ static int get_shared_memory_info(struct ipc_ns *ipc)
 	if (read_ipc_sysctl("/proc/sys/kernel/shm_rmid_forced",
 			&ipc->shm_rmid_forced, sizeof(ipc->shm_rmid_forced)))
 		return -1;
-	if (read_ipc_sysctl("/proc/sys/fs/mqueue/queues_max",
-			(int *)&ipc->mq_queues_max, sizeof(ipc->mq_queues_max)))
-		return -1;
-	if (read_ipc_sysctl("/proc/sys/fs/mqueue/msg_max",
-			(int *)&ipc->mq_msg_max, sizeof(ipc->mq_msg_max)))
-		return -1;
-	if (read_ipc_sysctl("/proc/sys/fs/mqueue/msgsize_max",
-			(int *)&ipc->mq_msgsize_max, sizeof(ipc->mq_msgsize_max)))
-		return -1;
 
 	return 0;
 }
@@ -203,7 +225,7 @@ static int rand_ipc_sysctl(char *name, unsigned int val)
 
 	fd = open(name, O_WRONLY);
 	if (fd < 0) {
-		pr_perror("Can't open %d", name);
+		pr_perror("Can't open %s", name);
 		return fd;
 	}
 	sprintf(buf, "%d\n", val);
@@ -215,6 +237,8 @@ static int rand_ipc_sysctl(char *name, unsigned int val)
 	close(fd);
 	return 0;
 }
+
+#define MAX_MNI (1<<15)
 
 static int rand_ipc_sem(void)
 {
@@ -228,8 +252,8 @@ static int rand_ipc_sem(void)
 		pr_perror("Can't open %s", name);
 		return fd;
 	}
-	sprintf(buf, "%d %d %d %d\n", (unsigned)lrand48(), (unsigned)lrand48(),
-				      (unsigned)lrand48(), (unsigned)lrand48());
+	sprintf(buf, "%d %d %d %d\n", (unsigned) lrand48(), (unsigned) lrand48(),
+				      (unsigned) lrand48(), (unsigned) lrand48() % MAX_MNI);
 	ret = write(fd, buf, 128);
 	if (ret < 0) {
 		pr_perror("Can't write %s: %d", name, errno);
@@ -249,15 +273,21 @@ static int rand_ipc_ns(void)
 	if (!ret)
 		ret = rand_ipc_sysctl("/proc/sys/kernel/msgmnb", (unsigned)lrand48());
 	if (!ret)
-		ret = rand_ipc_sysctl("/proc/sys/kernel/msgmni", (unsigned)lrand48());
+		ret = rand_ipc_sysctl("/proc/sys/kernel/msgmni", (unsigned)lrand48() % MAX_MNI);
 	if (!ret)
 		ret = rand_ipc_sysctl("/proc/sys/kernel/auto_msgmni", 0);
+	if (!ret && (unsigned)lrand48() % 2)
+		ret = rand_ipc_sysctl("/proc/sys/kernel/msg_next_id", (unsigned)lrand48() % ((unsigned)INT_MAX + 1));
+	if (!ret && (unsigned)lrand48() % 2)
+		ret = rand_ipc_sysctl("/proc/sys/kernel/sem_next_id", (unsigned)lrand48() % ((unsigned)INT_MAX + 1));
+	if (!ret && (unsigned)lrand48() % 2)
+		ret = rand_ipc_sysctl("/proc/sys/kernel/shm_next_id", (unsigned)lrand48() % ((unsigned)INT_MAX + 1));
 	if (!ret)
 		ret = rand_ipc_sysctl("/proc/sys/kernel/shmmax", (unsigned)lrand48());
 	if (!ret)
 		ret = rand_ipc_sysctl("/proc/sys/kernel/shmall", (unsigned)lrand48());
 	if (!ret)
-		ret = rand_ipc_sysctl("/proc/sys/kernel/shmmni", (unsigned)lrand48());
+		ret = rand_ipc_sysctl("/proc/sys/kernel/shmmni", (unsigned)lrand48() % MAX_MNI);
 	if (!ret)
 		ret = rand_ipc_sysctl("/proc/sys/kernel/shm_rmid_forced", (unsigned)lrand48() & 1);
 
@@ -268,6 +298,10 @@ static int rand_ipc_ns(void)
 		ret = rand_ipc_sysctl("/proc/sys/fs/mqueue/msg_max", ((unsigned)lrand48() % 65536) + 1);
 	if (!ret)
 		ret = rand_ipc_sysctl("/proc/sys/fs/mqueue/msgsize_max", ((unsigned)lrand48() & (8192 * 128 - 1)) | 128);
+	if (!ret)
+		ret = rand_ipc_sysctl("/proc/sys/fs/mqueue/msg_default", ((unsigned)lrand48() % 65536) + 1);
+	if (!ret)
+		ret = rand_ipc_sysctl("/proc/sys/fs/mqueue/msgsize_default", ((unsigned)lrand48() & (8192 * 128 - 1)) | 128);
 
 	if (ret < 0)
 		pr_perror("Failed to randomize ipc namespace tunables");
@@ -304,11 +338,20 @@ static void show_ipc_entry(struct ipc_ns *old, struct ipc_ns *new)
 	if (old->auto_msgmni != new->auto_msgmni)
 		pr_perror("auto_msgmni differs: %d ---> %d",
 			old->auto_msgmni, new->auto_msgmni);
+	if (old->msg_next_id != new->msg_next_id)
+		pr_perror("msg_next_id differs: %d ---> %d",
+			old->msg_next_id, new->msg_next_id);
+	if (old->sem_next_id != new->sem_next_id)
+		pr_perror("sem_next_id differs: %d ---> %d",
+			old->sem_next_id, new->sem_next_id);
+	if (old->shm_next_id != new->shm_next_id)
+		pr_perror("shm_next_id differs: %d ---> %d",
+			old->shm_next_id, new->shm_next_id);
 	if (old->shm_ctlmax != new->shm_ctlmax)
-		pr_perror("shm_ctlmax differs: %d ---> %d",
+		pr_perror("shm_ctlmax differs: %zu ---> %zu",
 			old->shm_ctlmax, new->shm_ctlmax);
 	if (old->shm_ctlall != new->shm_ctlall)
-		pr_perror("shm_ctlall differs: %d ---> %d",
+		pr_perror("shm_ctlall differs: %zu ---> %zu",
 			old->shm_ctlall, new->shm_ctlall);
 	if (old->shm_ctlmni != new->shm_ctlmni)
 		pr_perror("shm_ctlmni differs: %d ---> %d",
@@ -325,6 +368,12 @@ static void show_ipc_entry(struct ipc_ns *old, struct ipc_ns *new)
 	if (old->mq_msgsize_max != new->mq_msgsize_max)
 		pr_perror("mq_msgsize_max differs: %d ---> %d",
 			old->mq_msgsize_max, new->mq_msgsize_max);
+	if (old->mq_msg_default != new->mq_msg_default)
+		pr_perror("mq_msg_default differs: %d ---> %d",
+			old->mq_msg_default, new->mq_msg_default);
+	if (old->mq_msgsize_default != new->mq_msgsize_default)
+		pr_perror("mq_msgsize_default differs: %d ---> %d",
+			old->mq_msgsize_default, new->mq_msgsize_default);
 }
 
 int main(int argc, char **argv)

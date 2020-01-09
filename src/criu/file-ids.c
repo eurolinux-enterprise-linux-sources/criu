@@ -9,17 +9,17 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
-#include "asm/types.h"
+#include "int.h"
 #include "file-ids.h"
 #include "rbtree.h"
 #include "kcmp-ids.h"
-#include "compiler.h"
+#include "common/compiler.h"
 #include "image.h"
 #include "util.h"
 #include "irmap.h"
 #include "files.h"
 
-static DECLARE_KCMP_TREE(fd_tree, KCMP_FILE);
+DECLARE_KCMP_TREE(fd_tree, KCMP_FILE);
 
 #define FDID_BITS	5
 #define FDID_SIZE	(1 << FDID_BITS)

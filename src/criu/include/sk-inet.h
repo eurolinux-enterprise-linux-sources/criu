@@ -5,8 +5,7 @@
 
 #include "sockets.h"
 #include "files.h"
-#include "list.h"
-#include "protobuf.h"
+#include "common/list.h"
 #include "images/sk-inet.pb-c.h"
 
 #define INET_ADDR_LEN		48 /* max of INET_ADDRSTRLEN and INET6_ADDRSTRLEN */
@@ -15,6 +14,18 @@
 #define TCP_REPAIR_QUEUE	20
 #define TCP_QUEUE_SEQ		21
 #define TCP_REPAIR_OPTIONS	22
+#endif
+
+#ifndef IP_HDRINCL
+# define IP_HDRINCL		3
+#endif
+
+#ifndef IP_NODEFRAG
+# define IP_NODEFRAG		22
+#endif
+
+#ifndef IPV6_HDRINCL
+# define IPV6_HDRINCL		36
 #endif
 
 struct inet_sk_desc {
@@ -29,10 +40,13 @@ struct inet_sk_desc {
 	unsigned int		src_addr[4];
 	unsigned int		dst_addr[4];
 	unsigned short		shutdown;
+	bool			cork;
 
 	int rfd;
 	int cpt_reuseaddr;
 	struct list_head rlist;
+
+	void *priv;
 };
 
 struct inet_port;
@@ -40,6 +54,7 @@ struct inet_sk_info {
 	InetSkEntry *ie;
 	struct file_desc d;
 	struct inet_port *port;
+	struct list_head port_list;
 	/*
 	 * This is an fd by which the socket is opened.
 	 * It will be carried down to restorer code to
@@ -72,9 +87,8 @@ extern int dump_one_tcp(int sk, struct inet_sk_desc *sd);
 extern int restore_one_tcp(int sk, struct inet_sk_info *si);
 
 #define SK_EST_PARAM	"tcp-established"
-
-extern int check_tcp(void);
-extern mutex_t *inet_get_reuseaddr_lock(struct inet_sk_info *ii);
+#define SK_INFLIGHT_PARAM "skip-in-flight"
+#define SK_CLOSE_PARAM	"tcp-close"
 
 struct task_restore_args;
 int prepare_tcp_socks(struct task_restore_args *);
@@ -83,5 +97,9 @@ struct rst_tcp_sock {
 	int	sk;
 	bool	reuseaddr;
 };
+
+union libsoccr_addr;
+int restore_sockaddr(union libsoccr_addr *sa,
+		int family, u32 pb_port, u32 *pb_addr, u32 ifindex);
 
 #endif /* __CR_SK_INET_H__ */

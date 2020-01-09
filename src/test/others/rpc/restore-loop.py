@@ -1,6 +1,6 @@
 #!/usr/bin/python2
 
-import socket, os, imp, sys
+import socket, os, sys
 import rpc_pb2 as rpc
 import argparse
 
@@ -19,6 +19,11 @@ s.connect(args['socket'])
 req			= rpc.criu_req()
 req.type		= rpc.RESTORE
 req.opts.images_dir_fd	= os.open(args['dir'], os.O_DIRECTORY)
+# As the dumped process is running with setsid this should not
+# be necessary. There seems to be a problem for this testcase
+# in combination with alpine's setsid.
+# The dump is now done with -j and the restore also.
+req.opts.shell_job      = True
 
 # Send request
 s.send(req.SerializeToString())
@@ -29,12 +34,12 @@ MAX_MSG_SIZE	= 1024
 resp.ParseFromString(s.recv(MAX_MSG_SIZE))
 
 if resp.type != rpc.RESTORE:
-	print 'Unexpected msg type'
+	print('Unexpected msg type')
 	sys.exit(-1)
 else:
 	if resp.success:
-		print 'Restore success'
+		print('Restore success')
 	else:
-		print 'Restore fail'
+		print('Restore fail')
 		sys.exit(-1)
-	print "PID of the restored program is %d\n" %(resp.restore.pid)
+	print("PID of the restored program is %d\n" %(resp.restore.pid))

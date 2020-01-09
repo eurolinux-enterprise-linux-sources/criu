@@ -1,12 +1,12 @@
 #include <unistd.h>
 
-#include "asm/string.h"
 #include "asm/types.h"
 
-#include "syscall.h"
+#include <compel/plugins/std/string.h>
+#include <compel/plugins/std/syscall.h>
 #include "parasite-vdso.h"
 #include "log.h"
-#include "bug.h"
+#include "common/bug.h"
 
 #ifdef LOG_PREFIX
 # undef LOG_PREFIX
@@ -70,7 +70,7 @@ static unsigned long put_trampoline(unsigned long at, struct vdso_symtable *sym)
 		pr_debug("Checking '%s' at %lx\n", sym->symbols[i].name,
 			 sym->symbols[i].offset);
 
-		/* find the nearest followin symbol we are interested in */
+		/* find the nearest following symbol we are interested in */
 		for (j=0; j < ARRAY_SIZE(sym->symbols); j++) {
 			if (i==j || vdso_symbol_empty(&sym->symbols[j]))
 				continue;
@@ -102,9 +102,9 @@ static unsigned long put_trampoline(unsigned long at, struct vdso_symtable *sym)
 			trampoline = at + sym->symbols[i].offset;
 			trampoline += TRAMP_CALL_SIZE;
 
-			pr_debug("Puting vDSO trampoline in %s at %lx\n",
+			pr_debug("Putting vDSO trampoline in %s at %lx\n",
 				 sym->symbols[i].name, trampoline);
-			builtin_memcpy((void *)trampoline, &vdso_trampoline,
+			memcpy((void *)trampoline, &vdso_trampoline,
 				       size);
 			invalidate_caches(trampoline);
 		}
@@ -116,7 +116,7 @@ static unsigned long put_trampoline(unsigned long at, struct vdso_symtable *sym)
 static inline void put_trampoline_call(unsigned long at, unsigned long to,
 				       unsigned long tr)
 {
-    uint32_t *addr = (uint32_t *)at;;
+    uint32_t *addr = (uint32_t *)at;
 
     *addr++ = 0x7C0802a6;					/* mflr	r0 */
     *addr++ = 0x48000001 | ((long)(tr-at-4) & 0x3fffffc);	/* bl tr */
@@ -125,10 +125,9 @@ static inline void put_trampoline_call(unsigned long at, unsigned long to,
     invalidate_caches(at);
 }
 
-int vdso_redirect_calls(unsigned long base_to,
-			unsigned long base_from,
-			struct vdso_symtable *to,
-			struct vdso_symtable *from)
+int vdso_redirect_calls(unsigned long base_to, unsigned long base_from,
+			struct vdso_symtable *to, struct vdso_symtable *from,
+			bool __always_unused compat_vdso)
 {
 	unsigned int i;
 	unsigned long trampoline;

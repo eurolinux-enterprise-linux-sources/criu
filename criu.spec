@@ -1,68 +1,96 @@
+%if 0%{?fedora} >= 27 || 0%{?rhel} > 7
+%global py_prefix python3
+%global py_binary %{py_prefix}
+%else
+%global py_prefix python
+%global py_binary python2
+%endif
+
+# With annobin enabled, CRIU does not work anymore. It seems CRIU's
+# parasite code breaks if annobin is enabled.
+%undefine _annotated_build
+
 Name: criu
-Version: 2.3
+Version: 3.12
 Release: 2%{?dist}
 Provides: crtools = %{version}-%{release}
 Obsoletes: crtools <= 1.0-2
 Summary: Tool for Checkpoint/Restore in User-space
-Group: System Environment/Base
 License: GPLv2
 URL: http://criu.org/
 Source0: http://download.openvz.org/criu/criu-%{version}.tar.bz2
-# The patch aio-fix.patch is needed as RHEL7
-# doesn't do "nr_events *= 2" in ioctx_alloc().
-Patch0: aio-fix.patch
-Patch1: https://github.com/xemul/criu/commit/2fdef836a59938b169ca3c8f2c813b35258f1ed5.patch
-Patch2: https://github.com/xemul/criu/commit/ed8fecd12d7ce37d7ebdc35837e184caba7a14b4.patch
 
-BuildRequires: systemd
-
-%if 0%{?rhel}
-# RHEL has no asciidoc; take man-page from Fedora 24
+%if 0%{?rhel} && 0%{?rhel} <= 7
+BuildRequires: perl
+# RHEL has no asciidoc; take man-page from Fedora 26
 # zcat /usr/share/man/man8/criu.8.gz > criu.8
 Source1: criu.8
+Source2: crit.1
+# The patch aio-fix.patch is needed as RHEL7
+# doesn't do "nr_events *= 2" in ioctx_alloc().
+Patch100: aio-fix.patch
 %endif
 
-BuildRequires: protobuf-devel protobuf-c-devel python2-devel libnl3-devel libcap-devel
-%if 0%{?fedora}
+Source3: criu-tmpfiles.conf
+
+BuildRequires: gcc
+BuildRequires: systemd
+BuildRequires: libnet-devel
+BuildRequires: protobuf-devel protobuf-c-devel %{py_prefix}-devel libnl3-devel libcap-devel
+%if 0%{?fedora} || 0%{?rhel} > 7
 BuildRequires: asciidoc xmlto
+BuildRequires: perl-interpreter
+BuildRequires: libselinux-devel
+# Checkpointing containers with a tmpfs requires tar
+Recommends: tar
+%if 0%{?fedora}
+BuildRequires: libbsd-devel
+%endif
 %endif
 
-# user-space and kernel changes are only available for x86_64 and ARM
-# code is very architecture specific
-# once imported in RCS it needs a bug openend explaining the ExclusiveArch
+# user-space and kernel changes are only available for x86_64, arm,
+# ppc64le, aarch64 and s390x
 # https://bugzilla.redhat.com/show_bug.cgi?id=902875
-%if 0%{?fedora}
-ExclusiveArch: x86_64 %{arm} ppc64le aarch64
-%else
-ExclusiveArch: x86_64 ppc64le
-%endif
+ExclusiveArch: x86_64 %{arm} ppc64le aarch64 s390x
 
 %description
 criu is the user-space part of Checkpoint/Restore in User-space
 (CRIU), a project to implement checkpoint/restore functionality for
 Linux in user-space.
 
-%if 0%{?fedora}
+%if 0%{?fedora} || 0%{?rhel} > 7
 %package devel
 Summary: Header files and libraries for %{name}
-Group: Development/Libraries
 Requires: %{name} = %{version}-%{release}
 
 %description devel
 This package contains header files and libraries for %{name}.
+
+%package libs
+Summary: Libraries for %{name}
+Requires: %{name} = %{version}-%{release}
+
+%description libs
+This package contains the libraries for %{name}
 %endif
 
-%package -n python-%{name}
+%package -n %{py_prefix}-%{name}
+%{?python_provide:%python_provide %{py_prefix}-%{name}}
 Summary: Python bindings for %{name}
-Group: Development/Languages
-Requires: %{name} = %{version}-%{release} python-ipaddr protobuf-python
+%if 0%{?rhel} && 0%{?rhel} <= 7
+Requires: protobuf-python
+Requires: %{name} = %{version}-%{release} %{py_prefix}-ipaddr
+%else
+Requires: %{py_prefix}-protobuf
+Obsoletes: python2-criu < 3.10-1
+%endif
 
-%description -n python-%{name}
-python-%{name} contains Python bindings for %{name}.
+%description -n %{py_prefix}-%{name}
+%{py_prefix}-%{name} contains Python bindings for %{name}.
 
 %package -n crit
 Summary: CRIU image tool
-Requires: python-%{name} = %{version}-%{release}
+Requires: %{py_prefix}-%{name} = %{version}-%{release}
 
 %description -n crit
 crit is a tool designed to decode CRIU binary dump files and show
@@ -70,65 +98,205 @@ their content in human-readable form.
 
 
 %prep
-%setup -q -n criu-%{version}
-%patch0 -p1
-%patch1 -p1
-%patch2 -p1
+%setup -q
+
+%if 0%{?rhel} && 0%{?rhel} <= 7
+%patch100 -p1
+%endif
 
 %build
 # %{?_smp_mflags} does not work
 # -fstack-protector breaks build
-CFLAGS+=`echo %{optflags} | sed -e 's,-fstack-protector\S*,,g'` make V=1 WERROR=0 PREFIX=%{_prefix}
-%if 0%{?fedora}
+CFLAGS+=`echo %{optflags} | sed -e 's,-fstack-protector\S*,,g'` make V=1 WERROR=0 PREFIX=%{_prefix} RUNDIR=/run/criu PYTHON=%{py_binary}
+%if 0%{?fedora} || 0%{?rhel} > 7
 make docs V=1
 %endif
 
 
 %install
 make install-criu DESTDIR=$RPM_BUILD_ROOT PREFIX=%{_prefix} LIBDIR=%{_libdir}
-make install-lib DESTDIR=$RPM_BUILD_ROOT PREFIX=%{_prefix} LIBDIR=%{_libdir}
-%if 0%{?fedora}
-# ony install documentation on Fedora as it requires asciidoc,
+make install-lib DESTDIR=$RPM_BUILD_ROOT PREFIX=%{_prefix} LIBDIR=%{_libdir} PYTHON=%{py_binary}
+%if 0%{?fedora} || 0%{?rhel} > 7
+# only install documentation on Fedora as it requires asciidoc,
 # which is not available on RHEL7
 make install-man DESTDIR=$RPM_BUILD_ROOT PREFIX=%{_prefix} LIBDIR=%{_libdir}
 %else
 install -p -m 644  -D %{SOURCE1} $RPM_BUILD_ROOT%{_mandir}/man8/%{name}.8
+install -p -m 644  -D %{SOURCE2} $RPM_BUILD_ROOT%{_mandir}/man1/crit.1
 %endif
 
-%if 0%{?rhel}
+mkdir -p %{buildroot}%{_tmpfilesdir}
+install -m 0644 %{SOURCE3} %{buildroot}%{_tmpfilesdir}/%{name}.conf
+install -d -m 0755 %{buildroot}/run/%{name}/
+
+%if 0%{?rhel} && 0%{?rhel} <= 7
 # remove devel package
 rm -rf $RPM_BUILD_ROOT%{_includedir}/criu
 rm $RPM_BUILD_ROOT%{_libdir}/*.so*
 rm -rf $RPM_BUILD_ROOT%{_libdir}/pkgconfig
+rm -rf $RPM_BUILD_ROOT%{_libexecdir}/%{name}
 %endif
-
-%post -p /sbin/ldconfig
-%postun -p /sbin/ldconfig
 
 %files
 %{_sbindir}/%{name}
 %doc %{_mandir}/man8/criu.8*
-%if 0%{?fedora}
-%{_libdir}/*.so.*
+%if 0%{?fedora} || 0%{?rhel} > 7
+%{_libexecdir}/%{name}
 %endif
+%dir /run/%{name}
+%{_tmpfilesdir}/%{name}.conf
 %doc README.md COPYING
 
-%if 0%{?fedora}
+%if 0%{?fedora} || 0%{?rhel} > 7
 %files devel
 %{_includedir}/criu
 %{_libdir}/*.so
 %{_libdir}/pkgconfig/*.pc
+
+%files libs
+%{_libdir}/*.so.*
 %endif
 
-%files -n python-%{name}
+%files -n %{py_prefix}-%{name}
+%if 0%{?rhel} && 0%{?rhel} <= 7
 %{python2_sitelib}/pycriu/*
 %{python2_sitelib}/*egg-info
+%else
+%{python3_sitelib}/pycriu/*
+%{python3_sitelib}/*egg-info
+%endif
 
 %files -n crit
 %{_bindir}/crit
+%doc %{_mandir}/man1/crit.1*
 
 
 %changelog
+* Thu Apr 25 2019 Adrian Reber <adrian@lisas.de> - 3.12-2
+- Updated to official 3.12
+
+* Tue Apr 23 2019 Adrian Reber <adrian@lisas.de> - 3.12-0.1
+- Updated to 3.12 (pre-release)
+- Create libs subpackage
+- Build against SELinux (Fedora and RHEL8)
+- Build against libbsd (Fedora)
+
+* Sun Jul 15 2018 Adrian Reber <areber@redhat.com> - 3.9-5
+- Add patch to fix runc read-only regression (#1598028)
+
+* Tue Jun 19 2018 Adrian Reber <areber@redhat.com> - 3.9-4
+- Add patch to fix cow01 test case on aarch64
+
+* Wed Jun 06 2018 Adrian Reber <adrian@lisas.de> - 3.9-3
+- Simplify ExclusiveArch now that there is no more F26
+
+* Mon Jun 04 2018 Adrian Reber <areber@redhat.com> - 3.9-2
+- Add patches for aarch64 page size errors
+
+* Fri Jun 01 2018 Adrian Reber <adrian@lisas.de> - 3.9-1
+- Update to 3.9
+
+* Tue Apr 03 2018 Adrian Reber <adrian@lisas.de> - 3.8.1-1
+- Update to 3.8.1
+
+* Thu Mar 22 2018 Adrian Reber <adrian@lisas.de> - 3.8-2
+- Bump release for COPR
+
+* Wed Mar 14 2018 Adrian Reber <adrian@lisas.de> - 3.8-1
+- Update to 3.8
+
+* Wed Feb 07 2018 Fedora Release Engineering <releng@fedoraproject.org> - 3.7-5
+- Rebuilt for https://fedoraproject.org/wiki/Fedora_28_Mass_Rebuild
+
+* Sat Feb 03 2018 Igor Gnatenko <ignatenkobrain@fedoraproject.org> - 3.7-4
+- Switch to %%ldconfig_scriptlets
+
+* Fri Jan 12 2018 Adrian Reber <adrian@lisas.de> - 3.7-3
+- Fix python/python2 dependencies accross all branches
+
+* Wed Jan 03 2018 Merlin Mathesius <mmathesi@redhat.com> - 3.7-2
+- Cleanup spec file conditionals
+
+* Sat Dec 30 2017 Adrian Reber <adrian@lisas.de> - 3.7-1
+- Update to 3.7
+
+* Fri Dec 15 2017 Iryna Shcherbina <ishcherb@redhat.com> - 3.6-2
+- Update Python 2 dependency declarations to new packaging standards
+  (See https://fedoraproject.org/wiki/FinalizingFedoraSwitchtoPython3)
+
+* Thu Oct 26 2017 Adrian Reber <adrian@lisas.de> - 3.6-1
+- Update to 3.6
+
+* Wed Oct 18 2017 Adrian Reber <adrian@lisas.de> - 3.5-5
+- Added patch to fix build on Fedora rawhide aarch64
+
+* Tue Oct 10 2017 Adrian Reber <areber@redhat.com> - 3.5-4
+- Upgrade imported manpages to 3.5
+
+* Mon Oct 09 2017 Adrian Reber <areber@redhat.com> - 3.5-3
+- Fix ExclusiveArch on RHEL
+
+* Mon Oct 02 2017 Adrian Reber <adrian@lisas.de> - 3.5-2
+- Merge RHEL and Fedora spec file
+
+* Thu Sep 28 2017 Adrian Reber <adrian@lisas.de> - 3.5-1
+- Update to 3.5 (#1496614)
+
+* Sun Aug 27 2017 Adrian Reber <adrian@lisas.de> - 3.4-1
+- Update to 3.4 (#1483774)
+- Removed upstreamed patches
+- Added s390x (#1475719)
+
+* Sat Aug 19 2017 Zbigniew Jędrzejewski-Szmek <zbyszek@in.waw.pl> - 3.3-5
+- Python 2 binary package renamed to python2-criu
+  See https://fedoraproject.org/wiki/FinalizingFedoraSwitchtoPython3
+
+* Wed Aug 02 2017 Fedora Release Engineering <releng@fedoraproject.org> - 3.3-4
+- Rebuilt for https://fedoraproject.org/wiki/Fedora_27_Binutils_Mass_Rebuild
+
+* Wed Jul 26 2017 Fedora Release Engineering <releng@fedoraproject.org> - 3.3-3
+- Rebuilt for https://fedoraproject.org/wiki/Fedora_27_Mass_Rebuild
+
+* Thu Jul 20 2017 Adrian Reber <adrian@lisas.de> - 3.3-2
+- Added patches to handle changes in glibc
+
+* Wed Jul 19 2017 Adrian Reber <adrian@lisas.de> - 3.3-1
+- Update to 3.3
+
+* Fri Jun 30 2017 Adrian Reber <adrian@lisas.de> - 3.2.1-2
+- Added patches to handle unified hierarchy and new glibc
+
+* Wed Jun 28 2017 Adrian Reber <adrian@lisas.de> - 3.2.1-1
+- Update to 3.2.1-1
+
+* Wed Jun 28 2017 Adrian Reber <areber@redhat.com> - 2.12-2
+- Added patches for guard page kernel fixes
+
+* Thu Mar 09 2017 Adrian Reber <adrian@lisas.de> - 2.12-1
+- Update to 2.12
+
+* Fri Feb 17 2017 Adrian Reber <adrian@lisas.de> - 2.11.1-1
+- Update to 2.11.1
+
+* Thu Feb 16 2017 Adrian Reber <adrian@lisas.de> - 2.11-1
+- Update to 2.11
+
+* Mon Feb 13 2017 Adrian Reber <adrian@lisas.de> - 2.10-4
+- Added patch to fix build on ppc64le
+
+* Fri Feb 10 2017 Fedora Release Engineering <releng@fedoraproject.org> - 2.10-3
+- Rebuilt for https://fedoraproject.org/wiki/Fedora_26_Mass_Rebuild
+
+* Mon Jan 23 2017 Orion Poplawski <orion@cora.nwra.com> - 2.10-2
+- Rebuild for protobuf 3.2.0
+
+* Mon Jan 16 2017 Adrian Reber <adrian@lisas.de> - 2.10-1
+- Update to 2.10
+
+* Mon Dec 12 2016 Adrian Reber <adrian@lisas.de> - 2.9-1
+- Update to 2.9
+- Added crit manpage to crit subpackage
+
 * Tue Jun 14 2016 Adrian Reber <areber@redhat.com> - 2.3-2
 - Added patches to handle in-flight TCP connections
 

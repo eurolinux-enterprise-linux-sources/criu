@@ -12,16 +12,16 @@ int main(int argc, char **argv)
 	int status;
 
 	/*
-	 *pidns is used to avoid conflicts
+	 * pidns is used to avoid conflicts
 	 * mntns is used to mount /proc
 	 * net is used to avoid conflicts of parasite sockets
-	*/
+	 */
 	if (unshare(CLONE_NEWNS | CLONE_NEWPID | CLONE_NEWNET | CLONE_NEWIPC))
 		return 1;
 	pid = fork();
 	if (pid == 0) {
-		if (mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL)) {
-			fprintf(stderr, "mount(/, S_REC | MS_PRIVATE)): %m");
+		if (mount(NULL, "/", NULL, MS_REC | MS_SLAVE, NULL)) {
+			fprintf(stderr, "mount(/, S_REC | MS_SLAVE)): %m");
 			return 1;
 		}
 		umount2("/proc", MNT_DETACH);

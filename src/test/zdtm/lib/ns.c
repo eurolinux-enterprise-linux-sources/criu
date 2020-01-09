@@ -1,12 +1,12 @@
-#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <grp.h>
 #include <string.h>
 #include <errno.h>
+#include <stdbool.h>
 #include <sys/mount.h>
-#include <sys/types.h>
+#include <sys/sysmacros.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <sys/param.h>
@@ -18,6 +18,8 @@
 
 #include "zdtmtst.h"
 #include "ns.h"
+
+int criu_status_in = -1, criu_status_in_peer = -1, criu_status_out = -1;
 
 extern int pivot_root(const char *new_root, const char *put_old);
 static int prepare_mntns(void)
@@ -83,7 +85,7 @@ static int prepare_mntns(void)
 		return -1;
 	}
 
-	if (mount("./old", "./old", NULL, MS_PRIVATE | MS_REC , NULL)) {
+	if (mount("./old", "./old", NULL, MS_SLAVE | MS_REC , NULL)) {
 		fprintf(stderr, "Can't bind-mount root: %m\n");
 		return -1;
 	}
@@ -95,6 +97,11 @@ static int prepare_mntns(void)
 	 */
 	if (mount("proc", "/proc", "proc", MS_MGC_VAL | MS_NOSUID | MS_NOEXEC | MS_NODEV, NULL)) {
 		fprintf(stderr, "mount(/proc) failed: %m\n");
+		return -1;
+	}
+
+	if (mount("zdtm_run", "/run", "tmpfs", 0, NULL)) {
+		fprintf(stderr, "Unable to mount /run: %m\n");
 		return -1;
 	}
 
@@ -229,19 +236,6 @@ static int ns_exec(void *_arg)
 	return -1;
 }
 
-static void show_ps(void)
-{
-	int pid;
-
-	pid = fork();
-	if (pid == 0) {
-		execl("/bin/ps", "ps", "axf", "-o", "pid,sid,comm", NULL);
-		fprintf(stderr, "Unable to execute ps: %m\n");
-		exit(1);
-	} else if (pid > 0)
-		waitpid(pid, NULL, 0);
-}
-
 int ns_init(int argc, char **argv)
 {
 	struct sigaction sa = {
@@ -251,6 +245,7 @@ int ns_init(int argc, char **argv)
 	int ret, fd, status_pipe = STATUS_FD;
 	char buf[128], *x;
 	pid_t pid;
+	bool reap;
 
 	ret = fcntl(status_pipe, F_SETFD, FD_CLOEXEC);
 	if (ret == -1) {
@@ -258,9 +253,17 @@ int ns_init(int argc, char **argv)
 		exit(1);
 	}
 
+	if (init_notify()) {
+		fprintf(stderr, "Can't init pre-dump notification: %m");
+		exit(1);
+	}
+
+	reap = getenv("ZDTM_NOREAP") == NULL;
+
 	sigemptyset(&sa.sa_mask);
 	sigaddset(&sa.sa_mask, SIGTERM);
-	sigaddset(&sa.sa_mask, SIGCHLD);
+	if (reap)
+		sigaddset(&sa.sa_mask, SIGCHLD);
 
 	if (sigaction(SIGTERM, &sa, NULL)) {
 		fprintf(stderr, "Can't set SIGTERM handler: %m\n");
@@ -288,14 +291,12 @@ int ns_init(int argc, char **argv)
 	else if (ret)
 		fprintf(stderr, "The test returned non-zero code %d\n", ret);
 
-	show_ps();
-
-	if (sigaction(SIGCHLD, &sa, NULL)) {
+	if (reap && sigaction(SIGCHLD, &sa, NULL)) {
 		fprintf(stderr, "Can't set SIGCHLD handler: %m\n");
 		exit(1);
 	}
 
-	while (1) {
+	while (reap && 1) {
 		int status;
 
 		pid = waitpid(-1, &status, WNOHANG);
@@ -318,8 +319,6 @@ int ns_init(int argc, char **argv)
 	/* suspend/resume */
 	test_waitsig();
 
-	show_ps();
-
 	fd = open(pidfile, O_RDONLY);
 	if (fd == -1) {
 		fprintf(stderr, "open(%s) failed: %m\n", pidfile);
@@ -338,13 +337,32 @@ int ns_init(int argc, char **argv)
 		kill(pid, SIGTERM);
 
 	ret = 0;
-	while (ret != -1)
-		ret = wait(NULL);
+	if (reap) {
+		while (true) {
+			pid_t child;
+			ret = -1;
+
+			child = waitpid(-1, &ret, 0);
+			if (child < 0) {
+				fprintf(stderr, "Unable to wait a test process: %m");
+				exit(1);
+			}
+			if (child == pid) {
+				fprintf(stderr, "The test returned 0x%x", ret);
+				exit(!(ret == 0));
+			}
+			if (ret)
+				fprintf(stderr, "The %d process exited with 0x%x", child, ret);
+		}
+	} else {
+		waitpid(pid, NULL, 0);
+	}
+
 
 	exit(1);
 }
 
-#define UID_MAP "0 100000 100000\n100000 200000 50000"
+#define UID_MAP "0 20000 20000\n100000 200000 50000"
 #define GID_MAP "0 400000 50000\n50000 500000 100000"
 void ns_create(int argc, char **argv)
 {
@@ -352,6 +370,7 @@ void ns_create(int argc, char **argv)
 	int ret, status;
 	struct ns_exec_args args;
 	int flags;
+	char *pidf;
 
 	args.argc = argc;
 	args.argv = argv;
@@ -406,6 +425,14 @@ void ns_create(int argc, char **argv)
 	}
 	shutdown(args.status_pipe[0], SHUT_WR);
 
+	pidf = pidfile;
+	pidfile = malloc(strlen(pidfile) + 13);
+	sprintf(pidfile, "%s%s", pidf, INPROGRESS);
+	if (write_pidfile(pid)) {
+		fprintf(stderr, "Preparations fail\n");
+		exit(1);
+	}
+
 	status = 1;
 	ret = read(args.status_pipe[0], &status, sizeof(status));
 	if (ret != sizeof(status) || status) {
@@ -417,6 +444,9 @@ void ns_create(int argc, char **argv)
 		fprintf(stderr, "Unexpected message from test\n");
 		exit(1);
 	}
+
+	unlink(pidfile);
+	pidfile = pidf;
 
 	if (write_pidfile(pid))
 		exit(1);

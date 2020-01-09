@@ -1,4 +1,3 @@
-#define _GNU_SOURCE
 #include <errno.h>
 #include <unistd.h>
 #include <stdlib.h>
@@ -180,7 +179,7 @@ int main(int argc, char ** argv)
 	}
 
 	if (unlink(filename) != -1 || errno != ENOENT) {
-		fail("file %s should have been deleted before migration: unlink: %m\n");
+		fail("file %s should have been deleted before migration: unlink: %m\n", filename);
 		goto out;
 	}
 

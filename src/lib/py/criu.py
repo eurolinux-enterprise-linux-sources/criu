@@ -2,14 +2,11 @@
 
 import socket
 import errno
-import subprocess
 import fcntl
 import os
-import signal
-import sys
 import struct
 
-import rpc
+import pycriu.rpc_pb2 as rpc
 
 class _criu_comm:
 	"""
@@ -56,7 +53,7 @@ class _criu_comm_sk(_criu_comm):
 
 class _criu_comm_fd(_criu_comm):
 	"""
-	Commnunication class for file descriptor.
+	Communication class for file descriptor.
 	"""
 	def __init__(self, fd):
 		self.comm_type = self.COMM_FD
@@ -85,6 +82,8 @@ class _criu_comm_bin(_criu_comm):
 		css = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
 		flags = fcntl.fcntl(css[1], fcntl.F_GETFD)
 		fcntl.fcntl(css[1], fcntl.F_SETFD, flags | fcntl.FD_CLOEXEC)
+		flags = fcntl.fcntl(css[0], fcntl.F_GETFD)
+		fcntl.fcntl(css[0], fcntl.F_SETFD, flags & ~fcntl.FD_CLOEXEC)
 
 		self.daemon = daemon
 
@@ -113,6 +112,9 @@ class _criu_comm_bin(_criu_comm):
 					os._exit(0)
 			else:
 				exec_criu()
+		else:
+			if daemon:
+				os.waitpid(p, 0)
 
 		css[0].close()
 		self.swrk = struct.unpack('i', css[1].recv(4))[0]
@@ -161,7 +163,7 @@ class CRIUExceptionExternal(CRIUException):
 		s = "%s failed: " % (rpc.criu_req_type.Name(self.typ), )
 
 		if self.typ != self.resp_typ:
-			s += "Unxecpected response type %d: " % (self.resp_typ, )
+			s += "Unexpected response type %d: " % (self.resp_typ, )
 
 		s += "Error(%d): " % (self.errno, )
 
@@ -192,6 +194,7 @@ class criu:
 	def __init__(self):
 		self.use_binary('criu')
 		self.opts = rpc.criu_opts()
+		self.sk = None
 
 	def use_sk(self, sk_name):
 		"""
@@ -224,13 +227,20 @@ class criu:
 			daemon = True
 
 		try:
-			s = self._comm.connect(daemon)
+			if not self.sk:
+				s = self._comm.connect(daemon)
+			else:
+				s = self.sk
+
+			if req.keep_open:
+				self.sk = s
 
 			s.send(req.SerializeToString())
 
 			buf = s.recv(len(s.recv(1, socket.MSG_TRUNC | socket.MSG_PEEK)))
 
-			self._comm.disconnect()
+			if not req.keep_open:
+				self._comm.disconnect()
 
 			resp = rpc.criu_resp()
 			resp.ParseFromString(buf)
@@ -266,6 +276,21 @@ class criu:
 
 		return resp.dump
 
+	def pre_dump(self):
+		"""
+		Checkpoint a process/tree identified by opts.pid.
+		"""
+		req 		= rpc.criu_req()
+		req.type	= rpc.PRE_DUMP
+		req.opts.MergeFrom(self.opts)
+
+		resp = self._send_req_and_recv_resp(req)
+
+		if not resp.success:
+			raise CRIUExceptionExternal(req.type, resp.type, resp.cr_errno)
+
+		return resp.dump
+
 	def restore(self):
 		"""
 		Restore a process/tree.
@@ -277,6 +302,31 @@ class criu:
 		resp = self._send_req_and_recv_resp(req)
 
 		if not resp.success:
-			raise CRIUExceptionExternal(req.type, resp.type, resp.errno)
+			raise CRIUExceptionExternal(req.type, resp.type, resp.cr_errno)
 
 		return resp.restore
+
+	def page_server_chld(self):
+		req		= rpc.criu_req()
+		req.type	= rpc.PAGE_SERVER_CHLD
+		req.opts.MergeFrom(self.opts)
+		req.keep_open   = True
+
+		resp = self._send_req_and_recv_resp(req)
+
+		if not resp.success:
+			raise CRIUExceptionExternal(req.type, resp.type, resp.cr_errno)
+
+		return resp.ps
+
+	def wait_pid(self, pid):
+		req		= rpc.criu_req()
+		req.type	= rpc.WAIT_PID
+		req.pid	 = pid
+
+		resp = self._send_req_and_recv_resp(req)
+
+		if not resp.success:
+			raise CRIUExceptionExternal(req.type, resp.type, resp.cr_errno)
+
+		return resp.status

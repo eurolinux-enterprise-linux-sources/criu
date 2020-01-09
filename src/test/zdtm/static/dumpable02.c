@@ -36,11 +36,12 @@ int get_dumpable_from_pipes(int pipe_input, int pipe_output) {
 	/* input and output are from the child's point of view. */
 
 	write(pipe_input, "GET\n", 4);
-	len = read(pipe_output, buf, sizeof(buf));
+	len = read(pipe_output, buf, sizeof(buf) - 1);
 	if (len < 0) {
 		pr_perror("error in parent reading from pipe");
 		return -1;
 	}
+	buf[len] = 0;
 
 	if (memcmp(buf, "DUMPABLE:", 9) != 0) {
 		pr_perror("child returned [%s]", buf);
@@ -142,8 +143,8 @@ int main(int argc, char **argv)
 			return 1;
 		}
 
-		ret = execl(argv[0], "dumpable_server", NULL);
-		pr_perror("could not execv %s as a dumpable_server", argv[0]);
+		execl(argv[0], "dumpable_server", NULL);
+		pr_perror("could not execv %s as a dumpable_server\nError No: %d", argv[0], errno);
 		return 1;
 	}
 

@@ -2,6 +2,7 @@
 #include <unistd.h>
 #include <sys/mman.h>
 #include "zdtmtst.h"
+#include "get_smaps_bits.h"
 
 #define MEM_SIZE (69632)
 
@@ -21,7 +22,8 @@ int main(int argc, char **argv)
 		return -1;
 	}
 
-	test_msg("Lock vma from %lx to %lx\n", start, start + MEM_SIZE);
+	test_msg("Lock vma from %p to %lx\n",
+			start, (unsigned long)start + MEM_SIZE);
 	ret = mlock(start, MEM_SIZE);
 	if (ret < 0) {
 		pr_perror("mlock");

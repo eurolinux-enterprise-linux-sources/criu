@@ -9,7 +9,7 @@
 #include <time.h>
 
 #include <sys/stat.h>
-#include <sys/poll.h>
+#include <poll.h>
 #include <sys/time.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -43,6 +43,7 @@ int main(int argc, char *argv[])
 	int delta, status;
 	task_waiter_t t;
 	pid_t pid;
+	char *deltaenv;
 
 	test_init(argc, argv);
 	task_waiter_init(&t);
@@ -80,7 +81,11 @@ int main(int argc, char *argv[])
 		show_timestamp("Start", time1.tv_sec, time1.tv_usec);
 
 		task_waiter_complete(&t, 1);
-		delta = 5;
+		deltaenv = getenv("ZDTM_DELTA");
+		if (deltaenv)
+			delta = atoi(deltaenv);
+		else
+			delta = 5;
 		while (test_go()) {
 			ret = poll(ufds, 2, delta * 1000);
 			show_pollfd(ufds, 2);

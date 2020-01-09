@@ -1,5 +1,3 @@
-#define _GNU_SOURCE
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -7,7 +5,7 @@
 #include <string.h>
 
 #include <sys/stat.h>
-#include <sys/types.h>
+#include <sys/sysmacros.h>
 
 #include "zdtmtst.h"
 
@@ -17,6 +15,12 @@ const char *test_author	= "Ruslan Kuprieiev <kupruser@gmail.com>";
 char *filename;
 TEST_OPTION(filename, string, "file name", 1);
 
+#ifdef __s390x__
+#define MINOR	64 /* ttyS0 */
+#else
+#define MINOR	5
+#endif
+
 int main(int argc, char **argv)
 {
 	struct stat st1, st2;
@@ -24,7 +28,7 @@ int main(int argc, char **argv)
 
 	test_init(argc, argv);
 
-	if (mknod(filename, S_IFCHR | S_IRUSR | S_IWUSR, makedev(4, 5))) {
+	if (mknod(filename, S_IFCHR | S_IRUSR | S_IWUSR, makedev(4, MINOR))) {
 		pr_perror("Can't create virtual terminal %s", filename);
 		return 1;
 	}

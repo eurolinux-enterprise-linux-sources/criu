@@ -1,11 +1,12 @@
 #include <linux/if_packet.h>
 #include <sys/socket.h>
+#include <net/if.h>
+#include <sys/ioctl.h>
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
 #include <libnl3/netlink/msg.h>
 #include <unistd.h>
 #include <string.h>
-#include "asm/types.h"
 #include "imgset.h"
 #include "files.h"
 #include "sockets.h"
@@ -16,8 +17,13 @@
 #include <arpa/inet.h>
 
 #include "protobuf.h"
+#include "xmalloc.h"
 #include "images/packet-sock.pb-c.h"
 #include "images/fdinfo.pb-c.h"
+#include "namespaces.h"
+
+#undef  LOG_PREFIX
+#define LOG_PREFIX "packet: "
 
 struct packet_sock_info {
 	PacketSockEntry *pse;
@@ -25,10 +31,10 @@ struct packet_sock_info {
 };
 
 struct packet_mreq_max {
-	int             mr_ifindex;
-	unsigned short  mr_type;
-	unsigned short  mr_alen;
-	unsigned char   mr_address[MAX_ADDR_LEN];
+	int		mr_ifindex;
+	unsigned short	mr_type;
+	unsigned short	mr_alen;
+	unsigned char	mr_address[MAX_ADDR_LEN];
 };
 
 struct packet_sock_desc {
@@ -144,6 +150,7 @@ static int dump_rings(PacketSockEntry *psk, struct packet_sock_desc *sd)
 
 static int dump_one_packet_fd(int lfd, u32 id, const struct fd_parms *p)
 {
+	FileEntry fe = FILE_ENTRY__INIT;
 	PacketSockEntry psk = PACKET_SOCK_ENTRY__INIT;
 	SkOptsEntry skopts = SK_OPTS_ENTRY__INIT;
 	struct packet_sock_desc *sd;
@@ -160,6 +167,8 @@ static int dump_one_packet_fd(int lfd, u32 id, const struct fd_parms *p)
 	sd->sd.already_dumped = 1;
 
 	psk.id = sd->file_id = id;
+	psk.ns_id = sd->sd.sk_ns->id;
+	psk.has_ns_id = true;
 	psk.type = sd->type;
 	psk.flags = p->flags;
 	psk.fown = (FownEntry *)&p->fown;
@@ -192,7 +201,11 @@ static int dump_one_packet_fd(int lfd, u32 id, const struct fd_parms *p)
 	if (ret)
 		goto out;
 
-	ret = pb_write_one(img_from_set(glob_imgset, CR_FD_PACKETSK), &psk, PB_PACKET_SOCK);
+	fe.type = FD_TYPES__PACKETSK;
+	fe.id = psk.id;
+	fe.psk = &psk;
+
+	ret = pb_write_one(img_from_set(glob_imgset, CR_FD_FILES), &fe, PB_FILE);
 out:
 	release_skopts(&skopts);
 	xfree(psk.rx_ring);
@@ -240,7 +253,7 @@ static int packet_save_mreqs(struct packet_sock_desc *sd, struct nlattr *mc)
 	return 0;
 }
 
-int packet_receive_one(struct nlmsghdr *hdr, void *arg)
+int packet_receive_one(struct nlmsghdr *hdr, struct ns_id *ns, void *arg)
 {
 	struct packet_diag_msg *m;
 	struct nlattr *tb[PACKET_DIAG_MAX + 1];
@@ -294,7 +307,7 @@ int packet_receive_one(struct nlmsghdr *hdr, void *arg)
 		memcpy(sd->tx, RTA_DATA(tb[PACKET_DIAG_TX_RING]), sizeof(*sd->tx));
 	}
 
-	return sk_collect_one(m->pdiag_ino, PF_PACKET, &sd->sd);
+	return sk_collect_one(m->pdiag_ino, PF_PACKET, &sd->sd, ns);
 err:
 	xfree(sd->tx);
 	xfree(sd->rx);
@@ -325,7 +338,7 @@ static int open_socket_map(int pid, struct vma_area *vm)
 			 */
 
 			fd = dup(le->fe->fd);
-			if (!fd) {
+			if (fd < 0) {
 				pr_perror("Can't dup packet sk");
 				return -1;
 			}
@@ -403,7 +416,57 @@ static int restore_rings(int sk, PacketSockEntry *psk)
 	return 0;
 }
 
-static int open_packet_sk(struct file_desc *d)
+static int open_packet_sk_spkt(PacketSockEntry *pse, int *new_fd)
+{
+	struct sockaddr addr_spkt;
+	int sk;
+
+	sk = socket(PF_PACKET, pse->type, pse->protocol);
+	if (sk < 0) {
+		pr_perror("Can't create packet socket");
+		return -1;
+	}
+
+	memset(&addr_spkt, 0, sizeof(addr_spkt));
+	addr_spkt.sa_family = AF_PACKET;
+
+	// if the socket was bound to any device
+	if (pse->ifindex > 0) {
+		const size_t sa_data_size = sizeof(addr_spkt.sa_data);
+		struct ifreq req;
+
+		memset(&req, 0, sizeof(req));
+		req.ifr_ifindex = pse->ifindex;
+
+		if (ioctl(sk, SIOCGIFNAME, &req) < 0) {
+			pr_perror("Can't get interface name (ifindex %d)", pse->ifindex);
+			goto err;
+		}
+
+		memcpy(addr_spkt.sa_data, req.ifr_name, sa_data_size);
+		addr_spkt.sa_data[sa_data_size - 1] = 0;
+
+		if (bind(sk, &addr_spkt, sizeof(addr_spkt)) < 0) {
+			pr_perror("Can't bind packet socket to %s", req.ifr_name);
+			goto err;
+		}
+	}
+
+	if (rst_file_params(sk, pse->fown, pse->flags))
+		goto err;
+
+	if (restore_socket_opts(sk, pse->opts))
+		goto err;
+
+	*new_fd = sk;
+	return 0;
+
+err:
+	close(sk);
+	return -1;
+}
+
+static int open_packet_sk(struct file_desc *d, int *new_fd)
 {
 	struct packet_sock_info *psi;
 	PacketSockEntry *pse;
@@ -414,6 +477,12 @@ static int open_packet_sk(struct file_desc *d)
 	pse = psi->pse;
 
 	pr_info("Opening packet socket id %#x\n", pse->id);
+
+	if (set_netns(pse->ns_id))
+		return -1;
+
+	if (pse->type == SOCK_PACKET)
+		return open_packet_sk_spkt(pse, new_fd);
 
 	sk = socket(PF_PACKET, pse->type, pse->protocol);
 	if (sk < 0) {
@@ -484,7 +553,8 @@ static int open_packet_sk(struct file_desc *d)
 	if (restore_socket_opts(sk, pse->opts))
 		goto err_cl;
 
-	return sk;
+	*new_fd = sk;
+	return 0;
 
 err_cl:
 	close(sk);

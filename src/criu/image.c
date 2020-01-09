@@ -1,6 +1,9 @@
+#include <stdio.h>
 #include <unistd.h>
 #include <stdarg.h>
 #include <fcntl.h>
+#include <limits.h>
+#include <sys/stat.h>
 #include "crtools.h"
 #include "cr_options.h"
 #include "imgset.h"
@@ -10,10 +13,12 @@
 #include "cgroup.h"
 #include "lsm.h"
 #include "protobuf.h"
+#include "xmalloc.h"
 #include "images/inventory.pb-c.h"
 #include "images/pagemap.pb-c.h"
+#include "proc_parse.h"
+#include "namespaces.h"
 
-bool fdinfo_per_id = false;
 bool ns_per_id = false;
 bool img_common_magic = true;
 TaskKobjIdsEntry *root_ids;
@@ -33,7 +38,11 @@ int check_img_inventory(void)
 	if (pb_read_one(img, &he, PB_INVENTORY) < 0)
 		goto out_close;
 
-	fdinfo_per_id = he->has_fdinfo_per_id ?  he->fdinfo_per_id : false;
+	if (!he->has_fdinfo_per_id || !he->fdinfo_per_id) {
+		pr_err("Too old image, no longer supported\n");
+		goto out_close;
+	}
+
 	ns_per_id = he->has_ns_per_id ? he->ns_per_id : false;
 
 	if (he->root_ids) {
@@ -53,7 +62,10 @@ int check_img_inventory(void)
 		root_cg_set = he->root_cg_set;
 	}
 
-	image_lsm = he->lsmtype;
+	if (he->has_lsmtype)
+		image_lsm = he->lsmtype;
+	else
+		image_lsm = LSMTYPE__NO_LSM;
 
 	switch (he->img_version) {
 	case CRTOOLS_IMAGES_V1:
@@ -95,12 +107,66 @@ int write_img_inventory(InventoryEntry *he)
 	return 0;
 }
 
+int inventory_save_uptime(InventoryEntry *he)
+{
+	if (!opts.track_mem)
+		return 0;
+
+	/*
+	 * dump_uptime is used to detect whether a process was handled
+	 * before or it is a new process with the same pid.
+	 */
+	if (parse_uptime(&he->dump_uptime))
+		return -1;
+
+	he->has_dump_uptime = true;
+	return 0;
+}
+
+InventoryEntry *get_parent_inventory(void)
+{
+	struct cr_img *img;
+	InventoryEntry *ie;
+	int dir;
+
+	dir = openat(get_service_fd(IMG_FD_OFF), CR_PARENT_LINK, O_RDONLY);
+	if (dir == -1) {
+		pr_warn("Failed to open parent directory\n");
+		return NULL;
+	}
+
+	img = open_image_at(dir, CR_FD_INVENTORY, O_RSTR);
+	if (!img) {
+		pr_warn("Failed to open parent pre-dump inventory image\n");
+		close(dir);
+		return NULL;
+	}
+
+	if (pb_read_one(img, &ie, PB_INVENTORY) < 0) {
+		pr_warn("Failed to read parent pre-dump inventory entry\n");
+		close_image(img);
+		close(dir);
+		return NULL;
+	}
+
+	if (!ie->has_dump_uptime) {
+		pr_warn("Parent pre-dump inventory has no uptime\n");
+		inventory_entry__free_unpacked(ie, NULL);
+		ie = NULL;
+	}
+
+	close_image(img);
+	close(dir);
+	return ie;
+}
+
 int prepare_inventory(InventoryEntry *he)
 {
+	struct pid pid;
 	struct {
 		struct pstree_item i;
 		struct dmp_info d;
-	} crt = { };
+	} crt = { .i.pid = &pid };
 
 	pr_info("Perparing image inventory (version %u)\n", CRTOOLS_IMAGES_V1);
 
@@ -109,10 +175,11 @@ int prepare_inventory(InventoryEntry *he)
 	he->has_fdinfo_per_id = true;
 	he->ns_per_id = true;
 	he->has_ns_per_id = true;
+	he->has_lsmtype = true;
 	he->lsmtype = host_lsm_type();
 
-	crt.i.pid.state = TASK_ALIVE;
-	crt.i.pid.real = getpid();
+	crt.i.pid->state = TASK_ALIVE;
+	crt.i.pid->real = getpid();
 	if (get_task_ids(&crt.i))
 		return -1;
 
@@ -301,15 +368,51 @@ static int img_write_magic(struct cr_img *img, int oflags, int type)
 	return write_img(img, &imgset_template[type].magic);
 }
 
+struct openat_args {
+	char	path[PATH_MAX];
+	int	flags;
+	int	err;
+	int	mode;
+};
+
+static int userns_openat(void *arg, int dfd, int pid)
+{
+	struct openat_args *pa = (struct openat_args *)arg;
+	int ret;
+
+	ret = openat(dfd, pa->path, pa->flags, pa->mode);
+	if (ret < 0)
+		pa->err = errno;
+
+	return ret;
+}
+
 static int do_open_image(struct cr_img *img, int dfd, int type, unsigned long oflags, char *path)
 {
 	int ret, flags;
 
-	flags = oflags & ~(O_NOBUF | O_SERVICE);
+	flags = oflags & ~(O_NOBUF | O_SERVICE | O_FORCE_LOCAL);
 
-	ret = openat(dfd, path, flags, CR_FD_PERM);
+	/*
+	 * For pages images dedup we need to open images read-write on
+	 * restore, that may require proper capabilities, so we ask
+	 * usernsd to do it for us
+	 */
+	if (root_ns_mask & CLONE_NEWUSER &&
+	    type == CR_FD_PAGES && oflags & O_RDWR) {
+		struct openat_args pa = {
+			.flags = flags,
+			.err = 0,
+			.mode = CR_FD_PERM,
+		};
+		snprintf(pa.path, PATH_MAX, "%s", path);
+		ret = userns_call(userns_openat, UNS_FDOUT, &pa, sizeof(struct openat_args), dfd);
+		if (ret < 0)
+			errno = pa.err;
+	} else
+		ret = openat(dfd, path, flags, CR_FD_PERM);
 	if (ret < 0) {
-		if (!(flags & O_CREAT) && (errno == ENOENT)) {
+		if (!(flags & O_CREAT) && (errno == ENOENT || ret == -ENOENT)) {
 			pr_info("No %s image\n", path);
 			img->_x.fd = EMPTY_IMG_FD;
 			goto skip_magic;
@@ -406,7 +509,8 @@ int open_image_dir(char *dir)
 	}
 
 	ret = install_service_fd(IMG_FD_OFF, fd);
-	close(fd);
+	if (ret < 0)
+		return -1;
 	fd = ret;
 
 	if (opts.img_parent) {
@@ -449,29 +553,27 @@ void up_page_ids_base(void)
 	page_ids += 0x10000;
 }
 
-struct cr_img *open_pages_image_at(int dfd, unsigned long flags, struct cr_img *pmi)
+struct cr_img *open_pages_image_at(int dfd, unsigned long flags, struct cr_img *pmi, u32 *id)
 {
-	unsigned id;
-
 	if (flags == O_RDONLY || flags == O_RDWR) {
 		PagemapHead *h;
 		if (pb_read_one(pmi, &h, PB_PAGEMAP_HEAD) < 0)
 			return NULL;
-		id = h->pages_id;
+		*id = h->pages_id;
 		pagemap_head__free_unpacked(h, NULL);
 	} else {
 		PagemapHead h = PAGEMAP_HEAD__INIT;
-		id = h.pages_id = page_ids++;
+		*id = h.pages_id = page_ids++;
 		if (pb_write_one(pmi, &h, PB_PAGEMAP_HEAD) < 0)
 			return NULL;
 	}
 
-	return open_image_at(dfd, CR_FD_PAGES, flags, id);
+	return open_image_at(dfd, CR_FD_PAGES, flags, *id);
 }
 
-struct cr_img *open_pages_image(unsigned long flags, struct cr_img *pmi)
+struct cr_img *open_pages_image(unsigned long flags, struct cr_img *pmi, u32 *id)
 {
-	return open_pages_image_at(get_service_fd(IMG_FD_OFF), flags, pmi);
+	return open_pages_image_at(get_service_fd(IMG_FD_OFF), flags, pmi, id);
 }
 
 /*
@@ -563,3 +665,14 @@ int read_img_str(struct cr_img *img, char **pstr, int size)
 	return 0;
 }
 
+off_t img_raw_size(struct cr_img *img)
+{
+	struct stat stat;
+
+	if (fstat(img->_x.fd, &stat)) {
+		pr_perror("Failed to get image stats");
+		return -1;
+	}
+
+	return stat.st_size;
+}

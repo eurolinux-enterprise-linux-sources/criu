@@ -1,4 +1,3 @@
-#define _GNU_SOURCE         /* See feature_test_macros(7) */
 #include <unistd.h>
 #include <limits.h>
 
@@ -26,6 +25,9 @@
 #elif __aarch64__
 # define __NR_fanotify_init     262
 # define __NR_fanotify_mark     263
+#elif __s390x__
+# define __NR_fanotify_init     332
+# define __NR_fanotify_mark     333
 #else
 # define __NR_fanotify_init	338
 # define __NR_fanotify_mark	339
@@ -75,7 +77,11 @@ static int fanotify_init(unsigned int flags, unsigned int event_f_flags)
 static int fanotify_mark(int fanotify_fd, unsigned int flags, unsigned long mask,
 			 int dfd, const char *pathname)
 {
+#ifdef __i386__
+	return syscall(__NR_fanotify_mark, fanotify_fd, flags, mask, 0, dfd, pathname);
+#else
 	return syscall(__NR_fanotify_mark, fanotify_fd, flags, mask, dfd, pathname);
+#endif
 }
 
 #define fdinfo_field(str, field)	!strncmp(str, field":", sizeof(field))
@@ -118,10 +124,14 @@ static void copy_fhandle(char *tok, struct fanotify_mark_inode *inode)
 
 static int cmp_fanotify_obj(struct fanotify_obj *old, struct fanotify_obj *new)
 {
+	/*
+	 * mnt_id and s_dev may change during container migration,
+	 * moreover the backend (say PLOOP) may be re-mounted during
+	 * c/r, so exclude them.
+	 */
 	if ((old->glob.faflags != new->glob.faflags)			||
 	    (old->glob.evflags != new->glob.evflags)			||
 	    (old->inode.i_ino != new->inode.i_ino)			||
-	    (old->inode.s_dev != new->inode.s_dev)			||
 	    (old->inode.mflags != new->inode.mflags)			||
 	    (old->inode.mask != new->inode.mask)			||
 	    (old->inode.ignored_mask != new->inode.ignored_mask))
@@ -131,7 +141,6 @@ static int cmp_fanotify_obj(struct fanotify_obj *old, struct fanotify_obj *new)
 		   sizeof(new->inode.fhandle)))
 		return -2;
 
-	/* mnt_id may change, exclude it */
 	if ((old->mount.mflags != new->mount.mflags)			||
 	    (old->mount.mask != new->mount.mask)			||
 	    (old->mount.ignored_mask != new->mount.ignored_mask))
@@ -223,9 +232,8 @@ int main (int argc, char *argv[])
 		}
 	}
 
-	fa_fd = fanotify_init(FAN_NONBLOCK | O_RDONLY | O_LARGEFILE |
-			      FAN_CLASS_NOTIF | FAN_UNLIMITED_QUEUE,
-			      0);
+	fa_fd = fanotify_init(FAN_NONBLOCK | FAN_CLASS_NOTIF | FAN_UNLIMITED_QUEUE,
+			      O_RDONLY | O_LARGEFILE);
 	if (fa_fd < 0) {
 		pr_perror("fanotify_init failed");
 		exit(1);

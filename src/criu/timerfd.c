@@ -8,7 +8,7 @@
 #include "protobuf.h"
 #include "images/timerfd.pb-c.h"
 
-#include "proc_parse.h"
+#include "fdinfo.h"
 #include "rst-malloc.h"
 #include "cr_options.h"
 #include "restorer.h"
@@ -18,7 +18,7 @@
 #include "imgset.h"
 #include "util.h"
 #include "log.h"
-#include "bug.h"
+#include "common/bug.h"
 
 #undef	LOG_PREFIX
 #define LOG_PREFIX "timerfd: "
@@ -64,48 +64,32 @@ int is_timerfd_link(char *link)
 	return is_anon_link_type(link, "[timerfd]");
 }
 
-static int dump_timerfd_entry(union fdinfo_entries *e, void *arg)
-{
-	struct timerfd_dump_arg *da = arg;
-	TimerfdEntry *tfy = &e->tfy;
-
-	tfy->id		= da->id;
-	tfy->flags	= da->p->flags;
-	tfy->fown	= (FownEntry *)&da->p->fown;
-
-	pr_info("Dumping id %#x clockid %d it_value(%llu, %llu) it_interval(%llu, %llu)\n",
-		tfy->id, tfy->clockid, (unsigned long long)tfy->vsec, (unsigned long long)tfy->vnsec,
-		(unsigned long long)tfy->isec, (unsigned long long)tfy->insec);
-
-	return pb_write_one(img_from_set(glob_imgset, CR_FD_TIMERFD), &e->tfy, PB_TIMERFD);
-}
-
 static int dump_one_timerfd(int lfd, u32 id, const struct fd_parms *p)
 {
-	struct timerfd_dump_arg da = { .id = id, .p = p, };
-	return parse_fdinfo(lfd, FD_TYPES__TIMERFD, dump_timerfd_entry, &da);
+	TimerfdEntry tfe = TIMERFD_ENTRY__INIT;
+	FileEntry fe = FILE_ENTRY__INIT;
+
+	if (parse_fdinfo(lfd, FD_TYPES__TIMERFD, &tfe))
+		return -1;
+
+	tfe.id = id;
+	tfe.flags = p->flags;
+	tfe.fown = (FownEntry *)&p->fown;
+	pr_info("Dumping id %#x clockid %d it_value(%llu, %llu) it_interval(%llu, %llu)\n",
+		tfe.id, tfe.clockid, (unsigned long long)tfe.vsec, (unsigned long long)tfe.vnsec,
+		(unsigned long long)tfe.isec, (unsigned long long)tfe.insec);
+
+	fe.type = FD_TYPES__TIMERFD;
+	fe.id = tfe.id;
+	fe.tfd = &tfe;
+
+	return pb_write_one(img_from_set(glob_imgset, CR_FD_FILES), &fe, PB_FILE);
 }
 
 const struct fdtype_ops timerfd_dump_ops = {
 	.type		= FD_TYPES__TIMERFD,
 	.dump		= dump_one_timerfd,
 };
-
-/*
- * We need to restore timers at the very late stage in restorer
- * to eliminate the case when timer is expired but we have not
- * yet finished restore procedure and signal handlers are not
- * set up properly. We need to copy timers settings into restorer
- * area that's why post-open is used for.
- */
-static int timerfd_post_open(struct file_desc *d, int fd)
-{
-	struct timerfd_info *info = container_of(d, struct timerfd_info, d);
-
-	info->t_fd = fd;
-	list_add_tail(&info->rlist, &rst_timerfds);
-	return 0;
-}
 
 int prepare_timerfds(struct task_restore_args *ta)
 {
@@ -138,7 +122,7 @@ int prepare_timerfds(struct task_restore_args *ta)
 	return 0;
 }
 
-static int timerfd_open(struct file_desc *d)
+static int timerfd_open(struct file_desc *d, int *new_fd)
 {
 	struct timerfd_info *info;
 	TimerfdEntry *tfe;
@@ -163,7 +147,11 @@ static int timerfd_open(struct file_desc *d)
 		goto err_close;
 	}
 
-	return tmp;
+	info->t_fd = file_master(d)->fe->fd;
+	list_add_tail(&info->rlist, &rst_timerfds);
+
+	*new_fd = tmp;
+	return 0;
 
 err_close:
 	close_safe(&tmp);
@@ -173,19 +161,7 @@ err_close:
 static struct file_desc_ops timerfd_desc_ops = {
 	.type		= FD_TYPES__TIMERFD,
 	.open		= timerfd_open,
-	.post_open	= timerfd_post_open,
 };
-
-static int verify_timerfd(TimerfdEntry *tfe)
-{
-	if (tfe->clockid != CLOCK_REALTIME &&
-	    tfe->clockid != CLOCK_MONOTONIC) {
-		pr_err("Unknown clock type %d for %#x\n", tfe->clockid, tfe->id);
-		return -1;
-	}
-
-	return 0;
-}
 
 static int collect_one_timerfd(void *o, ProtobufCMessage *msg, struct cr_img *i)
 {

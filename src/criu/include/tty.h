@@ -27,10 +27,13 @@ extern int dump_verify_tty_sids(void);
 extern struct collect_image_info tty_info_cinfo;
 extern struct collect_image_info tty_cinfo;
 extern struct collect_image_info tty_cdata;
-extern int prepare_shared_tty(void);
+
+struct mount_info;
+extern int devpts_restore(struct mount_info *pm);
 
 extern int tty_prep_fds(void);
-extern void tty_fini_fds(void);
+
+extern int devpts_check_bindmount(struct mount_info *m);
 
 #define OPT_SHELL_JOB	"shell-job"
 

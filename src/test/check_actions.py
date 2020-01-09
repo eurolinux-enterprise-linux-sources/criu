@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python2
 
 import sys
 import os
@@ -34,7 +34,7 @@ if actions:
 
 if errors:
 	for x in errors:
-		print x
+		print(x)
 	sys.exit(1)
 
-print 'PASS'
+print('PASS')

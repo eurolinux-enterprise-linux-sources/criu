@@ -1,7 +1,7 @@
 #ifndef __CR_PRCTL_H__
 #define __CR_PRCTL_H__
 
-#include "asm/int.h"
+#include "int.h"
 
 #ifndef PR_SET_NAME
 # define PR_SET_NAME		15
@@ -72,6 +72,14 @@ struct prctl_mm_map {
 
 #ifndef PR_GET_TID_ADDRESS
 # define PR_GET_TID_ADDRESS	40
+#endif
+
+#ifndef PR_SET_THP_DISABLE
+# define PR_SET_THP_DISABLE	41
+#endif
+
+#ifndef PR_GET_THP_DISABLE
+# define PR_GET_THP_DISABLE	42
 #endif
 
 #endif /* __CR_PRCTL_H__ */

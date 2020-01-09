@@ -4,13 +4,15 @@
 #include "images/inventory.pb-c.h"
 #include "images/creds.pb-c.h"
 
+#define AA_SECURITYFS_PATH "/sys/kernel/security/apparmor"
+
 /*
  * Get the Lsmtype for the current host.
  */
 extern Lsmtype host_lsm_type(void);
 
 /*
- * Initilize the Lsmtype for the current host
+ * Initialize the Lsmtype for the current host
  */
 extern void kerndat_lsm(void);
 
@@ -31,5 +33,5 @@ int validate_lsm(char *profile);
  */
 int render_lsm_profile(char *profile, char **val);
 
-extern int parse_lsm_arg(char *arg);
+extern int lsm_check_opts(void);
 #endif /* __CR_LSM_H__ */

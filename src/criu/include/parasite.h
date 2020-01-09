@@ -1,9 +1,6 @@
 #ifndef __CR_PARASITE_H__
 #define __CR_PARASITE_H__
 
-#define PARASITE_STACK_SIZE	(16 << 10)
-#define PARASITE_ARG_SIZE_MIN	( 1 << 12)
-
 #define PARASITE_MAX_SIZE	(64 << 10)
 
 #ifndef __ASSEMBLY__
@@ -15,6 +12,8 @@
 
 #include "image.h"
 #include "util-pie.h"
+#include "common/lock.h"
+#include "infect-rpc.h"
 
 #include "images/vma.pb-c.h"
 #include "images/tty.pb-c.h"
@@ -22,20 +21,7 @@
 #define __head __used __section(.head.text)
 
 enum {
-	PARASITE_CMD_IDLE		= 0,
-	PARASITE_CMD_ACK,
-
-	PARASITE_CMD_INIT_DAEMON,
-	PARASITE_CMD_DUMP_THREAD,
-	PARASITE_CMD_UNMAP,
-
-	/*
-	 * These two must be greater than INITs.
-	 */
-	PARASITE_CMD_DAEMONIZED,
-
-	PARASITE_CMD_FINI,
-
+	PARASITE_CMD_DUMP_THREAD = PARASITE_USER_CMDS,
 	PARASITE_CMD_MPROTECT_VMAS,
 	PARASITE_CMD_DUMPPAGES,
 
@@ -53,34 +39,6 @@ enum {
 	PARASITE_CMD_MAX,
 };
 
-struct ctl_msg {
-	unsigned int	cmd;			/* command itself */
-	unsigned int	ack;			/* ack on command */
-	int		err;			/* error code on reply */
-};
-
-#define ctl_msg_cmd(_cmd)		\
-	(struct ctl_msg){.cmd = _cmd, }
-
-#define ctl_msg_ack(_cmd, _err)	\
-	(struct ctl_msg){.cmd = _cmd, .ack = _cmd, .err = _err, }
-
-struct parasite_init_args {
-	int			h_addr_len;
-	struct sockaddr_un	h_addr;
-
-	int			log_level;
-
-	struct rt_sigframe	*sigframe;
-
-	void			*sigreturn_addr;
-};
-
-struct parasite_unmap_args {
-	void			*parasite_start;
-	unsigned long		parasite_len;
-};
-
 struct parasite_vma_entry
 {
 	unsigned long	start;
@@ -91,8 +49,9 @@ struct parasite_vma_entry
 struct parasite_vdso_vma_entry {
 	unsigned long	start;
 	unsigned long	len;
-	unsigned long	proxy_vdso_addr;
-	unsigned long	proxy_vvar_addr;
+	unsigned long	orig_vdso_addr;
+	unsigned long	orig_vvar_addr;
+	unsigned long	rt_vvar_addr;
 	int		is_marked;
 	bool		try_fill_symtable;
 	bool		is_vdso;
@@ -166,6 +125,7 @@ struct parasite_dump_misc {
 	u32 umask;
 
 	int dumpable;
+	int thp_disabled;
 };
 
 /*
@@ -192,7 +152,7 @@ struct parasite_dump_creds {
 	 * FIXME -- this structure is passed to parasite code
 	 * through parasite args area so in parasite_dump_creds()
 	 * call we check for size of this data fits the size of
-	 * the area. Unfortunatelly, we _actually_ use more bytes
+	 * the area. Unfortunately, we _actually_ use more bytes
 	 * than the sizeof() -- we put PARASITE_MAX_GROUPS int-s
 	 * in there, so the size check is not correct.
 	 *
@@ -210,6 +170,7 @@ struct parasite_dump_thread {
 	tls_t				tls;
 	stack_t				sas;
 	int				pdeath_sig;
+	char				comm[TASK_COMM_LEN];
 	struct parasite_dump_creds	creds[0];
 };
 
@@ -221,12 +182,12 @@ static inline void copy_sas(ThreadSasEntry *dst, const stack_t *src)
 }
 
 /*
- * How many descriptrs can be transfered from parasite:
+ * How many descriptors can be transferred from parasite:
  *
  * 1) struct parasite_drain_fd + all descriptors should fit into one page
  * 2) The value should be a multiple of CR_SCM_MAX_FD, because descriptors
- *    are transfered with help of send_fds and recv_fds.
- * 3) criu should work with a defaul value of the file limit (1024)
+ *    are transferred with help of send_fds and recv_fds.
+ * 3) criu should work with a default value of the file limit (1024)
  */
 #define PARASITE_MAX_FDS	CR_SCM_MAX_FD * 3
 
@@ -235,13 +196,21 @@ struct parasite_drain_fd {
 	int	fds[0];
 };
 
+struct fd_opts {
+	char flags;
+	struct {
+		uint32_t uid;
+		uint32_t euid;
+		uint32_t signum;
+		uint32_t pid_type;
+		uint32_t pid;
+	} fown;
+};
+
 static inline int drain_fds_size(struct parasite_drain_fd *dfds)
 {
 	int nr_fds = min((int)PARASITE_MAX_FDS, dfds->nr_fds);
-
-	BUILD_BUG_ON(sizeof(*dfds) + PARASITE_MAX_FDS * sizeof(dfds->fds[0]) > PAGE_SIZE);
-
-	return sizeof(dfds) + nr_fds * sizeof(dfds->fds[0]);
+	return sizeof(*dfds) + nr_fds * (sizeof(dfds->fds[0]) + sizeof(struct fd_opts));
 }
 
 struct parasite_tty_args {
@@ -263,11 +232,8 @@ struct parasite_dump_cgroup_args {
 	 *
 	 * The string is null terminated.
 	 */
-	char contents[PARASITE_ARG_SIZE_MIN];
+	char contents[1 << 12];
 };
-
-/* the parasite prefix is added by gen_offsets.sh */
-#define parasite_sym(pblob, name) ((void *)(pblob) + parasite_blob_offset__##name)
 
 #endif /* !__ASSEMBLY__ */
 

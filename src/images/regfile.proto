@@ -1,3 +1,5 @@
+syntax = "proto2";
+
 import "opts.proto";
 import "fown.proto";
 
@@ -10,4 +12,5 @@ message reg_file_entry {
 	optional sint32		mnt_id	= 7 [default = -1];
 	optional uint64		size	= 8;
 	optional bool		ext	= 9;
+	optional uint32         mode    = 10;
 }

@@ -1,5 +1,6 @@
 #include <unistd.h>
 #include <linux/netlink.h>
+#include <linux/rtnetlink.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/eventfd.h>
@@ -8,7 +9,6 @@
 #include <sys/signalfd.h>
 #include <sys/ptrace.h>
 #include <sys/wait.h>
-#include <sys/socket.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <linux/if.h>
@@ -20,9 +20,13 @@
 #include <netinet/in.h>
 #include <sys/prctl.h>
 #include <sched.h>
+#include <sys/mount.h>
 #include <linux/aio_abi.h>
 
-#include "proc_parse.h"
+#include "../soccr/soccr.h"
+
+#include "types.h"
+#include "fdinfo.h"
 #include "sockets.h"
 #include "crtools.h"
 #include "log.h"
@@ -33,13 +37,19 @@
 #include "proc_parse.h"
 #include "mount.h"
 #include "tty.h"
-#include "ptrace.h"
+#include <compel/ptrace.h>
+#include "ptrace-compat.h"
 #include "kerndat.h"
 #include "timerfd.h"
+#include "util.h"
 #include "tun.h"
 #include "namespaces.h"
 #include "pstree.h"
 #include "cr_options.h"
+#include "libnetlink.h"
+#include "net.h"
+#include "restorer.h"
+#include "uffd.h"
 
 static char *feature_name(int (*func)());
 
@@ -234,14 +244,12 @@ static int check_fcntl(void)
 	u32 v[2];
 	int fd;
 
-	fd = open("/proc/self/comm", O_RDONLY);
-	if (fd < 0) {
-		pr_perror("Can't open self comm file");
+	fd = open_proc(PROC_SELF, "comm");
+	if (fd < 0)
 		return -1;
-	}
 
 	if (fcntl(fd, F_GETOWNER_UIDS, (long)v)) {
-		pr_perror("Can'r fetch file owner UIDs");
+		pr_perror("Can't fetch file owner UIDs");
 		close(fd);
 		return -1;
 	}
@@ -264,16 +272,11 @@ static int check_proc_stat(void)
 	return 0;
 }
 
-static int check_one_fdinfo(union fdinfo_entries *e, void *arg)
-{
-	*(int *)arg = (int)e->efd.counter;
-	return 0;
-}
-
 static int check_fdinfo_eventfd(void)
 {
 	int fd, ret;
-	int cnt = 13, proc_cnt = 0;
+	int cnt = 13;
+	EventfdFileEntry fe = EVENTFD_FILE_ENTRY__INIT;
 
 	fd = eventfd(cnt, 0);
 	if (fd < 0) {
@@ -281,7 +284,7 @@ static int check_fdinfo_eventfd(void)
 		return -1;
 	}
 
-	ret = parse_fdinfo(fd, FD_TYPES__EVENTFD, check_one_fdinfo, &proc_cnt);
+	ret = parse_fdinfo(fd, FD_TYPES__EVENTFD, &fe);
 	close(fd);
 
 	if (ret) {
@@ -289,18 +292,13 @@ static int check_fdinfo_eventfd(void)
 		return -1;
 	}
 
-	if (proc_cnt != cnt) {
+	if (fe.counter != cnt) {
 		pr_err("Counter mismatch (or not met) %d want %d\n",
-				proc_cnt, cnt);
+				(int)fe.counter, cnt);
 		return -1;
 	}
 
-	pr_info("Eventfd fdinfo works OK (%d vs %d)\n", cnt, proc_cnt);
-	return 0;
-}
-
-static int check_one_sfd(union fdinfo_entries *e, void *arg)
-{
+	pr_info("Eventfd fdinfo works OK (%d vs %d)\n", cnt, (int)fe.counter);
 	return 0;
 }
 
@@ -309,7 +307,7 @@ int check_mnt_id(void)
 	struct fdinfo_common fdinfo = { .mnt_id = -1 };
 	int ret;
 
-	ret = parse_fdinfo(get_service_fd(LOG_FD_OFF), FD_TYPES__UND, NULL, &fdinfo);
+	ret = parse_fdinfo(get_service_fd(LOG_FD_OFF), FD_TYPES__UND, &fdinfo);
 	if (ret < 0)
 		return -1;
 
@@ -325,6 +323,7 @@ static int check_fdinfo_signalfd(void)
 {
 	int fd, ret;
 	sigset_t mask;
+	SignalfdEntry sfd = SIGNALFD_ENTRY__INIT;
 
 	sigemptyset(&mask);
 	sigaddset(&mask, SIGUSR1);
@@ -334,7 +333,7 @@ static int check_fdinfo_signalfd(void)
 		return -1;
 	}
 
-	ret = parse_fdinfo(fd, FD_TYPES__SIGNALFD, check_one_sfd, NULL);
+	ret = parse_fdinfo(fd, FD_TYPES__SIGNALFD, &sfd);
 	close(fd);
 
 	if (ret) {
@@ -345,17 +344,11 @@ static int check_fdinfo_signalfd(void)
 	return 0;
 }
 
-static int check_one_epoll(union fdinfo_entries *e, void *arg)
-{
-	*(int *)arg = e->epl.e.tfd;
-	free_event_poll_entry(e);
-	return 0;
-}
-
 static int check_fdinfo_eventpoll(void)
 {
-	int efd, pfd[2], proc_fd = 0, ret = -1;
+	int efd, pfd[2], ret = -1;
 	struct epoll_event ev;
+	EventpollFileEntry efe = EVENTPOLL_FILE_ENTRY__INIT;
 
 	if (pipe(pfd)) {
 		pr_perror("Can't make pipe to watch");
@@ -376,20 +369,19 @@ static int check_fdinfo_eventpoll(void)
 		goto epoll_err;
 	}
 
-	ret = parse_fdinfo(efd, FD_TYPES__EVENTPOLL, check_one_epoll, &proc_fd);
+	ret = parse_fdinfo(efd, FD_TYPES__EVENTPOLL, &efe);
 	if (ret) {
 		pr_err("Error parsing proc fdinfo\n");
 		goto epoll_err;
 	}
 
-	if (pfd[0] != proc_fd) {
-		pr_err("TFD mismatch (or not met) %d want %d\n",
-				proc_fd, pfd[0]);
+	if (efe.n_tfd != 1 || efe.tfd[0]->tfd != pfd[0]) {
+		pr_err("TFD mismatch (or not met)\n");
 		ret = -1;
 		goto epoll_err;
 	}
 
-	pr_info("Epoll fdinfo works OK (%d vs %d)\n", pfd[0], proc_fd);
+	pr_info("Epoll fdinfo works OK\n");
 
 epoll_err:
 	close(efd);
@@ -400,16 +392,10 @@ pipe_err:
 	return ret;
 }
 
-static int check_one_inotify(union fdinfo_entries *e, void *arg)
-{
-	*(int *)arg = e->ify.e.wd;
-	free_inotify_wd_entry(e);
-	return 0;
-}
-
 static int check_fdinfo_inotify(void)
 {
-	int ifd, wd, proc_wd = -1, ret;
+	int ifd, wd, ret;
+	InotifyFileEntry ify = INOTIFY_FILE_ENTRY__INIT;
 
 	ifd = inotify_init1(0);
 	if (ifd < 0) {
@@ -424,7 +410,7 @@ static int check_fdinfo_inotify(void)
 		return -1;
 	}
 
-	ret = parse_fdinfo(ifd, FD_TYPES__INOTIFY, check_one_inotify, &proc_wd);
+	ret = parse_fdinfo(ifd, FD_TYPES__INOTIFY, &ify);
 	close(ifd);
 
 	if (ret < 0) {
@@ -432,12 +418,12 @@ static int check_fdinfo_inotify(void)
 		return -1;
 	}
 
-	if (wd != proc_wd) {
-		pr_err("WD mismatch (or not met) %d want %d\n", proc_wd, wd);
+	if (ify.n_wd != 1 || ify.wd[0]->wd != wd) {
+		pr_err("WD mismatch (or not met)\n");
 		return -1;
 	}
 
-	pr_info("Inotify fdinfo works OK (%d vs %d)\n", wd, proc_wd);
+	pr_info("Inotify fdinfo works OK\n");
 	return 0;
 }
 
@@ -689,9 +675,6 @@ static int check_ptrace_dump_seccomp_filters(void)
 
 static int check_mem_dirty_track(void)
 {
-	if (kerndat_get_dirty_track() < 0)
-		return -1;
-
 	if (!kdat.has_dirty_track) {
 		pr_warn("Dirty tracking is OFF. Memory snapshot will not work.\n");
 		return -1;
@@ -716,11 +699,9 @@ static unsigned long get_ring_len(unsigned long addr)
 	FILE *maps;
 	char buf[256];
 
-	maps = fopen("/proc/self/maps", "r");
-	if (!maps) {
-		pr_perror("No maps proc file");
+	maps = fopen_proc(PROC_SELF, "maps");
+	if (!maps)
 		return 0;
-	}
 
 	while (fgets(buf, sizeof(buf), maps)) {
 		unsigned long start, end;
@@ -764,7 +745,7 @@ static int check_aio_remap(void)
 	if (!len)
 		return -1;
 
-	naddr = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, 0, 0);
+	naddr = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, 0, 0);
 	if (naddr == MAP_FAILED) {
 		pr_perror("Can't find place for new AIO ring");
 		return -1;
@@ -787,9 +768,6 @@ static int check_aio_remap(void)
 
 static int check_fdinfo_lock(void)
 {
-	if (kerndat_fdinfo_has_lock())
-		return -1;
-
 	if (!kdat.has_fdinfo_lock) {
 		pr_err("fdinfo doesn't contain the lock field\n");
 		return -1;
@@ -825,6 +803,82 @@ static int check_clone_parent_vs_pid()
 	return 0;
 }
 
+static int check_autofs_pipe_ino(void)
+{
+	FILE *f;
+	char str[1024];
+	int ret = -ENOENT;
+
+	f = fopen_proc(PROC_SELF, "mountinfo");
+	if (!f)
+		return -1;
+
+	while (fgets(str, sizeof(str), f)) {
+		if (strstr(str, " autofs ")) {
+			if (strstr(str, "pipe_ino="))
+				ret = 0;
+			else {
+				pr_err("autofs not supported.\n");
+				ret = -ENOTSUP;
+			}
+			break;
+		}
+	}
+
+	fclose(f);
+	return ret;
+}
+
+static int check_autofs(void)
+{
+	char *dir, *options, template[] = "/tmp/.criu.mnt.XXXXXX";
+	int ret, pfd[2];
+
+	ret = check_autofs_pipe_ino();
+	if (ret != -ENOENT)
+		return ret;
+
+	if (pipe(pfd) < 0) {
+		pr_perror("failed to create pipe");
+		return -1;
+	}
+
+	ret = -1;
+
+	options = xsprintf("fd=%d,pgrp=%d,minproto=5,maxproto=5,direct",
+				pfd[1], getpgrp());
+	if (!options) {
+		pr_err("failed to allocate autofs options\n");
+		goto close_pipe;
+	}
+
+	dir = mkdtemp(template);
+	if (!dir) {
+		pr_perror("failed to construct temporary name");
+		goto free_options;
+	}
+
+	if (mount("criu", dir, "autofs", 0, options) < 0) {
+		pr_perror("failed to mount autofs");
+		goto unlink_dir;
+	}
+
+	ret = check_autofs_pipe_ino();
+
+	if (umount(dir))
+		pr_perror("failed to umount %s", dir);
+
+unlink_dir:
+	if (rmdir(dir))
+		pr_perror("failed to unlink %s", dir);
+free_options:
+	free(options);
+close_pipe:
+	close(pfd[0]);
+	close(pfd[1]);
+	return ret;
+}
+
 static int check_cgroupns(void)
 {
 	int ret;
@@ -836,6 +890,206 @@ static int check_cgroupns(void)
 	}
 
 	return 0;
+}
+
+static int check_tcp(void)
+{
+	socklen_t optlen;
+	int sk, ret;
+	int val;
+
+	sk = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
+	if (sk < 0) {
+		pr_perror("Can't create TCP socket :(");
+		return -1;
+	}
+
+	val = 1;
+	ret = setsockopt(sk, SOL_TCP, TCP_REPAIR, &val, sizeof(val));
+	if (ret < 0) {
+		pr_perror("Can't turn TCP repair mode ON");
+		goto out;
+	}
+
+	optlen = sizeof(val);
+	ret = getsockopt(sk, SOL_TCP, TCP_TIMESTAMP, &val, &optlen);
+	if (ret)
+		pr_perror("Can't get TCP_TIMESTAMP");
+
+out:
+	close(sk);
+
+	return ret;
+}
+
+static int check_tcp_halt_closed(void)
+{
+	if (!kdat.has_tcp_half_closed) {
+		pr_err("TCP_REPAIR can't be enabled for half-closed sockets\n");
+		return -1;
+	}
+
+	return 0;
+}
+
+static int kerndat_tcp_repair_window(void)
+{
+	struct tcp_repair_window opt;
+	socklen_t optlen = sizeof(opt);
+	int sk, val = 1;
+
+	sk = socket(AF_INET, SOCK_STREAM, 0);
+	if (sk < 0) {
+		pr_perror("Unable to create inet socket");
+		goto errn;
+	}
+
+	if (setsockopt(sk, SOL_TCP, TCP_REPAIR, &val, sizeof(val))) {
+		if (errno == EPERM) {
+			pr_warn("TCP_REPAIR isn't available to unprivileged users\n");
+			goto now;
+		}
+		pr_perror("Unable to set TCP_REPAIR");
+		goto err;
+	}
+
+	if (getsockopt(sk, SOL_TCP, TCP_REPAIR_WINDOW, &opt, &optlen)) {
+		if (errno != ENOPROTOOPT) {
+			pr_perror("Unable to set TCP_REPAIR_WINDOW");
+			goto err;
+		}
+now:
+		val = 0;
+	} else
+		val = 1;
+
+	close(sk);
+	return val;
+
+err:
+	close(sk);
+errn:
+	return -1;
+}
+
+static int check_tcp_window(void)
+{
+	int ret;
+
+	ret = kerndat_tcp_repair_window();
+	if (ret < 0)
+		return -1;
+
+	if (ret == 0) {
+		pr_err("The TCP_REPAIR_WINDOW option isn't supported.\n");
+		return -1;
+	}
+
+	return 0;
+}
+
+static int check_userns(void)
+{
+	int ret;
+	unsigned long size = 0;
+
+	ret = access("/proc/self/ns/user", F_OK);
+	if (ret) {
+		pr_perror("No userns proc file");
+		return -1;
+	}
+
+	ret = prctl(PR_SET_MM, PR_SET_MM_MAP_SIZE, (unsigned long)&size, 0, 0);
+	if (ret < 0) {
+		pr_perror("prctl: PR_SET_MM_MAP_SIZE is not supported");
+		return -1;
+	}
+
+	return 0;
+}
+
+static int check_loginuid(void)
+{
+	if (kdat.luid != LUID_FULL) {
+		pr_warn("Loginuid restore is OFF.\n");
+		return -1;
+	}
+
+	return 0;
+}
+
+static int check_compat_cr(void)
+{
+#ifdef CONFIG_COMPAT
+	if (kdat_compatible_cr())
+		return 0;
+	pr_warn("compat_cr is not supported. Requires kernel >= v4.12\n");
+#else
+	pr_warn("CRIU built without CONFIG_COMPAT - can't C/R compatible tasks\n");
+#endif
+	return -1;
+}
+
+static int check_uffd(void)
+{
+	if (!kdat.has_uffd) {
+		pr_err("UFFD is not supported\n");
+		return -1;
+	}
+
+	return 0;
+}
+
+static int check_uffd_noncoop(void)
+{
+	if (check_uffd())
+		return -1;
+
+	if (!uffd_noncooperative()) {
+		pr_err("Non-cooperative UFFD is not supported\n");
+		return -1;
+	}
+
+	return 0;
+}
+
+static int check_can_map_vdso(void)
+{
+	if (kdat_can_map_vdso() == 1)
+		return 0;
+	pr_warn("Do not have API to map vDSO - will use mremap() to restore vDSO\n");
+	return -1;
+}
+
+static int check_sk_netns(void)
+{
+	if (!kdat.sk_ns)
+		return -1;
+
+	return 0;
+}
+
+static int check_sk_unix_file(void)
+{
+	if (!kdat.sk_unix_file)
+		return -1;
+
+	return 0;
+}
+
+static int check_kcmp_epoll(void)
+{
+	if (!kdat.has_kcmp_epoll_tfd)
+		return -1;
+
+	return 0;
+}
+
+static int check_net_diag_raw(void)
+{
+	check_sock_diag();
+	return (socket_test_collect_bit(AF_INET, IPPROTO_RAW) &&
+		socket_test_collect_bit(AF_INET6, IPPROTO_RAW)) ? 0 : -1;
 }
 
 static int (*chk_feature)(void);
@@ -865,7 +1119,7 @@ static int (*chk_feature)(void);
 			} while (0)
 int cr_check(void)
 {
-	struct ns_id ns = { .type = NS_CRIU, .ns_pid = PROC_SELF, .nd = &mnt_ns_desc };
+	struct ns_id *ns;
 	int ret = 0;
 
 	if (!is_root_user())
@@ -875,14 +1129,16 @@ int cr_check(void)
 	if (root_item == NULL)
 		return -1;
 
-	root_item->pid.real = getpid();
+	root_item->pid->real = getpid();
 
 	if (collect_pstree_ids())
 		return -1;
 
-	ns.id = root_item->ids->mnt_ns_id;
+	ns = lookup_ns_by_id(root_item->ids->mnt_ns_id, &mnt_ns_desc);
+	if (ns == NULL)
+		return -1;
 
-	mntinfo = collect_mntinfo(&ns, false);
+	mntinfo = collect_mntinfo(ns, false);
 	if (mntinfo == NULL)
 		return -1;
 
@@ -935,14 +1191,24 @@ int cr_check(void)
 		ret |= check_fdinfo_lock();
 		ret |= check_clone_parent_vs_pid();
 		ret |= check_cgroupns();
+		ret |= check_tcp_window();
+		ret |= check_tcp_halt_closed();
+		ret |= check_userns();
+		ret |= check_loginuid();
+		ret |= check_can_map_vdso();
+		ret |= check_uffd();
+		ret |= check_uffd_noncoop();
+		ret |= check_sk_netns();
+		ret |= check_kcmp_epoll();
+		ret |= check_net_diag_raw();
 	}
 
 	/*
 	 * Category 3 - experimental.
 	 */
 	if (opts.check_experimental_features) {
-		/* Empty for now */
-		;
+		ret |= check_autofs();
+		ret |= check_compat_cr();
 	}
 
 	print_on_level(DEFAULT_LOGLEVEL, "%s\n", ret ? CHECK_MAYBE : CHECK_GOOD);
@@ -964,36 +1230,46 @@ static int check_tun(void)
 	return check_tun_cr(-1);
 }
 
-static int check_userns(void)
+static int check_tun_netns(void)
 {
-	int ret;
-	unsigned long size = 0;
+	bool has = false;
+	check_tun_netns_cr(&has);
+	return has ? 0 : -1;
+}
 
-	ret = access("/proc/self/ns/user", F_OK);
-	if (ret) {
-		pr_perror("No userns proc file");
-		return -1;
-	}
-
-	ret = prctl(PR_SET_MM, PR_SET_MM_MAP_SIZE, (unsigned long)&size, 0, 0);
-	if (ret < 0) {
-		pr_perror("prctl: PR_SET_MM_MAP_SIZE is not supported");
+static int check_nsid(void)
+{
+	if (!kdat.has_nsid) {
+		pr_warn("NSID isn't supported\n");
 		return -1;
 	}
 
 	return 0;
 }
 
-static int check_loginuid(void)
+static int check_link_nsid(void)
 {
-	if (kerndat_loginuid(false) < 0)
-		return -1;
-
-	if (!kdat.has_loginuid) {
-		pr_warn("Loginuid restore is OFF.\n");
+	if (!kdat.has_link_nsid) {
+		pr_warn("NSID isn't supported\n");
 		return -1;
 	}
 
+	return 0;
+}
+
+static int check_external_net_ns(void)
+{
+	/*
+	 * This is obviously not a real check. This only exists, so that
+	 * CRIU clients/users can check if this CRIU version supports the
+	 * external network namespace feature. Theoretically the CRIU client
+	 * or user could also parse the version, but especially for CLI users
+	 * version comparison in the shell is not easy.
+	 * This feature check does not exist for RPC as RPC has a special
+	 * version call which does not require string parsing and the external
+	 * network namespace feature is available for all CRIU versions newer
+	 * than 3.9.
+	 */
 	return 0;
 }
 
@@ -1008,25 +1284,56 @@ static struct feature_list feature_list[] = {
 	{ "aio_remap", check_aio_remap },
 	{ "timerfd", check_timerfd },
 	{ "tun", check_tun },
+	{ "tun_ns", check_tun_netns },
 	{ "userns", check_userns },
 	{ "fdinfo_lock", check_fdinfo_lock },
 	{ "seccomp_suspend", check_ptrace_suspend_seccomp },
 	{ "seccomp_filters", check_ptrace_dump_seccomp_filters },
 	{ "loginuid", check_loginuid },
 	{ "cgroupns", check_cgroupns },
+	{ "autofs", check_autofs },
+	{ "tcp_half_closed", check_tcp_halt_closed },
+	{ "compat_cr", check_compat_cr },
+	{ "uffd", check_uffd },
+	{ "uffd-noncoop", check_uffd_noncoop },
+	{ "can_map_vdso", check_can_map_vdso},
+	{ "sk_ns", check_sk_netns },
+	{ "sk_unix_file", check_sk_unix_file },
+	{ "net_diag_raw", check_net_diag_raw },
+	{ "nsid", check_nsid },
+	{ "link_nsid", check_link_nsid},
+	{ "kcmp_epoll", check_kcmp_epoll},
+	{ "external_net_ns", check_external_net_ns},
 	{ NULL, NULL },
 };
+
+void pr_check_features(const char *offset, const char *sep, int width)
+{
+	struct feature_list *fl;
+	int pos = width + 1;
+	int sep_len = strlen(sep);
+	int offset_len = strlen(offset);
+
+	for (fl = feature_list; fl->name; fl++) {
+		int len = strlen(fl->name);
+
+		if (pos + len + sep_len > width) {
+			pr_msg("\n%s", offset);
+			pos = offset_len;
+		}
+		pr_msg("%s", fl->name);
+		pos += len;
+		if ((fl + 1)->name) { // not the last item
+			pr_msg("%s", sep);
+			pos += sep_len;
+		}
+	}
+	pr_msg("\n");
+}
 
 int check_add_feature(char *feat)
 {
 	struct feature_list *fl;
-
-	if (!strcmp(feat, "list")) {
-		for (fl = feature_list; fl->name; fl++)
-			pr_msg("%s ", fl->name);
-		pr_msg("\n");
-		return 1;
-	}
 
 	for (fl = feature_list; fl->name; fl++) {
 		if (!strcmp(feat, fl->name)) {

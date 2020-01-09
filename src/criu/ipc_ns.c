@@ -38,7 +38,7 @@
 
 static void pr_ipc_desc_entry(unsigned int loglevel, const IpcDescEntry *desc)
 {
-	print_on_level(loglevel, "id: %-10d key: 0x%08x uid: %-10d gid: %-10d "
+	print_on_level(loglevel, "id: %-10d key: %#08x uid: %-10d gid: %-10d "
 		       "cuid: %-10d cgid: %-10d mode: %-10o ",
 		       desc->id, desc->key, desc->uid, desc->gid,
 		       desc->cuid, desc->cgid, desc->mode);
@@ -291,6 +291,8 @@ static void pr_info_ipc_shm(const IpcShmEntry *shm)
 	print_on_level(LOG_INFO, "size: %-10"PRIu64"\n", shm->size);
 }
 
+#define NR_MANDATORY_IPC_SYSCTLS 9
+
 static int ipc_sysctl_req(IpcVarEntry *e, int op)
 {
 	struct sysctl_req req[] = {
@@ -303,52 +305,57 @@ static int ipc_sysctl_req(IpcVarEntry *e, int op)
 		{ "kernel/shmall",		&e->shm_ctlall,		CTL_U64 },
 		{ "kernel/shmmni",		&e->shm_ctlmni,		CTL_U32 },
 		{ "kernel/shm_rmid_forced",	&e->shm_rmid_forced,	CTL_U32 },
-	};
-
-	struct sysctl_req req_mq[] = {
+		/* We have 9 mandatory sysctls above and 8 optional below */
 		{ "fs/mqueue/queues_max",	&e->mq_queues_max,	CTL_U32 },
 		{ "fs/mqueue/msg_max",		&e->mq_msg_max,		CTL_U32 },
 		{ "fs/mqueue/msgsize_max",	&e->mq_msgsize_max,	CTL_U32 },
+		{ "fs/mqueue/msg_default",	&e->mq_msg_default,	CTL_U32 },
+		{ "fs/mqueue/msgsize_default",	&e->mq_msgsize_default,	CTL_U32 },
+		{ "kernel/msg_next_id", 	&e->msg_next_id, 	CTL_U32 },
+		{ "kernel/sem_next_id", 	&e->sem_next_id, 	CTL_U32 },
+		{ "kernel/shm_next_id", 	&e->shm_next_id, 	CTL_U32 },
 	};
 
-	int ret;
+	int nr = NR_MANDATORY_IPC_SYSCTLS;
 
-	ret = sysctl_op(req, ARRAY_SIZE(req), op, CLONE_NEWIPC);
-	if (ret)
-		return ret;
-
-	if (access("/proc/sys/fs/mqueue", X_OK)) {
+	/* Skip sysctls which can't be set or haven't existed on dump */
+	if (access("/proc/sys/fs/mqueue", X_OK))
 		pr_info("Mqueue sysctls are missing\n");
-		return 0;
+	else {
+		nr += 3;
+		if (e->has_mq_msg_default) {
+			req[nr++] = req[12];
+			req[nr++] = req[13];
+		}
 	}
+	if (e->has_msg_next_id)
+		req[nr++] = req[14];
+	if (e->has_sem_next_id)
+		req[nr++] = req[15];
+	if (e->has_shm_next_id)
+		req[nr++] = req[16];
 
-	return sysctl_op(req_mq, ARRAY_SIZE(req_mq), op, CLONE_NEWIPC);
+	return sysctl_op(req, nr, op, CLONE_NEWIPC);
 }
 
-/*
- * TODO: Function below should be later improved to locate and dump only dirty
- * pages via updated sys_mincore().
- */
-static int dump_ipc_shm_pages(struct cr_img *img, const IpcShmEntry *shm)
+static int dump_ipc_shm_pages(const IpcShmEntry *shm)
 {
-	void *data;
 	int ret;
+	void *data;
 
 	data = shmat(shm->desc->id, NULL, SHM_RDONLY);
 	if (data == (void *)-1) {
 		pr_perror("Failed to attach IPC shared memory");
 		return -errno;
 	}
-	ret = write_img_buf(img, data, round_up(shm->size, sizeof(u32)));
-	if (ret < 0) {
-		pr_err("Failed to write IPC shared memory data\n");
-		return ret;
-	}
+
+	ret = dump_one_sysv_shmem(data, shm->size, shm->desc->id);
+
 	if (shmdt(data)) {
 		pr_perror("Failed to detach IPC shared memory");
 		return -errno;
 	}
-	return 0;
+	return ret;
 }
 
 static int dump_ipc_shm_seg(struct cr_img *img, int id, const struct shmid_ds *ds)
@@ -359,6 +366,8 @@ static int dump_ipc_shm_seg(struct cr_img *img, int id, const struct shmid_ds *d
 
 	shm.desc = &desc;
 	shm.size = ds->shm_segsz;
+	shm.has_in_pagemaps = true;
+	shm.in_pagemaps = true;
 	fill_ipc_desc(id, shm.desc, &ds->shm_perm);
 	pr_info_ipc_shm(&shm);
 
@@ -367,7 +376,7 @@ static int dump_ipc_shm_seg(struct cr_img *img, int id, const struct shmid_ds *d
 		pr_err("Failed to write IPC shared memory segment\n");
 		return ret;
 	}
-	return dump_ipc_shm_pages(img, &shm);
+	return dump_ipc_shm_pages(&shm);
 }
 
 static int dump_ipc_shm(struct cr_img *img)
@@ -416,12 +425,28 @@ static int dump_ipc_var(struct cr_img *img)
 	var.sem_ctls	= xmalloc(pb_repeated_size(&var, sem_ctls));
 	if (!var.sem_ctls)
 		goto err;
+	var.has_mq_msg_default = true;
+	var.has_mq_msgsize_default = true;
+	var.has_msg_next_id = true;
+	var.has_sem_next_id = true;
+	var.has_shm_next_id = true;
 
 	ret = ipc_sysctl_req(&var, CTL_READ);
 	if (ret < 0) {
 		pr_err("Failed to read IPC variables\n");
 		goto err;
 	}
+
+	/*
+	 * One can not write to msg_next_xxx sysctls -1,
+	 * which is their initial value
+	 */
+	if (var.msg_next_id == -1)
+		var.has_msg_next_id = false;
+	if (var.sem_next_id == -1)
+		var.has_sem_next_id = false;
+	if (var.shm_next_id == -1)
+		var.has_shm_next_id = false;
 
 	ret = pb_write_one(img, &var, PB_IPC_VAR);
 	if (ret < 0) {
@@ -730,6 +755,29 @@ err:
 	return ret;
 }
 
+static int restore_content(void *data, struct cr_img *img, const IpcShmEntry *shm)
+{
+	int ifd;
+	ssize_t size, off;
+
+	ifd = img_raw_fd(img);
+	size = round_up(shm->size, sizeof(u32));
+	off = 0;
+	do {
+		ssize_t ret;
+
+		ret = read(ifd, data + off, size - off);
+		if (ret <= 0) {
+			pr_perror("Failed to write IPC shared memory data");
+			return (int)ret;
+		}
+
+		off += ret;
+	} while (off < size);
+
+	return 0;
+}
+
 static int prepare_ipc_shm_pages(struct cr_img *img, const IpcShmEntry *shm)
 {
 	int ret;
@@ -740,16 +788,17 @@ static int prepare_ipc_shm_pages(struct cr_img *img, const IpcShmEntry *shm)
 		pr_perror("Failed to attach IPC shared memory");
 		return -errno;
 	}
-	ret = read_img_buf(img, data, round_up(shm->size, sizeof(u32)));
-	if (ret < 0) {
-		pr_err("Failed to read IPC shared memory data\n");
-		return ret;
-	}
+
+	if (shm->has_in_pagemaps && shm->in_pagemaps)
+		ret = restore_sysv_shmem_content(data, shm->size, shm->desc->id);
+	else
+		ret = restore_content(data, img, shm);
+
 	if (shmdt(data)) {
 		pr_perror("Failed to detach IPC shared memory");
 		return -errno;
 	}
-	return 0;
+	return ret;
 }
 
 static int prepare_ipc_shm_seg(struct cr_img *img, const IpcShmEntry *shm)

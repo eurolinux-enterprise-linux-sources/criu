@@ -2,26 +2,28 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <string.h>
-#include <wait.h>
+#include <sys/wait.h>
 #include <stdlib.h>
 
-#include "asm/types.h"
+#include "../soccr/soccr.h"
+
 #include "util.h"
-#include "list.h"
+#include "common/list.h"
 #include "files.h"
 #include "netfilter.h"
 #include "sockets.h"
 #include "sk-inet.h"
+#include "kerndat.h"
 
 static char buf[512];
 
 /*
  * Need to configure simple netfilter rules for blocking connections
- * ANy brave soul to write it using xtables-devel?
+ * Any brave soul to write it using xtables-devel?
  */
 
-static const char *nf_conn_cmd = "%s -t filter %s %s --protocol tcp "
-	"--source %s --sport %d --destination %s --dport %d -j DROP";
+#define NF_CONN_CMD	"%s %s -t filter %s %s --protocol tcp " \
+	"-m mark ! --mark " __stringify(SOCCR_MARK) " --source %s --sport %d --destination %s --dport %d -j DROP"
 
 static char iptable_cmd_ipv4[] = "iptables";
 static char iptable_cmd_ipv6[] = "ip6tables";
@@ -45,6 +47,12 @@ void preload_netfilter_modules(void)
 	close_safe(&fd);
 }
 
+/* IPv4-Mapped IPv6 Addresses */
+static int ipv6_addr_mapped(u32 *addr)
+{
+	return (addr[2] == htonl(0x0000ffff));
+}
+
 static int nf_connection_switch_raw(int family, u32 *src_addr, u16 src_port,
 						u32 *dst_addr, u16 dst_port,
 						bool input, bool lock)
@@ -53,6 +61,12 @@ static int nf_connection_switch_raw(int family, u32 *src_addr, u16 src_port,
 	char *cmd;
 	char *argv[4] = { "sh", "-c", buf, NULL };
 	int ret;
+
+	if (family == AF_INET6 && ipv6_addr_mapped(dst_addr)) {
+		family = AF_INET;
+		src_addr = &src_addr[3];
+		dst_addr = &dst_addr[3];
+	}
 
 	switch (family) {
 	case AF_INET:
@@ -72,8 +86,9 @@ static int nf_connection_switch_raw(int family, u32 *src_addr, u16 src_port,
 		return -1;
 	}
 
-	snprintf(buf, sizeof(buf), nf_conn_cmd, cmd,
-			lock ? "-A" : "-D",
+	snprintf(buf, sizeof(buf), NF_CONN_CMD, cmd,
+			kdat.has_xtlocks ? "-w" : "",
+			lock ? "-I" : "-D",
 			input ? "INPUT" : "OUTPUT",
 			dip, (int)dst_port, sip, (int)src_port);
 
@@ -85,7 +100,7 @@ static int nf_connection_switch_raw(int family, u32 *src_addr, u16 src_port,
 	 */
 	ret = cr_system(-1, -1, -1, "sh", argv, 0);
 	if (ret < 0 || !WIFEXITED(ret) || WEXITSTATUS(ret)) {
-		pr_perror("Iptables configuration failed");
+		pr_err("Iptables configuration failed\n");
 		return -1;
 	}
 

@@ -1,8 +1,7 @@
 #ifndef __CR_FILE_IDS_H__
 #define __CR_FILE_IDS_H__
 
-#include "compiler.h"
-#include "asm/types.h"
+#include "common/compiler.h"
 #include "rbtree.h"
 
 #include "images/fdinfo.pb-c.h"
@@ -16,5 +15,7 @@ struct stat;
 struct fd_parms;
 extern int fd_id_generate(pid_t pid, FdinfoEntry *fe, struct fd_parms *p);
 extern int fd_id_generate_special(struct fd_parms *p, u32 *id);
+
+extern struct kid_tree fd_tree;
 
 #endif /* __CR_FILE_IDS_H__ */

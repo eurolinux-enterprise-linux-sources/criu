@@ -1,4 +1,3 @@
-#define _GNU_SOURCE
 #include <sys/mman.h>
 #include <sched.h>
 #include <unistd.h>
@@ -178,7 +177,7 @@ static void handle_command()
 		}
 		break;
 	case TEST_SETSID:
-		if (getsid(getpid()) == getpid())
+		if (getsid(0) == getpid())
 			break;
 		test_msg("%3d: setsid()\n", current);
 		if(setsid() == -1) {
@@ -244,7 +243,7 @@ static int send_command(int id, enum commands op, int arg)
 	}
 
 	if (status) {
-		pr_perror("The command(%d, %d, %d) failed");
+		pr_perror("The command(%d, %d) failed", op, arg);
 		goto err;
 	}
 

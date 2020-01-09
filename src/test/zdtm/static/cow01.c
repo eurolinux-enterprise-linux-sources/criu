@@ -4,6 +4,7 @@
 #include <string.h>
 #include <signal.h>
 #include <unistd.h>
+#include <inttypes.h>
 #include <sys/wait.h>
 #include <linux/limits.h>
 #include <sys/user.h>
@@ -285,7 +286,7 @@ static int parent_check(struct test_cases *test_cases, int fd)
 			if (is_cow_ret == 1) {
 				errno = 0;
 				fail("%s[%#x]: %p is not COW-ed (pagemap of "
-				     "child=[%#08lx], parent=[%#08lx])",
+				     "child=[%"PRIx64"], parent=[%"PRIx64"])",
 				     test_cases->tname, i, addr + i * PAGE_SIZE,
 				     map_child, map_parent);
 			}
@@ -451,13 +452,13 @@ int main(int argc, char ** argv)
 	task_waiter_t child_waiter;
 	int pfd[2], fd;
 
+	test_init(argc, argv);
+
 	task_waiter_init(&child_waiter);
 
 	memset(zero_page, 0, sizeof(zero_page));
 
 	datasum(zero_page, sizeof(zero_page), &zero_crc);
-
-	test_init(argc, argv);
 
 	if (socketpair(AF_UNIX, SOCK_SEQPACKET, 0, pfd)) {
 		pr_perror("pipe");

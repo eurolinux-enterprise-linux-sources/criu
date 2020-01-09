@@ -1,6 +1,4 @@
 
-#define _GNU_SOURCE
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <ctype.h>
@@ -27,13 +25,34 @@ int main(int argc, char *argv[])
 	unsigned int addrlen;
 	task_waiter_t lock;
 
-	char path[PATH_MAX] = "/tmp/zdtm.unix.sock.XXXXXX";
+	char dir[] = "/tmp/zdtm.unix.sock.XXXXXX";
+	char *path;
 	pid_t pid;
 	int ret, sk;
+	char *val;
 
-	mktemp(path);
+	unsetenv("ZDTM_GROUPS");
+	val = getenv("ZDTM_GID");
+	if (val && (setgid(atoi(val)) == -1)) {
+		fprintf(stderr, "Can't set gid: %m");
+		exit(1);
+	}
+
+	val = getenv("ZDTM_UID");
+	if (val && (setuid(atoi(val)) == -1)) {
+		fprintf(stderr, "Can't set uid: %m");
+		exit(1);
+	}
+
+	if (mkdtemp(dir) < 0) {
+		pr_perror("mkdtemp(%s) failed", dir);
+		return 1;
+	}
+	chmod(dir, 0777);
 	addr.sun_family = AF_UNIX;
-	strncpy(addr.sun_path, path, sizeof(addr.sun_path));
+	snprintf(addr.sun_path, sizeof(addr.sun_path),
+			"%s/%s", dir, "sock");
+	path = addr.sun_path;
 	addrlen = sizeof(addr.sun_family) + strlen(path);
 
 	task_waiter_init(&lock);
@@ -51,11 +70,12 @@ int main(int argc, char *argv[])
 			pr_perror("Can't create socket");
 			return 1;
 		}
-		ret = bind(sk, &addr, addrlen);
+		ret = bind(sk, (struct sockaddr *) &addr, addrlen);
 		if (ret < 0) {
 			pr_perror("Can't bind socket to %s", path);
 			return 1;
 		}
+		chmod(dir, 0777);
 		chmod(path, 0777);
 		test_msg("The external socket %s\n", path);
 		task_waiter_complete(&lock, 1);
@@ -66,10 +86,10 @@ int main(int argc, char *argv[])
 		return 0;
 	}
 
-	test_init(argc, argv);
-
 	task_waiter_wait4(&lock, 1);
 	task_waiter_fini(&lock);
+
+	test_init(argc, argv);
 
 	sk = socket(AF_UNIX, SOCK_DGRAM, 0);
 	if (sk < 0) {
@@ -77,7 +97,7 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
-	ret = connect(sk, &addr, addrlen);
+	ret = connect(sk, (struct sockaddr *) &addr, addrlen);
 	if (ret < 0) {
 		pr_perror("Can't connect socket");
 		return 1;
@@ -87,7 +107,14 @@ int main(int argc, char *argv[])
 	test_daemon();
 	test_waitsig();
 
-	unlink(path);
+	if (unlink(path)) {
+		pr_perror("Unable to remove %s\n", path);
+		return 1;
+	}
+	if (rmdir(dir)) {
+		pr_perror("Unable to remove %s", dir);
+		return 1;
+	}
 
 	ret = send(sk, "H", 1, 0);
 	if (ret != 1) {

@@ -1,16 +1,19 @@
-all: images rpc.py
+all-y	+= libpy-images rpc_pb2.py
 
-.PHONY: all images clean
+$(obj)/images/Makefile: ;
+$(obj)/images/%: .FORCE
+	$(Q) $(MAKE) $(build)=$(obj)/images $@
 
-images:
-	$(Q) $(MAKE) -C images all
+libpy-images:
+	$(Q) $(MAKE) $(build)=$(obj)/images all
+.PHONY: libpy-images
 
-# rpc_pb2.py doesn't depend on any other file, so
-# it is safe to rename it, dropping ugly _pb2 suffix.
-rpc.py:
-	$(Q) protoc -I=$(SRC_DIR)/images/ --python_out=./ $(SRC_DIR)/images/$(@:.py=.proto)
-	$(Q) mv $(@:.py=_pb2.py) $@
+rpc_pb2.py:
+	$(Q) protoc -I=images/ --python_out=$(obj) images/$(@:_pb2.py=.proto)
 
-clean:
-	$(Q) $(MAKE) -C images clean
-	$(Q) $(RM) rpc.py *.pyc
+cleanup-y	+= $(addprefix $(obj)/,rpc_pb2.py *.pyc)
+
+clean-lib-py:
+	$(Q) $(MAKE) $(build)=$(obj)/images clean
+.PHONY: clean-lib-py
+clean: clean-lib-py

@@ -1,4 +1,3 @@
-#define _GNU_SOURCE
 #include <stdio.h>
 #include <errno.h>
 #include <unistd.h>
@@ -21,10 +20,28 @@
 #include "ns.h"
 
 futex_t sig_received;
+static struct {
+	futex_t stage;
+} *test_shared_state;
+
+enum {
+	TEST_INIT_STAGE = 0,
+	TEST_RUNNING_STAGE,
+	TEST_FINI_STAGE,
+	TEST_FAIL_STAGE,
+};
+
+static int parent;
+
+extern int criu_status_in, criu_status_in_peer, criu_status_out;
 
 static void sig_hand(int signo)
 {
+	if (parent)
+		futex_set_and_wake(&test_shared_state->stage, TEST_FAIL_STAGE);
 	futex_set_and_wake(&sig_received, signo);
+	if (criu_status_in >= 0)
+		close(criu_status_in);
 }
 
 static char *outfile;
@@ -39,7 +56,8 @@ int test_fork_id(int id)
 	return fork();
 }
 
-#define INPROGRESS ".inprogress"
+static int cwd = -1;
+
 static void test_fini(void)
 {
 	char path[PATH_MAX];
@@ -48,9 +66,9 @@ static void test_fini(void)
 		return;
 
 	snprintf(path, sizeof(path), "%s%s", outfile, INPROGRESS);
-	rename(path, outfile);
+	renameat(cwd, path, cwd, outfile);
 
-	unlink(pidfile);
+	unlinkat(cwd, pidfile, 0);
 }
 
 static void setup_outfile()
@@ -58,6 +76,12 @@ static void setup_outfile()
 	if (!access(outfile, F_OK) || errno != ENOENT) {
 		fprintf(stderr, "Output file %s appears to exist, aborting\n",
 			outfile);
+		exit(1);
+	}
+
+	cwd = open(".", O_RDONLY);
+	if (cwd < 0) {
+		fprintf(stderr, "Unable to open\n");
 		exit(1);
 	}
 
@@ -91,23 +115,98 @@ void test_ext_init(int argc, char **argv)
 		exit(1);
 }
 
-int write_pidfile(int pid)
-{
-	int fd;
+#define PIPE_RD 0
+#define PIPE_WR 1
 
-	fd = open(pidfile, O_CREAT | O_EXCL | O_WRONLY, 0666);
-	if (fd == -1) {
-		fprintf(stderr, "Can't create the file %s: %m\n", pidfile);
+int init_notify(void)
+{
+	char *val;
+	int ret;
+	int p[2];
+
+	val = getenv("ZDTM_NOTIFY_FDIN");
+	if (!val)
+		return 0;
+	criu_status_in = atoi(val);
+
+	val = getenv("ZDTM_NOTIFY_FDOUT");
+	if (!val)
+		return -1;
+	criu_status_out = atoi(val);
+
+	if (pipe(p)) {
+		fprintf(stderr, "Unable to create a pipe: %m\n");
 		return -1;
 	}
-	if (dprintf(fd, "%d", pid) == -1) {
-		fprintf(stderr, "Can't write in the file %s: %m\n", pidfile);
+	criu_status_in_peer = p[PIPE_WR];
+
+	ret = dup2(p[PIPE_RD], criu_status_in);
+	if (ret < 0) {
+		fprintf(stderr, "dup2() failed: %m\n");
+		close(p[PIPE_RD]);
+		close(p[PIPE_WR]);
 		return -1;
+	}
+	close(p[PIPE_RD]);
+
+	if (pipe(p)) {
+		fprintf(stderr, "Unable to create a pipe: %m\n");
+		goto err_pipe_in;
+	}
+	close(p[PIPE_RD]);
+
+	ret = dup2(p[PIPE_WR], criu_status_out);
+	if (ret < 0) {
+		fprintf(stderr, "dup2() failed: %m\n");
+		goto err_pipe_out;
+	}
+
+	close(p[PIPE_WR]);
+	return 0;
+err_pipe_out:
+	close(p[PIPE_RD]);
+	close(p[PIPE_WR]);
+err_pipe_in:
+	close(criu_status_in);
+	close(criu_status_in_peer);
+	return -1;
+}
+
+int write_pidfile(int pid)
+{
+	int fd = -1;
+	char tmp[] = ".zdtm.pidfile.XXXXXX";
+
+	fd = mkstemp(tmp);
+	if (fd == -1) {
+		fprintf(stderr, "Can't create the file %s: %m\n", tmp);
+		return -1;
+	}
+
+	if (fchmod(fd, 0666) < 0) {
+		fprintf(stderr, "Can't fchmod %s: %m\n", tmp);
+		goto err_c;
+	}
+
+	if (dprintf(fd, "%d", pid) == -1) {
+		fprintf(stderr, "Can't write in the file %s: %m\n", tmp);
+		goto err_c;
 	}
 
 	close(fd);
 
+	if (rename(tmp, pidfile) < 0) {
+		fprintf(stderr, "Can't rename %s to %s: %m\n", tmp, pidfile);
+		goto err_u;
+	}
+
 	return 0;
+
+err_c:
+	close(fd);
+err_u:
+	unlink(tmp);
+	return -1;
 }
 
 void test_init(int argc, char **argv)
@@ -134,6 +233,9 @@ void test_init(int argc, char **argv)
 			redir_stdfds();
 			ns_init(argc, argv);
 		}
+	} else if (init_notify()) {
+		fprintf(stderr, "Can't init pre-dump notification: %m");
+		exit(1);
 	}
 
 	val = getenv("ZDTM_GROUPS");
@@ -184,19 +286,29 @@ void test_init(int argc, char **argv)
 	setup_outfile();
 	redir_stdfds();
 
+	test_shared_state = mmap(NULL, PAGE_SIZE, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_SHARED, 0, 0);
+	if (test_shared_state == MAP_FAILED) {
+		pr_perror("Unable to map a shared memory");
+		exit(1);
+	}
+
+	futex_init(&test_shared_state->stage);
+	futex_set(&test_shared_state->stage, TEST_INIT_STAGE);
+
 	pid = fork();
 	if (pid < 0) {
 		pr_perror("Daemonizing failed");
 		exit(1);
 	}
 
+	parent = 1;
 	if (pid) {	/* parent will exit when the child is ready */
-		test_waitsig();
+		futex_wait_while(&test_shared_state->stage, TEST_INIT_STAGE);
 
-		if (futex_get(&sig_received) == SIGCHLD) {
+		if (futex_get(&test_shared_state->stage) == TEST_FAIL_STAGE) {
 			int ret;
 			if (waitpid(pid, &ret, 0) != pid) {
-				pr_perror("Unable to wait %d, pid");
+				pr_perror("Unable to wait %d", pid);
 				exit(1);
 			}
 
@@ -215,6 +327,7 @@ void test_init(int argc, char **argv)
 
 		_exit(0);
 	}
+	parent = 0;
 
 	if (setsid() < 0) {
 		pr_perror("Can't become session group leader");
@@ -235,21 +348,7 @@ void test_init(int argc, char **argv)
 
 void test_daemon()
 {
-	pid_t ppid;
-
-	ppid = getppid();
-	if (ppid <= 1) {
-		pr_perror("Test orphaned");
-		goto out;
-	}
-
-	if (kill(ppid, SIGTERM))
-		goto out;
-	return;
-out:
-	/* kill out our process group for safety */
-	kill(0, SIGKILL);
-	exit(1);
+	futex_set_and_wake(&test_shared_state->stage, TEST_RUNNING_STAGE);
 }
 
 int test_go(void)
@@ -260,4 +359,55 @@ int test_go(void)
 void test_waitsig(void)
 {
 	futex_wait_while(&sig_received, 0);
+}
+
+int test_wait_pre_dump(void)
+{
+	int ret;
+
+	if (criu_status_in < 0) {
+		pr_err("Fd criu_status_in is not initialized\n");
+		return -1;
+	}
+
+	if (read(criu_status_in, &ret, sizeof(ret)) != sizeof(ret)) {
+		if (errno != EBADF || !futex_get(&sig_received))
+			pr_perror("Can't wait pre-dump\n");
+		return -1;
+	}
+	pr_err("pre-dump\n");
+
+	return 0;
+}
+
+int test_wait_pre_dump_ack(void)
+{
+	int ret = 0;
+
+	if (criu_status_out < 0) {
+		pr_err("Fd criu_status_out is not initialized\n");
+		return -1;
+	}
+
+	pr_err("pre-dump-ack\n");
+	if (write(criu_status_out, &ret, sizeof(ret)) != sizeof(ret)) {
+		pr_perror("Can't reply to pre-dump notify");
+		return -1;
+	}
+
+	return 0;
+}
+
+pid_t sys_clone_unified(unsigned long flags, void *child_stack, void *parent_tid,
+			void *child_tid, unsigned long newtls)
+{
+#ifdef __x86_64__
+	return (pid_t)syscall(__NR_clone, flags, child_stack, parent_tid, child_tid, newtls);
+#elif (__i386__ || __arm__ || __aarch64__ ||__powerpc64__)
+	return (pid_t)syscall(__NR_clone, flags, child_stack, parent_tid, newtls, child_tid);
+#elif __s390x__
+	return (pid_t)syscall(__NR_clone, child_stack, flags, parent_tid, child_tid, newtls);
+#else
+#error "Unsupported architecture"
+#endif
 }

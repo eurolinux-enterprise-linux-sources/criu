@@ -1,5 +1,3 @@
-#define _GNU_SOURCE
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -31,6 +29,7 @@ static int lock_reg(int fd, int cmd, int type, int whence,
 	lock.l_start  = offset;   /* byte offset, relative to l_whence */
 	lock.l_len    = len;      /* #bytes (0 means to EOF) */
 
+	errno = 0;
 	return fcntl(fd, cmd, &lock);
 }
 
@@ -50,6 +49,7 @@ static int check_read_lock(int fd, int whence, off_t offset, off_t len)
 	lock.l_len    = len;      /* #bytes (0 means to EOF) */
 	lock.l_pid    = -1;
 
+	errno = 0;
 	ret = fcntl(fd, F_GETLK, &lock);
 	if (ret == -1) {
 		pr_perror("F_GETLK failed.");
@@ -78,6 +78,7 @@ static int check_write_lock(int fd, int whence, off_t offset, off_t len)
 	lock.l_len    = len;      /* #bytes (0 means to EOF) */
 	lock.l_pid    = -1;
 
+	errno = 0;
 	ret = fcntl(fd, F_GETLK, &lock);
 	if (ret == -1) {
 		pr_perror("F_GETLK failed.");
@@ -129,7 +130,7 @@ static int check_file_locks()
 
 int main(int argc, char **argv)
 {
-	int fd_0, fd_1;
+	int fd_0, fd_1, ret;
 	pid_t pid;
 
 	test_init(argc, argv);
@@ -168,8 +169,19 @@ int main(int argc, char **argv)
 		exit(0);
 	}
 
-	set_read_lock(fd_0, SEEK_SET, 0, 0);
-	set_write_lock(fd_1, SEEK_SET, 0, 0);
+	ret = set_read_lock(fd_0, SEEK_SET, 0, 0);
+	if (ret == -1) {
+		pr_perror("Failed to set read lock");
+		kill(pid, SIGTERM);
+		return -1;
+	}
+
+	ret = set_write_lock(fd_1, SEEK_SET, 0, 0);
+	if (ret == -1) {
+		pr_perror("Failed to set write lock");
+		kill(pid, SIGTERM);
+		return -1;
+	}
 
 	test_daemon();
 	test_waitsig();

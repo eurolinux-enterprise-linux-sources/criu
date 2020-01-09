@@ -1,11 +1,10 @@
 #include <unistd.h>
 #include <string.h>
-
-#include "asm/restore.h"
-#include "asm/restorer.h"
-
+#include "log.h"
+#include "restore.h"
 #include "images/core.pb-c.h"
 
+#ifndef setup_sas
 static inline void setup_sas(struct rt_sigframe* sigframe, ThreadSasEntry *sas)
 {
 	if (sas) {
@@ -17,30 +16,31 @@ static inline void setup_sas(struct rt_sigframe* sigframe, ThreadSasEntry *sas)
 #undef UC
 	}
 }
+#endif
 
 int construct_sigframe(struct rt_sigframe *sigframe,
 				     struct rt_sigframe *rsigframe,
+				     k_rtsigset_t *blkset,
 				     CoreEntry *core)
 {
-	k_rtsigset_t *blk_sigset = (k_rtsigset_t*)&RT_SIGFRAME_UC(sigframe)->uc_sigmask;
+	/*
+	 * Copy basic register set in the first place: this will set
+	 * rt_sigframe type: native/compat.
+	 */
+	if (restore_gpregs(sigframe, CORE_THREAD_ARCH_INFO(core)->gpregs))
+		return -1;
 
-	if (core->tc)
-		memcpy(blk_sigset, &core->tc->blk_sigset, sizeof(k_rtsigset_t));
-	else if (core->thread_core->has_blk_sigset) {
-		memcpy(blk_sigset,
-			&core->thread_core->blk_sigset, sizeof(k_rtsigset_t));
-	} else
-		memset(blk_sigset, 0, sizeof(k_rtsigset_t));
+	if (blkset)
+		rt_sigframe_copy_sigset(sigframe, blkset);
+	else
+		rt_sigframe_erase_sigset(sigframe);
 
 	if (restore_fpu(sigframe, core))
 		return -1;
 
 	if (RT_SIGFRAME_HAS_FPU(sigframe))
-		if (sigreturn_prep_fpu_frame(sigframe, &RT_SIGFRAME_FPU(rsigframe)))
+		if (sigreturn_prep_fpu_frame(sigframe, rsigframe))
 			return -1;
-
-	if (restore_gpregs(sigframe, CORE_THREAD_ARCH_INFO(core)->gpregs))
-		return -1;
 
 	setup_sas(sigframe, core->thread_core->sas);
 

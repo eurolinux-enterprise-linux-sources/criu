@@ -3,6 +3,10 @@
 
 #include <sys/types.h>
 #include <unistd.h>
+#include <stdbool.h>
+#include <stdlib.h>
+
+#define INPROGRESS ".inprogress"
 
 #ifndef PAGE_SIZE
 # define PAGE_SIZE (unsigned int)(sysconf(_SC_PAGESIZE))
@@ -31,11 +35,16 @@ extern int test_fork_id(int id);
 /* finish setting up the test, write out pid file, and go to background */
 extern void test_daemon(void);
 /* store a message to a static buffer */
-extern void test_msg(const char *format, ...);
+extern void test_msg(const char *format, ...)
+	__attribute__ ((__format__ (__printf__, 1, 2)));
 /* tell if SIGTERM hasn't been received yet */
 extern int test_go(void);
 /* sleep until SIGTERM is delivered */
 extern void test_waitsig(void);
+/* sleep until zdtm notifies about predump */
+extern int test_wait_pre_dump(void);
+/* notify zdtm that we finished action after predump */
+extern int test_wait_pre_dump_ack(void);
 
 #include <stdint.h>
 
@@ -51,6 +60,8 @@ extern int datasum(const uint8_t *buffer, unsigned length, uint32_t *crc);
 /* streaming helpers */
 extern int set_nonblock(int fd, int on);
 extern int pipe_in2out(int infd, int outfd, uint8_t *buffer, int length);
+extern int read_data(int fd, unsigned char *buf, int len);
+extern int write_data(int fd, const unsigned char *buf, int len);
 
 /* command line args */
 struct long_opt {
@@ -71,7 +82,8 @@ extern void __push_opt(struct long_opt *opt);
 	static struct long_opt __long_opt_##name = {				\
 		#name, #type, doc, is_required, parse_opt_##type, &name };	\
 	static void __init_opt_##name(void) __attribute__ ((constructor));	\
-	static void __init_opt_##name(void) { __push_opt(&__long_opt_##name); }
+	static void __init_opt_##name(void) \
+	{ (void)__check_##name; __push_opt(&__long_opt_##name); }
 
 #define __param_check(name, p, type) \
 	static inline type *__check_##name(void) { return(p); }
@@ -137,5 +149,23 @@ extern int tcp_init_server(int family, int *port);
 extern int tcp_accept_server(int sock);
 extern int tcp_init_client(int family, char *servIP, unsigned short servPort);
 
-extern int get_smaps_bits(unsigned long where, unsigned long *flags, unsigned long *madv);
+struct zdtm_tcp_opts {
+	bool reuseaddr;
+	bool reuseport;
+	int flags;
+};
+
+extern int tcp_init_server_with_opts(int family, int *port, struct zdtm_tcp_opts *opts);
+extern pid_t sys_clone_unified(unsigned long flags, void *child_stack, void *parent_tid,
+			       void *child_tid, unsigned long newtls);
+
+#define ssprintf(s, fmt, ...) ({ 						\
+	int ___ret;								\
+										\
+	___ret = snprintf(s, sizeof(s), fmt, ##__VA_ARGS__);			\
+	if (___ret >= sizeof(s))						\
+		abort();								\
+	___ret;									\
+})
+
 #endif /* _VIMITESU_H_ */

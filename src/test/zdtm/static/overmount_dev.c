@@ -4,6 +4,7 @@
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <sys/sysmacros.h>
 
 #include "zdtmtst.h"
 
@@ -71,7 +72,7 @@ int main(int argc, char **argv)
 	}
 
 	if (st.st_mode != mode || st.st_rdev != dev) {
-		fail("%s is no longer the device file we had");
+		fail("%s is no longer the device file we had", path);
 		goto unlink;
 	}
 

@@ -13,7 +13,7 @@ const char *test_author = "Cyrill Gorcunov <gorcunov@openvz.org>\n";
 #include <stdlib.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>  /* for sockaddr_in and inet_ntoa() */
-#include <wait.h>
+#include <sys/wait.h>
 
 static int port = 8880;
 static char buf[64];
@@ -85,7 +85,7 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	ret = recvfrom(sk1, buf, sizeof(buf), MSG_DONTWAIT,
+	ret = recvfrom(sk1, buf, sizeof(buf), 0,
 			(struct sockaddr *)&addr, &len);
 	if (ret <= 0) {
 		fail("Can't recv C");
@@ -102,7 +102,7 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	ret = recvfrom(sk2, buf, sizeof(buf), MSG_DONTWAIT,
+	ret = recvfrom(sk2, buf, sizeof(buf), 0,
 			(struct sockaddr *)&addr, &len);
 	if (ret <= 0) {
 		fail("Can't recv");

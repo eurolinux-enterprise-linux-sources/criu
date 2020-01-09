@@ -7,89 +7,23 @@
 #include <sys/stat.h>
 #include <ftw.h>
 #include <libgen.h>
-#include "list.h"
+#include <sched.h>
+#include "common/list.h"
 #include "xmalloc.h"
 #include "cgroup.h"
+#include "cgroup-props.h"
 #include "cr_options.h"
 #include "pstree.h"
-#include "proc_parse.h"
+#include "criu-log.h"
 #include "util.h"
 #include "imgset.h"
 #include "util-pie.h"
 #include "namespaces.h"
 #include "seize.h"
-#include "syscall-types.h"
-#include "parasite.h"
+#include "string.h"
 #include "protobuf.h"
 #include "images/core.pb-c.h"
 #include "images/cgroup.pb-c.h"
-
-/*
- * These string arrays have the names of all the properties that will be
- * restored. To add a property for a cgroup type, add it to the
- * corresponding char array above the NULL terminator. If you are adding
- * a new cgroup family all together, you must also edit get_known_properties()
- * Currently the code only supports properties with 1 value
- */
-
-static const char *cpu_props[] = {
-	"cpu.shares",
-	"cpu.cfs_period_us",
-	"cpu.cfs_quota_us",
-	"cpu.rt_period_us",
-	"cpu.rt_runtime_us",
-	"notify_on_release",
-	NULL
-};
-
-static const char *memory_props[] = {
-	/* limit_in_bytes and memsw.limit_in_bytes must be set in this order */
-	"memory.limit_in_bytes",
-	"memory.memsw.limit_in_bytes",
-	"memory.use_hierarchy",
-	"notify_on_release",
-	NULL
-};
-
-static const char *cpuset_props[] = {
-	/*
-	 * cpuset.cpus and cpuset.mems must be set before the process moves
-	 * into its cgroup; they are "initialized" below to whatever the root
-	 * values are in copy_special_cg_props so as not to cause ENOSPC when
-	 * values are restored via this code.
-	 */
-	"cpuset.cpus",
-	"cpuset.mems",
-	"cpuset.memory_migrate",
-	"cpuset.cpu_exclusive",
-	"cpuset.mem_exclusive",
-	"cpuset.mem_hardwall",
-	"cpuset.memory_spread_page",
-	"cpuset.memory_spread_slab",
-	"cpuset.sched_load_balance",
-	"cpuset.sched_relax_domain_level",
-	"notify_on_release",
-	NULL
-};
-
-static const char *blkio_props[] = {
-	"blkio.weight",
-	"notify_on_release",
-	NULL
-};
-
-static const char *freezer_props[] = {
-	"notify_on_release",
-	NULL
-};
-
-static const char *global_props[] = {
-	"cgroup.clone_children",
-	"notify_on_release",
-	"cgroup.procs",
-	"tasks",
-	NULL
-};
 
 /*
  * This structure describes set of controller groups
@@ -252,7 +186,8 @@ int parse_cg_info(void)
 /* Check that co-mounted controllers from /proc/cgroups (e.g. cpu and cpuacct)
  * are contained in a comma separated string (e.g. from /proc/self/cgroup or
  * mount options). */
-static bool cgroup_contains(char **controllers, unsigned int n_controllers, char *name)
+static bool cgroup_contains(char **controllers,
+			unsigned int n_controllers, char *name, u64 *mask)
 {
 	unsigned int i;
 	bool all_match = true;
@@ -267,6 +202,8 @@ static bool cgroup_contains(char **controllers, unsigned int n_controllers, char
 				case '\0':
 				case ',':
 					found = true;
+					if (mask)
+						*mask &= ~(1ULL << i);
 					break;
 				}
 			}
@@ -421,33 +358,14 @@ static void free_all_cgroup_props(struct cgroup_dir *ncd)
 	ncd->n_properties = 0;
 }
 
-static const char **get_known_properties(char *controller)
-{
-	const char **prop_arr = NULL;
-
-	if (!strcmp(controller, "cpu"))
-		prop_arr = cpu_props;
-	else if (!strcmp(controller, "memory"))
-		prop_arr = memory_props;
-	else if (!strcmp(controller, "cpuset"))
-		prop_arr = cpuset_props;
-	else if (!strcmp(controller, "blkio"))
-		prop_arr = blkio_props;
-	else if (!strcmp(controller, "freezer"))
-		prop_arr = freezer_props;
-
-	return prop_arr;
-}
-
-static int dump_cg_props_array(const char *fpath, struct cgroup_dir *ncd,
-			       const char **prop_arr)
+static int dump_cg_props_array(const char *fpath, struct cgroup_dir *ncd, const cgp_t *cgp)
 {
 	int j;
 	char buf[PATH_MAX];
 	struct cgroup_prop *prop;
 
-	for (j = 0; prop_arr != NULL && prop_arr[j] != NULL; ++j) {
-		if (snprintf(buf, PATH_MAX, "%s/%s", fpath, prop_arr[j]) >= PATH_MAX) {
+	for (j = 0; cgp && j < cgp->nr_props; j++) {
+		if (snprintf(buf, PATH_MAX, "%s/%s", fpath, cgp->props[j]) >= PATH_MAX) {
 			pr_err("snprintf output was truncated\n");
 			return -1;
 		}
@@ -457,7 +375,7 @@ static int dump_cg_props_array(const char *fpath, struct cgroup_dir *ncd,
 			continue;
 		}
 
-		prop = create_cgroup_prop(prop_arr[j]);
+		prop = create_cgroup_prop(cgp->props[j]);
 		if (!prop) {
 			free_all_cgroup_props(ncd);
 			return -1;
@@ -467,6 +385,28 @@ static int dump_cg_props_array(const char *fpath, struct cgroup_dir *ncd,
 			free_cgroup_prop(prop);
 			free_all_cgroup_props(ncd);
 			return -1;
+		}
+
+		if (!strcmp("memory.oom_control", cgp->props[j])) {
+			char *new;
+			int disable;
+
+			if (sscanf(prop->value, "oom_kill_disable %d\n", &disable) != 1) {
+				pr_err("couldn't scan oom state from %s\n", prop->value);
+				free_cgroup_prop(prop);
+				free_all_cgroup_props(ncd);
+				return -1;
+			}
+
+			if (asprintf(&new, "%d", disable) < 0) {
+				pr_err("couldn't allocate new oom value\n");
+				free_cgroup_prop(prop);
+				free_all_cgroup_props(ncd);
+				return -1;
+			}
+
+			xfree(prop->value);
+			prop->value = new;
 		}
 
 		pr_info("Dumping value %s from %s/%s\n", prop->value, fpath, prop->name);
@@ -483,16 +423,15 @@ static int add_cgroup_properties(const char *fpath, struct cgroup_dir *ncd,
 	int i;
 
 	for (i = 0; i < controller->n_controllers; ++i) {
+		const cgp_t *cgp = cgp_get_props(controller->controllers[i]);
 
-		const char **prop_arr = get_known_properties(controller->controllers[i]);
-
-		if (dump_cg_props_array(fpath, ncd, prop_arr) < 0) {
-			pr_err("dumping known properties failed");
+		if (dump_cg_props_array(fpath, ncd, cgp) < 0) {
+			pr_err("dumping known properties failed\n");
 			return -1;
 		}
 
-		if (dump_cg_props_array(fpath, ncd, global_props) < 0) {
-			pr_err("dumping global properties failed");
+		if (dump_cg_props_array(fpath, ncd, &cgp_global) < 0) {
+			pr_err("dumping global properties failed\n");
 			return -1;
 		}
 	}
@@ -610,9 +549,10 @@ static int collect_cgroups(struct list_head *ctls)
 	int fd = -1;
 
 	list_for_each_entry(cc, ctls, l) {
-		char path[PATH_MAX], mopts[1024];
-		char *name, prefix[] = ".criu.cgmounts.XXXXXX";
+		char path[PATH_MAX], mopts[1024], *root;
+		char prefix[] = ".criu.cgmounts.XXXXXX";
 		struct cg_controller *cg;
+		struct cg_root_opt *o;
 
 		current_controller = NULL;
 
@@ -620,7 +560,7 @@ static int collect_cgroups(struct list_head *ctls)
 		 * controller from parse_cgroups(), so find that controller if
 		 * it exists. */
 		list_for_each_entry(cg, &cgroups, l) {
-			if (cgroup_contains(cg->controllers, cg->n_controllers, cc->name)) {
+			if (cgroup_contains(cg->controllers, cg->n_controllers, cc->name, NULL)) {
 				current_controller = cg;
 				break;
 			}
@@ -632,7 +572,11 @@ static int collect_cgroups(struct list_head *ctls)
 				pr_err("controller %s not found\n", cc->name);
 				return -1;
 			} else {
-				struct cg_controller *nc = new_controller(cc->name);
+				struct cg_controller *nc;
+
+				nc = new_controller(cc->name);
+				if (!nc)
+					return -1;
 				list_add_tail(&nc->l, &cg->l);
 				n_cgroups++;
 				current_controller = nc;
@@ -642,13 +586,10 @@ static int collect_cgroups(struct list_head *ctls)
 		if (!opts.manage_cgroups)
 			continue;
 
-		if (strstartswith(cc->name, "name=")) {
-			name = cc->name + 5;
+		if (strstartswith(cc->name, "name="))
 			snprintf(mopts, sizeof(mopts), "none,%s", cc->name);
-		} else {
-			name = cc->name;
-			snprintf(mopts, sizeof(mopts), "%s", name);
-		}
+		else
+			snprintf(mopts, sizeof(mopts), "%s", cc->name);
 
 		if (mkdtemp(prefix) == NULL) {
 			pr_perror("can't make dir for cg mounts");
@@ -666,7 +607,17 @@ static int collect_cgroups(struct list_head *ctls)
 			return -1;
 
 		path_pref_len = snprintf(path, PATH_MAX, "/proc/self/fd/%d", fd);
-		snprintf(path + path_pref_len, PATH_MAX - path_pref_len, "%s", cc->path);
+
+		root = cc->path;
+		if (opts.new_global_cg_root)
+			root = opts.new_global_cg_root;
+
+		list_for_each_entry(o, &opts.new_cgroup_roots, node) {
+			if (!strcmp(cc->name, o->controller))
+				root = o->newroot;
+		}
+
+		snprintf(path + path_pref_len, PATH_MAX - path_pref_len, "%s", root);
 
 		ret = ftw(path, add_cgroup, 4);
 		if (ret < 0)
@@ -693,7 +644,7 @@ int dump_task_cgroup(struct pstree_item *item, u32 *cg_id, struct parasite_dump_
 	struct cg_set *cs;
 
 	if (item)
-		pid = item->pid.real;
+		pid = item->pid->real;
 	else
 		pid = getpid();
 
@@ -875,12 +826,21 @@ static int dump_controllers(CgroupEntry *cg)
 	return 0;
 }
 
+static void free_sets(CgroupEntry *cg, unsigned nr)
+{
+	unsigned i;
+
+	for (i = 0; i < nr; i++)
+		xfree(cg->sets[i]->ctls);
+	xfree(cg->sets);
+}
+
 
 static int dump_sets(CgroupEntry *cg)
 {
 	struct cg_set *set;
 	struct cg_ctl *ctl;
-	int s, c;
+	unsigned s, c;
 	void *m;
 	CgSetEntry *se;
 	CgMemberEntry *ce;
@@ -910,8 +870,10 @@ static int dump_sets(CgroupEntry *cg)
 		m = xmalloc(se->n_ctls * (sizeof(CgMemberEntry *) + sizeof(CgMemberEntry)));
 		se->ctls = m;
 		ce = m + se->n_ctls * sizeof(CgMemberEntry *);
-		if (!m)
+		if (!m) {
+			free_sets(cg, s);
 			return -1;
+		}
 
 		c = 0;
 		list_for_each_entry(ctl, &set->ctls, l) {
@@ -935,12 +897,16 @@ static int dump_sets(CgroupEntry *cg)
 int dump_cgroups(void)
 {
 	CgroupEntry cg = CGROUP_ENTRY__INIT;
+	int ret = -1;
 
 	BUG_ON(!criu_cgset || !root_cgset);
 
 	/*
 	 * Check whether root task lives in its own set as compared
-	 * to criu. If yes, we should not dump anything.
+	 * to criu. If yes, we should not dump anything. Note that
+	 * list_is_singular() is slightly wrong here: if the criu cgset has
+	 * empty cgroups, those will not be restored on the target host, since
+	 * we're not dumping anything here.
 	 */
 
 	if (root_cgset == criu_cgset && list_is_singular(&cg_sets)) {
@@ -950,11 +916,16 @@ int dump_cgroups(void)
 
 	if (dump_sets(&cg))
 		return -1;
-	if (dump_controllers(&cg))
-		return -1;
+	if (dump_controllers(&cg)) {
+		goto err;
+	}
 
 	pr_info("Writing CG image\n");
-	return pb_write_one(img_from_set(glob_imgset, CR_FD_CGROUP), &cg, PB_CGROUP);
+	ret = pb_write_one(img_from_set(glob_imgset, CR_FD_CGROUP), &cg, PB_CGROUP);
+err:
+	free_sets(&cg, cg.n_sets);
+	xfree(cg.controllers);
+	return ret;
 }
 
 static int ctrl_dir_and_opt(CgControllerEntry *ctl, char *dir, int ds,
@@ -988,11 +959,30 @@ static int ctrl_dir_and_opt(CgControllerEntry *ctl, char *dir, int ds,
 	return doff;
 }
 
-static const char *special_cpuset_props[] = {
+/* Some properties cannot be restored after the cgroup has children or tasks in
+ * it. We restore these properties as soon as the cgroup is created.
+ */
+static const char *special_props[] = {
 	"cpuset.cpus",
 	"cpuset.mems",
+	"devices.list",
+	"memory.kmem.limit_in_bytes",
+	"memory.swappiness",
+	"memory.oom_control",
+	"memory.use_hierarchy",
 	NULL,
 };
+
+bool is_special_property(const char *prop)
+{
+	size_t i = 0;
+
+	for (i = 0; special_props[i]; i++)
+		if (strcmp(prop, special_props[i]) == 0)
+			return true;
+
+	return false;
+}
 
 static int userns_move(void *arg, int fd, pid_t pid)
 {
@@ -1034,7 +1024,7 @@ static int prepare_cgns(CgSetEntry *se)
 
 		for (j = 0; j < n_controllers; j++) {
 			CgControllerEntry *cur = controllers[j];
-			if (cgroup_contains(cur->cnames, cur->n_cnames, ce->name)) {
+			if (cgroup_contains(cur->cnames, cur->n_cnames, ce->name, NULL)) {
 				ctrl = cur;
 				break;
 			}
@@ -1094,7 +1084,7 @@ static int move_in_cgroup(CgSetEntry *se, bool setup_cgns)
 	pr_info("Move into %d\n", se->id);
 
 	if (setup_cgns && prepare_cgns(se) < 0) {
-		pr_err("failed preparing cgns");
+		pr_err("failed preparing cgns\n");
 		return -1;
 	}
 
@@ -1106,7 +1096,7 @@ static int move_in_cgroup(CgSetEntry *se, bool setup_cgns)
 
 		for (j = 0; j < n_controllers; j++) {
 			CgControllerEntry *cur = controllers[j];
-			if (cgroup_contains(cur->cnames, cur->n_cnames, ce->name)) {
+			if (cgroup_contains(cur->cnames, cur->n_cnames, ce->name, NULL)) {
 				ctrl = cur;
 				break;
 			}
@@ -1176,8 +1166,10 @@ void fini_cgroup(void)
 		return;
 
 	close_service_fd(CGROUP_YARD);
-	umount2(cg_yard, MNT_DETACH);
-	rmdir(cg_yard);
+	if (umount2(cg_yard, MNT_DETACH))
+		pr_perror("Unable to umount %s", cg_yard);
+	if (rmdir(cg_yard))
+		pr_perror("Unable to remove %s", cg_yard);
 	xfree(cg_yard);
 	cg_yard = NULL;
 }
@@ -1211,10 +1203,10 @@ static int restore_perms(int fd, const char *path, CgroupPerms *perms)
 	return 0;
 }
 
-static int restore_cgroup_prop(const CgroupPropEntry * cg_prop_entry_p,
-			       char *path, int off)
+static int restore_cgroup_prop(const CgroupPropEntry *cg_prop_entry_p,
+		char *path, int off, bool split_lines, bool skip_fails)
 {
-	int cg, fd, len, ret = -1;;
+	int cg, fd, ret = -1;
 	CgroupPerms *perms = cg_prop_entry_p->perms;
 
 	if (!cg_prop_entry_p->value) {
@@ -1232,7 +1224,7 @@ static int restore_cgroup_prop(const CgroupPropEntry * cg_prop_entry_p,
 	cg = get_service_fd(CGROUP_YARD);
 	fd = openat(cg, path, O_WRONLY);
 	if (fd < 0) {
-		pr_err("bad file stream?");
+		pr_perror("bad cgroup path: %s", path);
 		return -1;
 	}
 
@@ -1240,20 +1232,42 @@ static int restore_cgroup_prop(const CgroupPropEntry * cg_prop_entry_p,
 		goto out;
 
 	/* skip these two since restoring their values doesn't make sense */
-	if (!strcmp(cg_prop_entry_p->name, "cgroup.procs") || !strcmp(cg_prop_entry_p->name, "tasks"))
-		goto out;
-
-	len = strlen(cg_prop_entry_p->value);
-	if (write(fd, cg_prop_entry_p->value, len) != len) {
-		pr_perror("Failed writing %s to %s", cg_prop_entry_p->value, path);
+	if (!strcmp(cg_prop_entry_p->name, "cgroup.procs") || !strcmp(cg_prop_entry_p->name, "tasks")) {
+		ret = 0;
 		goto out;
 	}
+
+	if (split_lines) {
+		char *line = cg_prop_entry_p->value;
+		char *next_line;
+		size_t len;
+
+		do {
+			next_line = strchrnul(line, '\n');
+			len = next_line - line;
+
+			if (write(fd, line, len) != len) {
+				pr_perror("Failed writing %s to %s", line, path);
+				if (!skip_fails)
+					goto out;
+			}
+			line = next_line + 1;
+		} while(*next_line != '\0');
+	} else {
+		size_t len = strlen(cg_prop_entry_p->value);
+
+		if (write(fd, cg_prop_entry_p->value, len) != len) {
+			pr_perror("Failed writing %s to %s", cg_prop_entry_p->value, path);
+			if (!skip_fails)
+				goto out;
+		}
+	}
+
+	ret = 0;
 
 out:
 	if (close(fd) != 0)
 		pr_perror("Failed closing %s", path);
-	else
-		ret = 0;
 
 	return ret;
 }
@@ -1269,7 +1283,8 @@ int restore_freezer_state(void)
 		return 0;
 
 	freezer_path_len = strlen(freezer_path);
-	return restore_cgroup_prop(freezer_state_entry, freezer_path, freezer_path_len);
+	return restore_cgroup_prop(freezer_state_entry, freezer_path,
+			freezer_path_len, false, false);
 }
 
 static void add_freezer_state_for_restore(CgroupPropEntry *entry, char *path, size_t path_len)
@@ -1301,6 +1316,70 @@ static void add_freezer_state_for_restore(CgroupPropEntry *entry, char *path, si
 	freezer_path[path_len] = 0;
 }
 
+/*
+ * Filter out ifpriomap interfaces which have 0 as priority.
+ * As by default new ifpriomap has 0 as a priority for each
+ * interface, this will save up some write()'s.
+ * As this property is used rarely, this may save a whole bunch
+ * of syscalls, skipping all ifpriomap restore.
+ */
+static int filter_ifpriomap(char *out, char *line)
+{
+	char *next_line, *space;
+	bool written = false;
+	size_t len;
+
+	if (*line == '\0')
+		return 0;
+
+	do {
+		next_line = strchrnul(line, '\n');
+		len = next_line - line;
+
+		space = strchr(line, ' ');
+		if (!space) {
+			pr_err("Invalid value for ifpriomap: `%s'\n", line);
+			return -1;
+		}
+
+		if (!strtol(space, NULL, 10))
+			goto next;
+
+		/* Copying with last \n or \0 */
+		strncpy(out, line, len + 1);
+		out += len + 1;
+		written = true;
+next:
+		line = next_line + 1;
+	} while(*next_line != '\0');
+
+	if (written)
+		*(out - 1) = '\0';
+
+	return 0;
+}
+
+static int restore_cgroup_ifpriomap(CgroupPropEntry *cpe, char *path, int off)
+{
+	CgroupPropEntry priomap = *cpe;
+	int ret = -1;
+
+	priomap.value = xmalloc(strlen(cpe->value) + 1);
+	priomap.value[0] = '\0';
+
+	if (filter_ifpriomap(priomap.value, cpe->value))
+		goto out;
+
+	if (strlen(priomap.value))
+		ret = restore_cgroup_prop(&priomap, path, off, true, true);
+	else
+		ret = 0;
+
+out:
+	xfree(priomap.value);
+	return ret;
+}
+
 static int prepare_cgroup_dir_properties(char *path, int off, CgroupDirEntry **ents,
 					 unsigned int n_ents)
 {
@@ -1314,34 +1393,34 @@ static int prepare_cgroup_dir_properties(char *path, int off, CgroupDirEntry **e
 			goto skip; /* skip root cgroups */
 
 		off2 += sprintf(path + off, "/%s", e->dir_name);
-		if (e->n_properties > 0) {
-			for (j = 0; j < e->n_properties; ++j) {
-				int k;
-				bool special = false;
+		for (j = 0; j < e->n_properties; ++j) {
+			CgroupPropEntry *p = e->properties[j];
 
-				if (!strcmp(e->properties[j]->name, "freezer.state")) {
-					add_freezer_state_for_restore(e->properties[j], path, off2);
-					continue; /* skip restore now */
-				}
-
-				/* Skip restoring special cpuset props now.
-				 * They were restored earlier, and can cause
-				 * the restore to fail if some other task has
-				 * entered the cgroup.
-				 */
-				for (k = 0; special_cpuset_props[k]; k++) {
-					if (!strcmp(e->properties[j]->name, special_cpuset_props[k])) {
-						special = true;
-						break;
-					}
-				}
-
-				if (special)
-					continue;
-
-				if (restore_cgroup_prop(e->properties[j], path, off2) < 0)
-					return -1;
+			if (!strcmp(p->name, "freezer.state")) {
+				add_freezer_state_for_restore(p, path, off2);
+				continue; /* skip restore now */
 			}
+
+			/* Skip restoring special cpuset props now.
+			 * They were restored earlier, and can cause
+			 * the restore to fail if some other task has
+			 * entered the cgroup.
+			 */
+			if (is_special_property(p->name))
+				continue;
+
+			/*
+			 * The kernel can't handle it in one write()
+			 * Number of network interfaces on host may differ.
+			 */
+			if (strcmp(p->name, "net_prio.ifpriomap") == 0) {
+				if (restore_cgroup_ifpriomap(p, path, off2))
+					return -1;
+				continue;
+			}
+
+			if (restore_cgroup_prop(p, path, off2, false, false) < 0)
+				return -1;
 		}
 skip:
 		if (prepare_cgroup_dir_properties(path, off2, e->children, e->n_children) < 0)
@@ -1372,21 +1451,83 @@ int prepare_cgroup_properties(void)
 	return 0;
 }
 
-static int restore_special_cpuset_props(char *paux, size_t off, CgroupDirEntry *e)
+/*
+ * The devices cgroup must be restored in a special way:
+ * only the contents of devices.list can be read, and it is a whitelist
+ * of all the devices the cgroup is allowed to create. To re-create
+ * this whitelist, we firstly deny everything via devices.deny,
+ * and then write the list back into devices.allow.
+ *
+ * Further, we must have a write() call for each line, because the kernel
+ * only parses the first line of any write().
+ */
+static int restore_devices_list(char *paux, size_t off, CgroupPropEntry *pr)
 {
-	int i, j;
+	CgroupPropEntry dev_allow = *pr;
+	CgroupPropEntry dev_deny = *pr;
+	int ret;
 
-	pr_info("Restore special cpuset props\n");
+	dev_allow.name = "devices.allow";
+	dev_deny.name = "devices.deny";
+	dev_deny.value = "a";
 
-	for (i = 0; special_cpuset_props[i]; i++) {
-		const char *name = special_cpuset_props[i];
+	ret = restore_cgroup_prop(&dev_deny, paux, off, false, false);
 
-		for (j = 0; j < e->n_properties; j++) {
-			CgroupPropEntry *prop = e->properties[j];
+	/*
+	 * An empty string here means nothing is allowed,
+	 * and the kernel disallows writing an "" to devices.allow,
+	 * so let's just keep going.
+	 */
+	if (!strcmp(dev_allow.value, ""))
+		return 0;
 
-			if (strcmp(name, prop->name) == 0)
-				if (restore_cgroup_prop(prop, paux, off) < 0)
-					return -1;
+	if (ret < 0)
+		return -1;
+
+	return restore_cgroup_prop(&dev_allow, paux, off, true, false);
+}
+
+static int restore_special_property(char *paux, size_t off, CgroupPropEntry *pr)
+{
+	/*
+	 * XXX: we can drop this hack and make memory.swappiness and
+	 * memory.oom_control regular properties when we drop support for
+	 * kernels < 3.16. See 3dae7fec5.
+	 */
+	if (!strcmp(pr->name, "memory.swappiness") && !strcmp(pr->value, "60"))
+		return 0;
+	if (!strcmp(pr->name, "memory.oom_control") && !strcmp(pr->value, "0"))
+		return 0;
+
+	if (!strcmp(pr->name, "devices.list")) {
+		/*
+		 * A bit of a fudge here. These are write only by owner
+		 * by default, but the container engine could have changed
+		 * the perms. We should come up with a better way to
+		 * restore all of this stuff.
+		 */
+		pr->perms->mode = 0200;
+		return restore_devices_list(paux, off, pr);
+	}
+
+	return restore_cgroup_prop(pr, paux, off, false, false);
+}
+
+static int restore_special_props(char *paux, size_t off, CgroupDirEntry *e)
+{
+	unsigned int j;
+
+	pr_info("Restore special props\n");
+
+	for (j = 0; j < e->n_properties; j++) {
+		CgroupPropEntry *prop = e->properties[j];
+
+		if (!is_special_property(prop->name))
+			continue;
+
+		if (restore_special_property(paux, off, prop) < 0) {
+			pr_err("Restoring %s special property failed\n", prop->name);
+			return -1;
 		}
 	}
 
@@ -1432,7 +1573,7 @@ static int prepare_cgroup_dirs(char **controllers, int n_controllers, char *paux
 				return -1;
 			}
 
-			if (mkdirpat(cg, paux)) {
+			if (mkdirpat(cg, paux, 0755)) {
 				pr_perror("Can't make cgroup dir %s", paux);
 				return -1;
 			}
@@ -1442,8 +1583,10 @@ static int prepare_cgroup_dirs(char **controllers, int n_controllers, char *paux
 				return -1;
 
 			for (j = 0; j < n_controllers; j++) {
-				if (strcmp(controllers[j], "cpuset") == 0) {
-					if (restore_special_cpuset_props(paux, off2, e) < 0) {
+				if (!strcmp(controllers[j], "cpuset")
+						|| !strcmp(controllers[j], "memory")
+						|| !strcmp(controllers[j], "devices")) {
+					if (restore_special_props(paux, off2, e) < 0) {
 						pr_err("Restoring special cpuset props failed!\n");
 						return -1;
 					}
@@ -1531,7 +1674,6 @@ static int prepare_cgroup_sfd(CgroupEntry *ce)
 	}
 
 	ret = install_service_fd(CGROUP_YARD, i);
-	close(i);
 	if (ret < 0)
 		goto err;
 
@@ -1619,7 +1761,7 @@ static int rewrite_cgsets(CgroupEntry *cge, char **controllers, int n_controller
 			 * and its path with stripping leading
 			 * "/" is matching to be renamed.
 			 */
-			if (!(cgroup_contains(controllers, n_controllers, cg->name) &&
+			if (!(cgroup_contains(controllers, n_controllers, cg->name, NULL) &&
 					strstartswith(cg->path + 1, dir)))
 				continue;
 
@@ -1632,7 +1774,6 @@ static int rewrite_cgsets(CgroupEntry *cge, char **controllers, int n_controller
 					return -ENOMEM;
 				}
 				xfree(prev);
-				cg->cgns_prefix = strlen(newroot);
 
 				if (!dirnew) {
 					/* -1 because cgns_prefix includes leading "/" */
@@ -1640,6 +1781,7 @@ static int rewrite_cgsets(CgroupEntry *cge, char **controllers, int n_controller
 					if (!dirnew)
 						return -ENOMEM;
 				}
+				cg->cgns_prefix = strlen(newroot);
 			} else {
 				char *prev = cg->path;
 				/*
@@ -1663,8 +1805,10 @@ static int rewrite_cgsets(CgroupEntry *cge, char **controllers, int n_controller
 		}
 	}
 
-	xfree(dir);
-	*dir_name = dirnew;
+	if (dirnew) {
+		xfree(dir);
+		*dir_name = dirnew;
+	}
 	return 0;
 }
 
@@ -1672,19 +1816,31 @@ static int rewrite_cgroup_roots(CgroupEntry *cge)
 {
 	int i, j;
 	struct cg_root_opt *o;
-	char *newroot = NULL;
 
 	for (i = 0; i < cge->n_controllers; i++) {
 		CgControllerEntry *ctrl = cge->controllers[i];
-		newroot = opts.new_global_cg_root;
+		u64 ctrl_mask = (1ULL << ctrl->n_cnames) - 1;
+		char *newroot = NULL;
 
 		list_for_each_entry(o, &opts.new_cgroup_roots, node) {
-			if (cgroup_contains(ctrl->cnames, ctrl->n_cnames, o->controller)) {
-				newroot = o->newroot;
-				break;
-			}
+			unsigned old_mask = ctrl_mask;
 
+			cgroup_contains(ctrl->cnames, ctrl->n_cnames,
+					o->controller, &ctrl_mask);
+			if (old_mask != ctrl_mask) {
+				if (newroot && strcmp(newroot, o->newroot)) {
+					pr_err("CG paths mismatch: %s %s\n",
+							newroot, o->newroot);
+					return -1;
+				}
+				newroot = o->newroot;
+			}
+			if (!ctrl_mask)
+				break;
 		}
+
+		if (!newroot)
+			newroot = opts.new_global_cg_root;
 
 		if (newroot) {
 			for (j = 0; j < ctrl->n_dirs; j++) {
@@ -1741,7 +1897,7 @@ int new_cg_root_add(char *controller, char *newroot)
 	struct cg_root_opt *o;
 
 	if (!controller) {
-		opts.new_global_cg_root = newroot;
+		SET_CHAR_OPTS(new_global_cg_root, newroot);
 		return 0;
 	}
 

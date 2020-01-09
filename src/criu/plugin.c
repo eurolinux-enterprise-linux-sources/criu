@@ -7,10 +7,11 @@
 #include <dlfcn.h>
 
 #include "cr_options.h"
-#include "compiler.h"
+#include "common/compiler.h"
 #include "xmalloc.h"
 #include "plugin.h"
-#include "list.h"
+#include "servicefd.h"
+#include "common/list.h"
 #include "log.h"
 
 cr_plugin_ctl_t cr_plugin_ctl = {
@@ -29,7 +30,7 @@ static cr_plugin_desc_t *cr_gen_plugin_desc(void *h, char *path)
 	if (!d)
 		return NULL;
 
-	d->name		= strdup(path);
+	d->name		= xstrdup(path);
 	d->max_hooks	= CR_PLUGIN_HOOK__MAX;
 	d->version	= CRIU_PLUGIN_VERSION_OLD;
 
@@ -90,12 +91,18 @@ static int verify_plugin(cr_plugin_desc_t *d)
 	return 0;
 }
 
+int criu_get_image_dir(void)
+{
+	return get_service_fd(IMG_FD_OFF);
+}
+
 static int cr_lib_load(int stage, char *path)
 {
 	cr_plugin_desc_t *d;
 	plugin_desc_t *this;
 	size_t i;
 	void *h;
+	bool allocated = false;
 
 	h = dlopen(path, RTLD_LAZY);
 	if (h == NULL) {
@@ -110,25 +117,22 @@ static int cr_lib_load(int stage, char *path)
 	 * be changing own format frequently.
 	 */
 	d = dlsym(h, "CR_PLUGIN_DESC");
-	if (!d)
-		d = cr_gen_plugin_desc(h, path);
 	if (!d) {
-		pr_err("Can't load plugin %s\n", path);
-		dlclose(h);
-		return -1;
+		d = cr_gen_plugin_desc(h, path);
+		if (!d) {
+			pr_err("Can't load plugin %s\n", path);
+			goto error_close;
+		}
+		allocated = true;
 	}
 
 	this = xzalloc(sizeof(*this));
-	if (!this) {
-		dlclose(h);
-		return -1;
-	}
+	if (!this)
+		goto error_close;
 
 	if (verify_plugin(d)) {
 		pr_err("Corrupted plugin %s\n", path);
-		xfree(this);
-		dlclose(h);
-		return -1;
+		goto error_free;
 	}
 
 	this->d = d;
@@ -144,9 +148,7 @@ static int cr_lib_load(int stage, char *path)
 	if (d->init && d->init(stage)) {
 		pr_err("Failed in init(%d) of \"%s\"\n", stage, d->name);
 		list_del(&this->list);
-		xfree(this);
-		dlclose(h);
-		return -1;
+		goto error_free;
 	}
 
 	/*
@@ -160,6 +162,14 @@ static int cr_lib_load(int stage, char *path)
 	}
 
 	return 0;
+
+error_free:
+	xfree(this);
+error_close:
+	dlclose(h);
+	if (allocated)
+		xfree(d);
+	return -1;
 }
 
 void cr_plugin_fini(int stage, int ret)
@@ -199,12 +209,12 @@ int cr_plugin_init(int stage)
 	if (opts.libdir == NULL) {
 		path = getenv("CRIU_LIBS_DIR");
 		if (path)
-			opts.libdir = path;
+			SET_CHAR_OPTS(libdir, path);
 		else {
 			if (access(CR_PLUGIN_DEFAULT, F_OK))
 				return 0;
 
-			opts.libdir = CR_PLUGIN_DEFAULT;
+			SET_CHAR_OPTS(libdir, CR_PLUGIN_DEFAULT);
 		}
 	}
 

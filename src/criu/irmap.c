@@ -5,7 +5,7 @@
  * so that we can restore inotify/fanotify-s.
  *
  * Scanning _is_ slow, so we limit it with hints, which are
- * heurisitical known places where notifies are typically put.
+ * heuristically known places where notifies are typically put.
  */
 
 #include <stdbool.h>
@@ -237,7 +237,7 @@ char *irmap_lookup(unsigned int s_dev, unsigned long i_ino)
 	 * irmap_predump_prep, so we just go ahead and scan.
 	 */
 	if (!doing_predump &&
-			__mntns_get_root_fd(root_item->pid.real) < 0)
+			__mntns_get_root_fd(root_item->pid->real) < 0)
 		goto out;
 
 	timing_start(TIME_IRMAP_RESOLVE);
@@ -311,7 +311,12 @@ int irmap_queue_cache(unsigned int dev, unsigned long ino,
 	ip->dev = dev;
 	ip->ino = ino;
 	ip->fh = *fh;
-	fh->handle = NULL; /* don't free in free_fhandle */
+	ip->fh.handle = xmemdup(fh->handle,
+			FH_ENTRY_SIZES__min_entries * sizeof(uint64_t));
+	if (!ip->fh.handle) {
+		xfree(ip);
+		return -1;
+	}
 
 	pr_debug("Queue %x:%lx for pre-dump\n", dev, ino);
 
@@ -333,7 +338,7 @@ int irmap_predump_prep(void)
 	 */
 
 	doing_predump = true;
-	return __mntns_get_root_fd(root_item->pid.real) < 0 ? -1 : 0;
+	return __mntns_get_root_fd(root_item->pid->real) < 0 ? -1 : 0;
 }
 
 int irmap_predump_run(void)
