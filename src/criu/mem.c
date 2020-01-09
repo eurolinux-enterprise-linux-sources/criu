@@ -300,7 +300,7 @@ static int __parasite_dump_pages_seized(struct pstree_item *item,
 	struct page_pipe *pp;
 	struct vma_area *vma_area;
 	struct page_xfer xfer = { .parent = NULL };
-	int ret = -1;
+	int ret, exit_code = -1;
 	unsigned cpp_flags = 0;
 	unsigned long pmc_size;
 
@@ -323,7 +323,6 @@ static int __parasite_dump_pages_seized(struct pstree_item *item,
 			 pmc_size * PAGE_SIZE))
 		return -1;
 
-	ret = -1;
 	if (!(mdc->pre_dump || mdc->lazy))
 		/*
 		 * Chunk mode pushes pages portion by portion. This mode
@@ -416,6 +415,9 @@ again:
 	 */
 
 	ret = task_reset_dirty_track(item->pid->real);
+	if (ret)
+		goto out_xfer;
+	exit_code = 0;
 out_xfer:
 	if (!mdc->pre_dump)
 		xfer.close(&xfer);
@@ -427,7 +429,7 @@ out_pp:
 out:
 	pmc_fini(&pmc);
 	pr_info("----------------------------------------\n");
-	return ret;
+	return exit_code;
 }
 
 int parasite_dump_pages_seized(struct pstree_item *item,
@@ -734,7 +736,7 @@ static int premap_private_vma(struct pstree_item *t, struct vma_area *vma, void 
 	pr_debug("\tpremap %#016"PRIx64"-%#016"PRIx64" -> %016lx\n",
 		vma->e->start, vma->e->end, (unsigned long)addr);
 
-	if (vma_has_guard_gap_hidden(vma)) { /* Skip gurad page */
+	if (vma_has_guard_gap_hidden(vma)) { /* Skip guard page */
 		vma->e->start += PAGE_SIZE;
 		vma->premmaped_addr += PAGE_SIZE;
 	}
@@ -851,7 +853,7 @@ static int restore_priv_vma_content(struct pstree_item *t, struct page_read *pr)
 
 	unsigned int nr_restored = 0;
 	unsigned int nr_shared = 0;
-	unsigned int nr_droped = 0;
+	unsigned int nr_dropped = 0;
 	unsigned int nr_compared = 0;
 	unsigned int nr_lazy = 0;
 	unsigned long va;
@@ -1019,7 +1021,7 @@ err_read:
 				return -1;
 			}
 			i++;
-			nr_droped++;
+			nr_dropped++;
 		}
 	}
 
@@ -1029,7 +1031,7 @@ err_read:
 
 	pr_info("nr_restored_pages: %d\n", nr_restored);
 	pr_info("nr_shared_pages:   %d\n", nr_shared);
-	pr_info("nr_droped_pages:   %d\n", nr_droped);
+	pr_info("nr_dropped_pages:   %d\n", nr_dropped);
 	pr_info("nr_lazy:           %d\n", nr_lazy);
 
 	return 0;
@@ -1152,7 +1154,7 @@ bool vma_has_guard_gap_hidden(struct vma_area *vma)
 }
 
 /*
- * A gard page must be unmapped after restoring content and
+ * A guard page must be unmapped after restoring content and
  * forking children to restore COW memory.
  */
 int unmap_guard_pages(struct pstree_item *t)
@@ -1204,7 +1206,7 @@ int open_vmas(struct pstree_item *t)
 		/*
 		 * File mappings have vm_open set to open_filemap which, in
 		 * turn, puts the VMA_CLOSE bit itself. For all the rest we
-		 * need to put it by hads, so that the restorer closes the fd
+		 * need to put it by hands, so that the restorer closes the fd
 		 */
 		if (!(vma_area_is(vma, VMA_FILE_PRIVATE) ||
 					vma_area_is(vma, VMA_FILE_SHARED)))

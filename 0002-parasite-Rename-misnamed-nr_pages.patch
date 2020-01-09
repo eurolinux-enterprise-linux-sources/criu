@@ -1,0 +1,59 @@
+From 454fe3e7c07ba48a7a065135482196b53e376de0 Mon Sep 17 00:00:00 2001
+From: Dmitry Safonov <dima@arista.com>
+Date: Thu, 10 May 2018 19:14:42 +0100
+Subject: [PATCH 2/8] parasite: Rename misnamed nr_pages
+
+It's actually number of bytes spliced, not pages.
+And I bet (unsigned long) suits the purpose more than (int).
+
+Signed-off-by: Dmitry Safonov <dima@arista.com>
+Signed-off-by: Andrei Vagin <avagin@virtuozzo.com>
+---
+ criu/pie/parasite.c | 10 +++++-----
+ 1 file changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/criu/pie/parasite.c b/criu/pie/parasite.c
+index 7a48f324e..b9dae3f94 100644
+--- a/criu/pie/parasite.c
++++ b/criu/pie/parasite.c
+@@ -67,7 +67,8 @@ static int dump_pages(struct parasite_dump_pages_args *args)
+ {
+ 	int p, ret, tsock;
+ 	struct iovec *iovs;
+-	int off, nr_segs, nr_pages;
++	int off, nr_segs;
++	unsigned long spliced_bytes = 0;
+ 
+ 	tsock = parasite_get_rpc_sock();
+ 	p = recv_fd(tsock);
+@@ -75,7 +76,6 @@ static int dump_pages(struct parasite_dump_pages_args *args)
+ 		return -1;
+ 
+ 	iovs = pargs_iovs(args);
+-	nr_pages = 0;
+ 	off = 0;
+ 	nr_segs = args->nr_segs;
+ 	if (nr_segs > UIO_MAXIOV)
+@@ -89,16 +89,16 @@ static int dump_pages(struct parasite_dump_pages_args *args)
+ 						ret, nr_segs, args->off + off);
+ 			return -1;
+ 		}
+-		nr_pages += ret;
++		spliced_bytes += ret;
+ 		off += nr_segs;
+ 		if (off == args->nr_segs)
+ 			break;
+ 		if (off + nr_segs > args->nr_segs)
+ 			nr_segs = args->nr_segs - off;
+ 	}
+-	if (nr_pages != args->nr_pages * PAGE_SIZE) {
++	if (spliced_bytes != args->nr_pages * PAGE_SIZE) {
+ 		sys_close(p);
+-		pr_err("Can't splice all pages to pipe (%d/%d)\n", nr_pages, args->nr_pages);
++		pr_err("Can't splice all pages to pipe (%lu/%d)\n", spliced_bytes, args->nr_pages);
+ 		return -1;
+ 	}
+ 
+-- 
+2.17.0
+

@@ -667,7 +667,8 @@ static int parasite_start_daemon(struct parasite_ctl *ctl)
 	 * while in daemon it is not such.
 	 */
 
-	if (get_task_regs(pid, &ctl->orig.regs, ictx->save_regs, ictx->regs_arg)) {
+	if (get_task_regs(pid, &ctl->orig.regs, ictx->save_regs,
+			ictx->regs_arg, ictx->flags)) {
 		pr_err("Can't obtain regs for thread %d\n", pid);
 		return -1;
 	}
@@ -695,8 +696,8 @@ static int parasite_mmap_exchange(struct parasite_ctl *ctl, unsigned long size)
 
 	ctl->map_length = round_up(size, page_size());
 
-	fd = ctl->ictx.open_proc(ctl->rpid, O_RDWR, "map_files/%p-%p",
-		 ctl->remote_map, ctl->remote_map + ctl->map_length);
+	fd = ctl->ictx.open_proc(ctl->rpid, O_RDWR, "map_files/%lx-%lx",
+		 (long)ctl->remote_map, (long)ctl->remote_map + ctl->map_length);
 	if (fd < 0)
 		return -1;
 
@@ -1126,7 +1127,7 @@ static int save_regs_plain(void *to, user_regs_struct_t *r, user_fpregs_struct_t
 
 #ifndef RT_SIGFRAME_UC_SIGMASK
 #define RT_SIGFRAME_UC_SIGMASK(sigframe)				\
-	(k_rtsigset_t*)&RT_SIGFRAME_UC(sigframe)->uc_sigmask
+	(k_rtsigset_t*)(void *)&RT_SIGFRAME_UC(sigframe)->uc_sigmask
 #endif
 
 static int make_sigframe_plain(void *from, struct rt_sigframe *f, struct rt_sigframe *rtf, k_rtsigset_t *b)
@@ -1569,7 +1570,7 @@ k_rtsigset_t *compel_task_sigmask(struct parasite_ctl *ctl)
 
 int compel_get_thread_regs(struct parasite_thread_ctl *tctl, save_regs_t save, void * arg)
 {
-	return get_task_regs(tctl->tid, &tctl->th.regs, save, arg);
+	return get_task_regs(tctl->tid, &tctl->th.regs, save, arg, tctl->ctl->ictx.flags);
 }
 
 struct infect_ctx *compel_infect_ctx(struct parasite_ctl *ctl)

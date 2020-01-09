@@ -2,6 +2,7 @@
 #include <sys/socket.h>
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
+#include <netinet/udp.h>
 #include <libnl3/netlink/msg.h>
 #include <net/if.h>
 #include <sys/mman.h>
@@ -25,6 +26,7 @@
 #include "sk-inet.h"
 #include "protobuf.h"
 #include "util.h"
+#include "namespaces.h"
 
 #define PB_ALEN_INET	1
 #define PB_ALEN_INET6	4
@@ -123,9 +125,14 @@ static int can_dump_inet_sk(const struct inet_sk_desc *sk)
 
 	if (sk->type == SOCK_DGRAM) {
 		if (sk->wqlen != 0) {
-			pr_err("Can't dump corked dgram socket %x\n",
+			if (sk->cork) {
+				pr_err("Can't dump corked dgram socket %x\n",
 					sk->sd.ino);
-			return 0;
+				return 0;
+			} else {
+				pr_warn("Write queue of the %x socket isn't empty\n",
+					sk->sd.ino);
+			}
 		}
 
 		if (sk->rqlen)
@@ -204,8 +211,15 @@ static struct inet_sk_desc *gen_uncon_sk(int lfd, const struct fd_parms *p, int 
 {
 	struct inet_sk_desc *sk;
 	union libsoccr_addr address;
+	struct ns_id *ns = NULL;
 	socklen_t aux;
 	int ret;
+
+	if (root_ns_mask & CLONE_NEWNET) {
+		ns = get_socket_ns(lfd);
+		if (ns == NULL)
+			return NULL;
+	}
 
 	sk = xzalloc(sizeof(*sk));
 	if (!sk)
@@ -246,7 +260,14 @@ static struct inet_sk_desc *gen_uncon_sk(int lfd, const struct fd_parms *p, int 
 	sk->sd.ino = p->stat.st_ino;
 
 	if (proto == IPPROTO_TCP) {
-		struct tcp_info info;
+		struct {
+			__u8    tcpi_state;
+			__u8    tcpi_ca_state;
+			__u8    tcpi_retransmits;
+			__u8    tcpi_probes;
+			__u8    tcpi_backoff;
+			__u8    tcpi_options;
+		} info;
 
 		aux = sizeof(info);
 		ret = getsockopt(lfd, SOL_TCP, TCP_INFO, &info, &aux);
@@ -266,7 +287,7 @@ static struct inet_sk_desc *gen_uncon_sk(int lfd, const struct fd_parms *p, int 
 
 	sk->state = TCP_CLOSE;
 
-	sk_collect_one(sk->sd.ino, sk->sd.family, &sk->sd);
+	sk_collect_one(sk->sd.ino, sk->sd.family, &sk->sd, ns);
 
 	return sk;
 err:
@@ -310,7 +331,7 @@ static int do_dump_one_inet_fd(int lfd, u32 id, const struct fd_parms *p, int fa
 	InetSkEntry ie = INET_SK_ENTRY__INIT;
 	IpOptsEntry ipopts = IP_OPTS_ENTRY__INIT;
 	SkOptsEntry skopts = SK_OPTS_ENTRY__INIT;
-	int ret = -1, err = -1, proto;
+	int ret = -1, err = -1, proto, aux;
 
 	ret = do_dump_opt(lfd, SOL_SOCKET, SO_PROTOCOL,
 					&proto, sizeof(proto));
@@ -329,6 +350,24 @@ static int do_dump_one_inet_fd(int lfd, u32 id, const struct fd_parms *p, int fa
 			goto err;
 	}
 
+	sk->cork = false;
+	switch (proto) {
+	case IPPROTO_UDP:
+	case IPPROTO_UDPLITE:
+		if (dump_opt(lfd, SOL_UDP, UDP_CORK, &aux))
+			return -1;
+		if (aux) {
+			sk->cork = true;
+			/*
+			 * FIXME: it is possible to dump a corked socket with
+			 * the empty send queue.
+			 */
+			pr_err("Can't dump corked dgram socket %x\n", sk->sd.ino);
+			goto err;
+		}
+		break;
+	}
+
 	if (!can_dump_inet_sk(sk))
 		goto err;
 
@@ -336,6 +375,10 @@ static int do_dump_one_inet_fd(int lfd, u32 id, const struct fd_parms *p, int fa
 
 	ie.id		= id;
 	ie.ino		= sk->sd.ino;
+	if (sk->sd.sk_ns) {
+		ie.ns_id	= sk->sd.sk_ns->id;
+		ie.has_ns_id	= true;
+	}
 	ie.family	= family;
 	ie.proto	= proto;
 	ie.type		= sk->type;
@@ -453,7 +496,7 @@ const struct fdtype_ops inet6_dump_ops = {
 	.dump		= dump_one_inet6_fd,
 };
 
-int inet_collect_one(struct nlmsghdr *h, int family, int type)
+int inet_collect_one(struct nlmsghdr *h, int family, int type, struct ns_id *ns)
 {
 	struct inet_sk_desc *d;
 	struct inet_diag_msg *m = NLMSG_DATA(h);
@@ -480,7 +523,7 @@ int inet_collect_one(struct nlmsghdr *h, int family, int type)
 	else
 		pr_err_once("Can't check shutdown state of inet socket\n");
 
-	ret = sk_collect_one(m->idiag_inode, family, &d->sd);
+	ret = sk_collect_one(m->idiag_inode, family, &d->sd, ns);
 
 	show_one_inet("Collected", d);
 
@@ -579,14 +622,18 @@ static int post_open_inet_sk(struct file_desc *d, int sk)
 	}
 
 	/* SO_REUSEADDR is set for all sockets */
-	if (ii->ie->opts->reuseaddr)
+	if (ii->ie->opts->reuseaddr && ii->ie->opts->so_reuseport)
 		return 0;
 
 	if (atomic_read(&ii->port->users))
 		return 1;
 
 	val = ii->ie->opts->reuseaddr;
-	if (restore_opt(sk, SOL_SOCKET, SO_REUSEADDR, &val))
+	if (!val && restore_opt(sk, SOL_SOCKET, SO_REUSEADDR, &val))
+		return -1;
+
+	val = ii->ie->opts->so_reuseport;
+	if (!val && restore_opt(sk, SOL_SOCKET, SO_REUSEPORT, &val))
 		return -1;
 
 	return 0;
@@ -629,6 +676,9 @@ static int open_inet_sk(struct file_desc *d, int *new_fd)
 	if (inet_validate_address(ie))
 		return -1;
 
+	if (set_netns(ie->ns_id))
+		return -1;
+
 	sk = socket(ie->family, ie->type, ie->proto);
 	if (sk < 0) {
 		pr_perror("Can't create inet socket");
@@ -645,6 +695,8 @@ static int open_inet_sk(struct file_desc *d, int *new_fd)
 	 * The origin value of SO_REUSEADDR will be restored in post_open.
 	 */
 	if (restore_opt(sk, SOL_SOCKET, SO_REUSEADDR, &yes))
+		goto err;
+	if (restore_opt(sk, SOL_SOCKET, SO_REUSEPORT, &yes))
 		goto err;
 
 	if (tcp_connection(ie)) {

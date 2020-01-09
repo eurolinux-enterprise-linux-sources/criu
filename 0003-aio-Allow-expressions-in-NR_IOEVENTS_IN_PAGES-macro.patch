@@ -1,0 +1,38 @@
+From 37c5b64e0e6966afe66d62ad9c700d27f3065e4e Mon Sep 17 00:00:00 2001
+From: Dmitry Safonov <dima@arista.com>
+Date: Thu, 10 May 2018 19:14:43 +0100
+Subject: [PATCH 3/8] aio: Allow expressions in NR_IOEVENTS_IN_PAGES macro
+
+The macro is used only in aio_estimate_nr_reqs():
+unsigned int k_max_reqs = NR_IOEVENTS_IN_NPAGES(size/PAGE_SIZE);
+
+Which compiler may evaluate as (((PAGE_SIZE*size)/PAGE_SIZE) - ...)
+It works as long as PAGE_SIZE is long.
+The patches set converts PAGE_SIZE to use sysconf() returning
+(unsigned), non-long type and making the aio macro overflowing.
+
+I do not see any value making PAGE_SIZE (unsigned long) typed.
+
+Cc: Kirill Tkhai <ktkhai@virtuozzo.com>
+Signed-off-by: Dmitry Safonov <dima@arista.com>
+Signed-off-by: Andrei Vagin <avagin@virtuozzo.com>
+---
+ criu/aio.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/criu/aio.c b/criu/aio.c
+index 27c251df5..45651f2d3 100644
+--- a/criu/aio.c
++++ b/criu/aio.c
+@@ -13,7 +13,7 @@
+ #include "images/mm.pb-c.h"
+ #include <compel/compel.h>
+ 
+-#define NR_IOEVENTS_IN_NPAGES(npages) ((PAGE_SIZE * npages - sizeof(struct aio_ring)) / sizeof(struct io_event))
++#define NR_IOEVENTS_IN_NPAGES(npages) ((PAGE_SIZE * (npages) - sizeof(struct aio_ring)) / sizeof(struct io_event))
+ 
+ int dump_aio_ring(MmEntry *mme, struct vma_area *vma)
+ {
+-- 
+2.17.0
+

@@ -20,6 +20,7 @@
 #include "util-pie.h"
 #include "namespaces.h"
 #include "seize.h"
+#include "string.h"
 #include "protobuf.h"
 #include "images/core.pb-c.h"
 #include "images/cgroup.pb-c.h"
@@ -395,7 +396,7 @@ static int dump_cg_props_array(const char *fpath, struct cgroup_dir *ncd, const 
 			}
 
 			if (asprintf(&new, "%d", disable) < 0) {
-				pr_err("couldn't aloocate new oom value\n");
+				pr_err("couldn't allocate new oom value\n");
 				free_cgroup_prop(prop);
 				free_all_cgroup_props(ncd);
 				return -1;
@@ -969,6 +970,17 @@ static const char *special_props[] = {
 	NULL,
 };
 
+bool is_special_property(const char *prop)
+{
+	size_t i = 0;
+
+	for (i = 0; special_props[i]; i++)
+		if (strcmp(prop, special_props[i]) == 0)
+			return true;
+
+	return false;
+}
+
 static int userns_move(void *arg, int fd, pid_t pid)
 {
 	char pidbuf[32];
@@ -1151,8 +1163,10 @@ void fini_cgroup(void)
 		return;
 
 	close_service_fd(CGROUP_YARD);
-	umount2(cg_yard, MNT_DETACH);
-	rmdir(cg_yard);
+	if (umount2(cg_yard, MNT_DETACH))
+		pr_perror("Unable to umount %s", cg_yard);
+	if (rmdir(cg_yard))
+		pr_perror("Unable to remove %s", cg_yard);
 	xfree(cg_yard);
 	cg_yard = NULL;
 }
@@ -1186,10 +1200,10 @@ static int restore_perms(int fd, const char *path, CgroupPerms *perms)
 	return 0;
 }
 
-static int restore_cgroup_prop(const CgroupPropEntry * cg_prop_entry_p,
-			       char *path, int off)
+static int restore_cgroup_prop(const CgroupPropEntry *cg_prop_entry_p,
+		char *path, int off, bool split_lines, bool skip_fails)
 {
-	int cg, fd, len, ret = -1;
+	int cg, fd, ret = -1;
 	CgroupPerms *perms = cg_prop_entry_p->perms;
 
 	if (!cg_prop_entry_p->value) {
@@ -1220,10 +1234,30 @@ static int restore_cgroup_prop(const CgroupPropEntry * cg_prop_entry_p,
 		goto out;
 	}
 
-	len = strlen(cg_prop_entry_p->value);
-	if (write(fd, cg_prop_entry_p->value, len) != len) {
-		pr_perror("Failed writing %s to %s", cg_prop_entry_p->value, path);
-		goto out;
+	if (split_lines) {
+		char *line = cg_prop_entry_p->value;
+		char *next_line;
+		size_t len;
+
+		do {
+			next_line = strchrnul(line, '\n');
+			len = next_line - line;
+
+			if (write(fd, line, len) != len) {
+				pr_perror("Failed writing %s to %s", line, path);
+				if (!skip_fails)
+					goto out;
+			}
+			line = next_line + 1;
+		} while(*next_line != '\0');
+	} else {
+		size_t len = strlen(cg_prop_entry_p->value);
+
+		if (write(fd, cg_prop_entry_p->value, len) != len) {
+			pr_perror("Failed writing %s to %s", cg_prop_entry_p->value, path);
+			if (!skip_fails)
+				goto out;
+		}
 	}
 
 	ret = 0;
@@ -1246,7 +1280,8 @@ int restore_freezer_state(void)
 		return 0;
 
 	freezer_path_len = strlen(freezer_path);
-	return restore_cgroup_prop(freezer_state_entry, freezer_path, freezer_path_len);
+	return restore_cgroup_prop(freezer_state_entry, freezer_path,
+			freezer_path_len, false, false);
 }
 
 static void add_freezer_state_for_restore(CgroupPropEntry *entry, char *path, size_t path_len)
@@ -1278,23 +1313,68 @@ static void add_freezer_state_for_restore(CgroupPropEntry *entry, char *path, si
 	freezer_path[path_len] = 0;
 }
 
-static int next_device_entry(char *buf)
+/*
+ * Filter out ifpriomap interfaces which have 0 as priority.
+ * As by default new ifpriomap has 0 as a priority for each
+ * interface, this will save up some write()'s.
+ * As this property is used rarely, this may save a whole bunch
+ * of syscalls, skipping all ifpriomap restore.
+ */
+static int filter_ifpriomap(char *out, char *line)
 {
-	char *pos = buf;
+	char *next_line, *space;
+	bool written = false;
+	size_t len;
 
-	while (1) {
-		if (*pos == '\n') {
-			*pos = '\0';
-			pos++;
-			break;
-		} else if (*pos == '\0') {
-			break;
+	if (*line == '\0')
+		return 0;
+
+	do {
+		next_line = strchrnul(line, '\n');
+		len = next_line - line;
+
+		space = strchr(line, ' ');
+		if (!space) {
+			pr_err("Invalid value for ifpriomap: `%s'\n", line);
+			return -1;
 		}
 
-		pos++;
-	}
+		if (!strtol(space, NULL, 10))
+			goto next;
 
-	return pos - buf;
+		/* Copying with last \n or \0 */
+		strncpy(out, line, len + 1);
+		out += len + 1;
+		written = true;
+next:
+		line = next_line + 1;
+	} while(*next_line != '\0');
+
+	if (written)
+		*(out - 1) = '\0';
+
+	return 0;
+}
+
+static int restore_cgroup_ifpriomap(CgroupPropEntry *cpe, char *path, int off)
+{
+	CgroupPropEntry priomap = *cpe;
+	int ret = -1;
+
+	priomap.value = xmalloc(strlen(cpe->value) + 1);
+	priomap.value[0] = '\0';
+
+	if (filter_ifpriomap(priomap.value, cpe->value))
+		goto out;
+
+	if (strlen(priomap.value))
+		ret = restore_cgroup_prop(&priomap, path, off, true, true);
+	else
+		ret = 0;
+
+out:
+	xfree(priomap.value);
+	return ret;
 }
 
 static int prepare_cgroup_dir_properties(char *path, int off, CgroupDirEntry **ents,
@@ -1310,36 +1390,34 @@ static int prepare_cgroup_dir_properties(char *path, int off, CgroupDirEntry **e
 			goto skip; /* skip root cgroups */
 
 		off2 += sprintf(path + off, "/%s", e->dir_name);
-		if (e->n_properties > 0) {
-			for (j = 0; j < e->n_properties; ++j) {
-				int k;
-				bool special = false;
+		for (j = 0; j < e->n_properties; ++j) {
+			CgroupPropEntry *p = e->properties[j];
 
-				if (!strcmp(e->properties[j]->name, "freezer.state")) {
-					add_freezer_state_for_restore(e->properties[j], path, off2);
-					continue; /* skip restore now */
-				}
-
-				/* Skip restoring special cpuset props now.
-				 * They were restored earlier, and can cause
-				 * the restore to fail if some other task has
-				 * entered the cgroup.
-				 */
-				for (k = 0; special_props[k]; k++) {
-					if (!strcmp(e->properties[j]->name, special_props[k])) {
-						special = true;
-						break;
-					}
-				}
-
-				if (special)
-					continue;
-
-				if (restore_cgroup_prop(e->properties[j], path, off2) < 0) {
-					return -1;
-				}
-
+			if (!strcmp(p->name, "freezer.state")) {
+				add_freezer_state_for_restore(p, path, off2);
+				continue; /* skip restore now */
 			}
+
+			/* Skip restoring special cpuset props now.
+			 * They were restored earlier, and can cause
+			 * the restore to fail if some other task has
+			 * entered the cgroup.
+			 */
+			if (is_special_property(p->name))
+				continue;
+
+			/*
+			 * The kernel can't handle it in one write()
+			 * Number of network interfaces on host may differ.
+			 */
+			if (strcmp(p->name, "net_prio.ifpriomap") == 0) {
+				if (restore_cgroup_ifpriomap(p, path, off2))
+					return -1;
+				continue;
+			}
+
+			if (restore_cgroup_prop(p, path, off2, false, false) < 0)
+				return -1;
 		}
 skip:
 		if (prepare_cgroup_dir_properties(path, off2, e->children, e->n_children) < 0)
@@ -1370,101 +1448,83 @@ int prepare_cgroup_properties(void)
 	return 0;
 }
 
+/*
+ * The devices cgroup must be restored in a special way:
+ * only the contents of devices.list can be read, and it is a whitelist
+ * of all the devices the cgroup is allowed to create. To re-create
+ * this whitelist, we firstly deny everything via devices.deny,
+ * and then write the list back into devices.allow.
+ *
+ * Further, we must have a write() call for each line, because the kernel
+ * only parses the first line of any write().
+ */
+static int restore_devices_list(char *paux, size_t off, CgroupPropEntry *pr)
+{
+	CgroupPropEntry dev_allow = *pr;
+	CgroupPropEntry dev_deny = *pr;
+	int ret;
+
+	dev_allow.name = "devices.allow";
+	dev_deny.name = "devices.deny";
+	dev_deny.value = "a";
+
+	ret = restore_cgroup_prop(&dev_deny, paux, off, false, false);
+
+	/*
+	 * An emptry string here means nothing is allowed,
+	 * and the kernel disallows writing an "" to devices.allow,
+	 * so let's just keep going.
+	 */
+	if (!strcmp(dev_allow.value, ""))
+		return 0;
+
+	if (ret < 0)
+		return -1;
+
+	return restore_cgroup_prop(&dev_allow, paux, off, true, false);
+}
+
+static int restore_special_property(char *paux, size_t off, CgroupPropEntry *pr)
+{
+	/*
+	 * XXX: we can drop this hack and make memory.swappiness and
+	 * memory.oom_control regular properties when we drop support for
+	 * kernels < 3.16. See 3dae7fec5.
+	 */
+	if (!strcmp(pr->name, "memory.swappiness") && !strcmp(pr->value, "60"))
+		return 0;
+	if (!strcmp(pr->name, "memory.oom_control") && !strcmp(pr->value, "0"))
+		return 0;
+
+	if (!strcmp(pr->name, "devices.list")) {
+		/*
+		 * A bit of a fudge here. These are write only by owner
+		 * by default, but the container engine could have changed
+		 * the perms. We should come up with a better way to
+		 * restore all of this stuff.
+		 */
+		pr->perms->mode = 0200;
+		return restore_devices_list(paux, off, pr);
+	}
+
+	return restore_cgroup_prop(pr, paux, off, false, false);
+}
+
 static int restore_special_props(char *paux, size_t off, CgroupDirEntry *e)
 {
-	int i, j;
+	unsigned int j;
 
 	pr_info("Restore special props\n");
 
-	for (i = 0; special_props[i]; i++) {
-		const char *name = special_props[i];
+	for (j = 0; j < e->n_properties; j++) {
+		CgroupPropEntry *prop = e->properties[j];
 
-		for (j = 0; j < e->n_properties; j++) {
-			CgroupPropEntry *prop = e->properties[j];
+		if (!is_special_property(prop->name))
+			continue;
 
-			if (strcmp(name, prop->name) == 0) {
-				/* XXX: we can drop this hack and make
-				 * memory.swappiness and memory.oom_control
-				 * regular properties when we drop support for
-				 * kernels < 3.16. See 3dae7fec5.
-				 */
-				if (!strcmp(prop->name, "memory.swappiness") &&
-						!strcmp(prop->value, "60")) {
-					continue;
-				} else if (!strcmp(prop->name, "memory.oom_control") &&
-						!strcmp(prop->value, "0")) {
-					continue;
-				}
-
-				if (!strcmp(e->properties[j]->name, "devices.list")) {
-					/* The devices cgroup must be restored in a
-					 * special way: only the contents of
-					 * devices.list can be read, and it is a
-					 * whitelist of all the devices the cgroup is
-					 * allowed to create. To re-creat this
-					 * whitelist, we first deny everything via
-					 * devices.deny, and then write the list back
-					 * into devices.allow.
-					 *
-					 * Further, we must have a write() call for
-					 * each line, because the kernel only parses
-					 * the first line of any write().
-					 */
-					CgroupPropEntry *pe = e->properties[j];
-					char *old_val = pe->value, *old_name = pe->name;
-					int ret;
-					char *pos;
-
-					/* A bit of a fudge here. These are
-					 * write only by owner by default, but
-					 * the container engine could have
-					 * changed the perms. We should come up
-					 * with a better way to restore all of
-					 * this stuff.
-					 */
-					pe->perms->mode = 0200;
-
-					pe->name = "devices.deny";
-					pe->value = "a";
-					ret = restore_cgroup_prop(e->properties[j], paux, off);
-					pe->name = old_name;
-					pe->value = old_val;
-
-					/* an emptry string here means nothing
-					 * is allowed, and the kernel disallows
-					 * writing an "" to devices.allow, so
-					 * let's just keep going.
-					 */
-					if (!strcmp(pe->value, ""))
-						continue;
-
-					if (ret < 0)
-						return -1;
-
-					pe->name = "devices.allow";
-
-					pos = pe->value;
-					while (*pos) {
-						int offset = next_device_entry(pos);
-						pe->value = pos;
-						ret = restore_cgroup_prop(pe, paux, off);
-						if (ret < 0) {
-							pe->name = old_name;
-							pe->value = old_val;
-							return -1;
-						}
-						pos += offset;
-					}
-					pe->value = old_val;
-					pe->name = old_name;
-					continue;
-
-				}
-
-				if (restore_cgroup_prop(prop, paux, off) < 0) {
-					return -1;
-				}
-			}
+		if (restore_special_property(paux, off, prop) < 0) {
+			pr_err("Restoring %s special property failed\n", prop->name);
+			return -1;
 		}
 	}
 

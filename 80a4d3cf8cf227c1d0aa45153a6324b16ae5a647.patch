@@ -1,0 +1,52 @@
+From 80a4d3cf8cf227c1d0aa45153a6324b16ae5a647 Mon Sep 17 00:00:00 2001
+From: Andrei Vagin <avagin@virtuozzo.com>
+Date: Sun, 17 Jun 2018 06:44:42 +0300
+Subject: [PATCH] bitops: use the UL literal for constants
+
+We operate by long variables in out bit arithmetics, so our constants
+should be marked as long too.
+
+Cc: Adrian Reber <areber@redhat.com>
+Reported-by: Adrian Reber <areber@redhat.com>
+Signed-off-by: Andrei Vagin <avagin@virtuozzo.com>
+Tested-by: Adrian Reber <areber@redhat.com>
+Reviewed-by: Dmitry Safonov <0x7f454c46@gmail.com>
+Signed-off-by: Andrei Vagin <avagin@virtuozzo.com>
+---
+ include/common/asm-generic/bitops.h | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/include/common/asm-generic/bitops.h b/include/common/asm-generic/bitops.h
+index cb449fbf8d..fbd25c1b6b 100644
+--- a/include/common/asm-generic/bitops.h
++++ b/include/common/asm-generic/bitops.h
+@@ -28,25 +28,25 @@
+ 
+ static inline void set_bit(int nr, volatile unsigned long *addr) {
+ 	addr += nr / BITS_PER_LONG;
+-	*addr |= (1 << (nr % BITS_PER_LONG));
++	*addr |= (1UL << (nr % BITS_PER_LONG));
+ }
+ 
+ static inline void change_bit(int nr, volatile unsigned long *addr)
+ {
+ 	addr += nr / BITS_PER_LONG;
+-	*addr ^= (1 << (nr % BITS_PER_LONG));
++	*addr ^= (1UL << (nr % BITS_PER_LONG));
+ }
+ 
+ static inline int test_bit(int nr, volatile const unsigned long *addr)
+ {
+ 	addr += nr / BITS_PER_LONG;
+-	return (*addr & (1 << (nr % BITS_PER_LONG))) ? -1 : 0;
++	return (*addr & (1UL << (nr % BITS_PER_LONG))) ? -1 : 0;
+ }
+ 
+ static inline void clear_bit(int nr, volatile unsigned long *addr)
+ {
+ 	addr += nr / BITS_PER_LONG;
+-	*addr &= ~(1 << (nr % BITS_PER_LONG));
++	*addr &= ~(1UL << (nr % BITS_PER_LONG));
+ }
+ 
+ /**

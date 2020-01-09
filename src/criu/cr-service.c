@@ -559,7 +559,7 @@ static int dump_using_req(int sk, CriuOpts *req)
 	/*
 	 * FIXME -- cr_dump_tasks() may return code from custom
 	 * scripts, that can be positive. However, right now we
-	 * don't have ability to push scripts via RPC, so psitive
+	 * don't have ability to push scripts via RPC, so positive
 	 * ret values are impossible here.
 	 */
 	if (cr_dump_tasks(req->pid))
@@ -706,12 +706,7 @@ static int pre_dump_loop(int sk, CriuReq *msg)
 	return dump_using_req(sk, msg->opts);
 }
 
-struct ps_info {
-	int pid;
-	unsigned short port;
-};
-
-static int start_page_server_req(int sk, CriuOpts *req)
+static int start_page_server_req(int sk, CriuOpts *req, bool daemon_mode)
 {
 	int ret = -1, pid, start_pipe[2];
 	ssize_t count;
@@ -736,35 +731,40 @@ static int start_page_server_req(int sk, CriuOpts *req)
 
 		pr_debug("Starting page server\n");
 
-		pid = cr_page_server(true, false, start_pipe[1]);
+		pid = cr_page_server(daemon_mode, false, start_pipe[1]);
 		if (pid < 0)
 			goto out_ch;
 
-		info.pid = pid;
-		info.port = opts.port;
+		if (daemon_mode) {
+			info.pid = pid;
+			info.port = opts.port;
 
-		count = write(start_pipe[1], &info, sizeof(info));
-		if (count != sizeof(info))
-			goto out_ch;
+			count = write(start_pipe[1], &info, sizeof(info));
+			if (count != sizeof(info))
+				goto out_ch;
+		}
 
 		ret = 0;
 out_ch:
-		if (ret < 0 && pid > 0)
+		if (daemon_mode && ret < 0 && pid > 0)
 			kill(pid, SIGKILL);
 		close(start_pipe[1]);
 		exit(ret);
 	}
 
 	close(start_pipe[1]);
-	wait(&ret);
-	if (WIFEXITED(ret)) {
-		if (WEXITSTATUS(ret)) {
-			pr_err("Child exited with an error\n");
+
+	if (daemon_mode) {
+		wait(&ret);
+		if (WIFEXITED(ret)) {
+			if (WEXITSTATUS(ret)) {
+				pr_err("Child exited with an error\n");
+				goto out;
+			}
+		} else {
+			pr_err("Child wasn't terminated normally\n");
 			goto out;
 		}
-	} else {
-		pr_err("Child wasn't terminated normally\n");
-		goto out;
 	}
 
 	count = read(start_pipe[0], &info, sizeof(info));
@@ -772,11 +772,12 @@ out_ch:
 	if (count != sizeof(info))
 		goto out;
 
-	success = true;
-	ps.has_pid = true;
 	ps.pid = info.pid;
 	ps.has_port = true;
 	ps.port = info.port;
+
+	success = true;
+	ps.has_pid = true;
 	resp.ps = &ps;
 
 	pr_debug("Page server started\n");
@@ -801,6 +802,9 @@ static int chk_keepopen_req(CriuReq *msg)
 	 */
 
 	if (msg->type == CRIU_REQ_TYPE__PAGE_SERVER)
+		/* This just fork()-s so no leaks */
+		return 0;
+	if (msg->type == CRIU_REQ_TYPE__PAGE_SERVER_CHLD)
 		/* This just fork()-s so no leaks */
 		return 0;
 	else if (msg->type == CRIU_REQ_TYPE__CPUINFO_DUMP ||
@@ -895,7 +899,7 @@ static int handle_feature_check(int sk, CriuReq * msg)
 		/*
 		 * If this point is reached the information about the features
 		 * is transmitted from the forked CRIU process (here).
-		 * If an error occured earlier, the feature check response will be
+		 * If an error occurred earlier, the feature check response will be
 		 * be send from the parent process.
 		 */
 		ret = send_criu_msg(sk, &resp);
@@ -921,6 +925,29 @@ static int handle_feature_check(int sk, CriuReq * msg)
 out:
 	resp.type = msg->type;
 	resp.success = false;
+
+	return send_criu_msg(sk, &resp);
+}
+
+static int handle_wait_pid(int sk, int pid)
+{
+	CriuResp resp = CRIU_RESP__INIT;
+	bool success = false;
+	int status;
+
+	if (waitpid(pid, &status, 0) == -1) {
+		resp.cr_errno = errno;
+		pr_perror("Unable to wait %d", pid);
+		goto out;
+	}
+
+	resp.status = status;
+	resp.has_status = true;
+
+	success = true;
+out:
+	resp.type = CRIU_REQ_TYPE__WAIT_PID;
+	resp.success = success;
 
 	return send_criu_msg(sk, &resp);
 }
@@ -1010,7 +1037,13 @@ more:
 		ret = pre_dump_loop(sk, msg);
 		break;
 	case CRIU_REQ_TYPE__PAGE_SERVER:
-		ret =  start_page_server_req(sk, msg->opts);
+		ret = start_page_server_req(sk, msg->opts, true);
+		break;
+	case CRIU_REQ_TYPE__PAGE_SERVER_CHLD:
+		ret = start_page_server_req(sk, msg->opts, false);
+		break;
+	case CRIU_REQ_TYPE__WAIT_PID:
+		ret =  handle_wait_pid(sk, msg->pid);
 		break;
 	case CRIU_REQ_TYPE__CPUINFO_DUMP:
 	case CRIU_REQ_TYPE__CPUINFO_CHECK:

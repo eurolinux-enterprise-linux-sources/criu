@@ -19,6 +19,9 @@
 #define NT_PRFPREG		2
 #define NT_S390_VXRS_LOW	0x309
 #define NT_S390_VXRS_HIGH	0x30a
+#define NT_S390_GS_CB		0x30b
+#define NT_S390_GS_BC		0x30c
+#define NT_S390_RI_CB		0x30d
 
 /*
  * Print general purpose and access registers
@@ -40,17 +43,12 @@ static void print_user_regs_struct(const char *msg, int pid,
 }
 
 /*
- * Print floating point and vector registers
+ * Print vector registers
  */
-static void print_user_fpregs_struct(const char *msg, int pid,
-				     user_fpregs_struct_t *fpregs)
+static void print_vxrs(user_fpregs_struct_t *fpregs)
 {
 	int i;
 
-	pr_debug("%s: FP registers for pid=%d\n", msg, pid);
-	pr_debug("       fpc %08x\n", fpregs->prfpreg.fpc);
-	for (i = 0; i < 16; i++)
-		pr_debug("       f%02d %016lx\n", i, fpregs->prfpreg.fprs[i]);
 	if (!(fpregs->flags & USER_FPREGS_VXRS)) {
 		pr_debug("       No VXRS\n");
 		return;
@@ -61,6 +59,70 @@ static void print_user_fpregs_struct(const char *msg, int pid,
 		pr_debug(" vx_high%02d %016lx %016lx\n", i,
 			 fpregs->vxrs_high[i].part1,
 			 fpregs->vxrs_high[i].part2);
+}
+
+/*
+ * Print guarded-storage control block
+ */
+static void print_gs_cb(user_fpregs_struct_t *fpregs)
+{
+	int i;
+
+	if (!(fpregs->flags & USER_GS_CB)) {
+		pr_debug("       No GS_CB\n");
+		return;
+	}
+	for (i = 0; i < 4; i++)
+		pr_debug("  gs_cb%02d %016lx\n", i, fpregs->gs_cb[i]);
+}
+
+/*
+ * Print guarded-storage broadcast control block
+ */
+static void print_gs_bc(user_fpregs_struct_t *fpregs)
+{
+	int i;
+
+	if (!(fpregs->flags & USER_GS_BC)) {
+		pr_debug("       No GS_BC\n");
+		return;
+	}
+	for (i = 0; i < 4; i++)
+		pr_debug("  gs_bc%02d %016lx\n", i, fpregs->gs_bc[i]);
+}
+
+/*
+ * Print runtime-instrumentation control block
+ */
+static void print_ri_cb(user_fpregs_struct_t *fpregs)
+{
+	int i;
+
+	if (!(fpregs->flags & USER_RI_CB)) {
+		pr_debug("       No RI_CB\n");
+		return;
+	}
+	for (i = 0; i < 8; i++)
+		pr_debug("  ri_cb%02d %016lx\n", i, fpregs->ri_cb[i]);
+}
+
+/*
+ * Print FP registers, VX registers, guarded-storage, and
+ * runtime-instrumentation
+ */
+static void print_user_fpregs_struct(const char *msg, int pid,
+				     user_fpregs_struct_t *fpregs)
+{
+	int i;
+
+	pr_debug("%s: FP registers for pid=%d\n", msg, pid);
+	pr_debug("       fpc %08x\n", fpregs->prfpreg.fpc);
+	for (i = 0; i < 16; i++)
+		pr_debug("       f%02d %016lx\n", i, fpregs->prfpreg.fprs[i]);
+	print_vxrs(fpregs);
+	print_gs_cb(fpregs);
+	print_gs_bc(fpregs);
+	print_ri_cb(fpregs);
 }
 
 int sigreturn_prep_regs_plain(struct rt_sigframe *sigframe,
@@ -148,12 +210,109 @@ int get_vx_regs(pid_t pid, user_fpregs_struct_t *fpregs)
 	return 0;
 }
 
+/*
+ * Get guarded-storage control block
+ */
+int get_gs_cb(pid_t pid, user_fpregs_struct_t *fpregs)
+{
+	struct iovec iov;
+
+	fpregs->flags &= ~(USER_GS_CB | USER_GS_BC);
+	iov.iov_base = &fpregs->gs_cb;
+	iov.iov_len = sizeof(fpregs->gs_cb);
+	if (ptrace(PTRACE_GETREGSET, pid, NT_S390_GS_CB, &iov) < 0) {
+		switch (errno) {
+		case EINVAL:
+		case ENODEV:
+			memset(&fpregs->gs_cb, 0, sizeof(fpregs->gs_cb));
+			memset(&fpregs->gs_bc, 0, sizeof(fpregs->gs_bc));
+			pr_debug("GS_CB not supported\n");
+			return 0;
+		case ENODATA:
+			pr_debug("GS_CB not set\n");
+			break;
+		default:
+			return -1;
+		}
+	} else {
+		fpregs->flags |= USER_GS_CB;
+	}
+	iov.iov_base = &fpregs->gs_bc;
+	iov.iov_len = sizeof(fpregs->gs_bc);
+	if (ptrace(PTRACE_GETREGSET, pid, NT_S390_GS_BC, &iov) < 0) {
+		if (errno == ENODATA) {
+			pr_debug("GS_BC not set\n");
+			return 0;
+		}
+		pr_perror("Couldn't get GS_BC\n");
+		return -1;
+	}
+	fpregs->flags |= USER_GS_BC;
+
+	return 0;
+}
+
+/*
+ * Get runtime-instrumentation control block
+ */
+int get_ri_cb(pid_t pid, user_fpregs_struct_t *fpregs)
+{
+	user_regs_struct_t regs;
+	struct iovec iov;
+	psw_t *psw;
+
+	fpregs->flags &= ~(USER_RI_CB | USER_RI_ON);
+	iov.iov_base = &fpregs->ri_cb;
+	iov.iov_len = sizeof(fpregs->ri_cb);
+	if (ptrace(PTRACE_GETREGSET, pid, NT_S390_RI_CB, &iov) < 0) {
+		switch (errno) {
+		case EINVAL:
+		case ENODEV:
+			memset(&fpregs->ri_cb, 0, sizeof(fpregs->ri_cb));
+			pr_debug("RI_CB not supported\n");
+			return 0;
+		case ENODATA:
+			pr_debug("RI_CB not set\n");
+			return 0;
+		default:
+			pr_perror("Couldn't get RI_CB\n");
+			return -1;
+		}
+	}
+	fpregs->flags |= USER_RI_CB;
+
+	/* Get PSW and check if runtime-instrumentation bit is enabled */
+	iov.iov_base = &regs.prstatus;
+	iov.iov_len = sizeof(regs.prstatus);
+	if (ptrace(PTRACE_GETREGSET, pid, NT_PRSTATUS, &iov) < 0)
+		return -1;
+	psw = &regs.prstatus.psw;
+	if (psw->mask & PSW_MASK_RI)
+		fpregs->flags |= USER_RI_ON;
+
+	return 0;
+}
+
+/*
+ * Disable runtime-instrumentation bit
+ */
+static int s390_disable_ri_bit(pid_t pid, user_regs_struct_t *regs)
+{
+	struct iovec iov;
+	psw_t *psw;
+
+	iov.iov_base = &regs->prstatus;
+	iov.iov_len = sizeof(regs->prstatus);
+	psw = &regs->prstatus.psw;
+	psw->mask &= ~PSW_MASK_RI;
+	return ptrace(PTRACE_SETREGSET, pid, NT_PRSTATUS, &iov);
+}
 
 /*
  * Prepare task registers for restart
  */
 int get_task_regs(pid_t pid, user_regs_struct_t *regs, save_regs_t save,
-		  void *arg)
+		  void *arg, __maybe_unused unsigned long flags)
 {
 	user_fpregs_struct_t fpregs;
 	struct iovec iov;
@@ -172,6 +331,22 @@ int get_task_regs(pid_t pid, user_regs_struct_t *regs, save_regs_t save,
 		pr_perror("Couldn't get vector registers");
 		return -1;
 	}
+	if (get_gs_cb(pid, &fpregs)) {
+		pr_perror("Couldn't get guarded-storage");
+		return -1;
+	}
+	if (get_ri_cb(pid, &fpregs)) {
+		pr_perror("Couldn't get runtime-instrumentation");
+		return -1;
+	}
+	/*
+	 * If the runtime-instrumentation bit is set, we have to disable it
+	 * before we execute parasite code. Otherwise parasite operations
+	 * would be recorded.
+	 */
+	if (fpregs.flags & USER_RI_ON)
+		s390_disable_ri_bit(pid, regs);
+
 	print_user_fpregs_struct("get_task_regs", pid, &fpregs);
 	/* Check for system call restarting. */
 	if (regs->system_call) {
@@ -303,10 +478,11 @@ void parasite_setup_regs(unsigned long new_ip, void *stack,
 }
 
 /*
- * We don't support 24 and 31 bit mode - only 64 bit
+ * Check if we have all kernel and CRIU features to dump the task
  */
 bool arch_can_dump_task(struct parasite_ctl *ctl)
 {
+	user_fpregs_struct_t fpregs;
 	user_regs_struct_t regs;
 	pid_t pid = ctl->rpid;
 	char str[8];
@@ -315,6 +491,14 @@ bool arch_can_dump_task(struct parasite_ctl *ctl)
 	if (ptrace_get_regs(pid, &regs))
 		return false;
 	psw = &regs.prstatus.psw;
+	/* Check if the kernel supports RI ptrace interface */
+	if (psw->mask & PSW_MASK_RI) {
+		if (get_ri_cb(pid, &fpregs) < 0) {
+			pr_perror("Can't dump process with RI bit active");
+			return -1;
+		}
+	}
+	/* We don't support 24 and 31 bit mode - only 64 bit */
 	if (psw->mask & PSW_MASK_EA) {
 		if (psw->mask & PSW_MASK_BA)
 			return true;

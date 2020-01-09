@@ -5,6 +5,7 @@
 #include <sys/wait.h>
 #include <sys/mman.h>
 
+#include "common/config.h"
 #include "common/compiler.h"
 #include "types.h"
 #include "protobuf.h"
@@ -20,7 +21,6 @@
 #include "crtools.h"
 #include "namespaces.h"
 #include "kerndat.h"
-#include "config.h"
 #include "pstree.h"
 #include "posix-timer.h"
 #include "mem.h"
@@ -511,6 +511,8 @@ struct parasite_ctl *parasite_infect_seized(pid_t pid, struct pstree_item *item,
 		ictx->flags |= INFECT_NO_BREAKPOINTS;
 	if (kdat.compat_cr)
 		ictx->flags |= INFECT_COMPATIBLE;
+	if (kdat.x86_has_ptrace_fpu_xsave_bug)
+		ictx->flags |= INFECT_X86_PTRACE_MXCSR_BUG;
 
 	ictx->log_fd = log_get_fd();
 

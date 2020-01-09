@@ -98,6 +98,11 @@ static int prepare_mntns(void)
 		return -1;
 	}
 
+	if (mount("zdtm_run", "/run", "tmpfs", 0, NULL)) {
+		fprintf(stderr, "Unable to mount /run: %m\n");
+		return -1;
+	}
+
 	if (umount2("./old", MNT_DETACH)) {
 		fprintf(stderr, "umount(./old) failed: %m\n");
 		return -1;
@@ -350,7 +355,7 @@ int ns_init(int argc, char **argv)
 	exit(1);
 }
 
-#define UID_MAP "0 100000 100000\n100000 200000 50000"
+#define UID_MAP "0 20000 20000\n100000 200000 50000"
 #define GID_MAP "0 400000 50000\n50000 500000 100000"
 void ns_create(int argc, char **argv)
 {

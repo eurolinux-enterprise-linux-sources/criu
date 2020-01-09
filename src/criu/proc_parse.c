@@ -40,6 +40,7 @@
 #include "cgroup-props.h"
 #include "timerfd.h"
 #include "path.h"
+#include "fault-injection.h"
 
 #include "protobuf.h"
 #include "images/fdinfo.pb-c.h"
@@ -310,8 +311,12 @@ static int vma_get_mapfile_user(const char *fname, struct vma_area *vma,
 		vma->e->status |= VMA_ANON_SHARED;
 		vma->e->shmid = vfi->ino;
 
-		if (!strncmp(fname, "/SYSV", 5))
+		if (!strncmp(fname, "/SYSV", 5)) {
 			vma->e->status |= VMA_AREA_SYSVIPC;
+		} else {
+			if (fault_injected(FI_HUGE_ANON_SHMEM_ID))
+				vma->e->shmid += FI_HUGE_ANON_SHMEM_ID_BASE;
+		}
 
 		return 0;
 	}
@@ -598,6 +603,9 @@ static int handle_vma(pid_t pid, struct vma_area *vma_area,
 			if (!strncmp(file_path, "/SYSV", 5)) {
 				pr_info("path: %s\n", file_path);
 				vma_area->e->status |= VMA_AREA_SYSVIPC;
+			} else {
+				if (fault_injected(FI_HUGE_ANON_SHMEM_ID))
+					vma_area->e->shmid += FI_HUGE_ANON_SHMEM_ID_BASE;
 			}
 		} else {
 			if (vma_area->e->flags & MAP_PRIVATE)
@@ -1637,7 +1645,7 @@ static int parse_fdinfo_pid_s(int pid, int fd, int type, void *arg)
 	struct bfd f;
 	char *str;
 	bool entry_met = false;
-	int ret, exit_code = -1;;
+	int ret, exit_code = -1;
 
 	f.fd = open_proc(pid, "fdinfo/%d", fd);
 	if (f.fd < 0)
@@ -1707,6 +1715,7 @@ static int parse_fdinfo_pid_s(int pid, int fd, int type, void *arg)
 			}
 
 			fl->real_owner = fdinfo->owner;
+			fl->fl_holder = pid;
 			fl->owners_fd = fd;
 			list_add_tail(&fl->list, &file_lock_list);
 		}
@@ -2006,8 +2015,14 @@ static int parse_file_lock_buf(char *buf, struct file_lock *fl,
 		fl->fl_kind = FL_FLOCK;
 	else if (!strcmp(fl_flag, "OFDLCK"))
 		fl->fl_kind = FL_OFD;
+	else if (!strcmp(fl_flag, "LEASE"))
+		fl->fl_kind = FL_LEASE;
 	else
 		fl->fl_kind = FL_UNKNOWN;
+
+	if (fl->fl_kind == FL_LEASE && !strcmp(fl_type, "BREAKING")) {
+		fl->fl_ltype |= LEASE_BREAKING;
+	}
 
 	if (!strcmp(fl_type, "MSNFS")) {
 		fl->fl_ltype |= LOCK_MAND;

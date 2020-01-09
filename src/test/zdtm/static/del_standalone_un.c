@@ -25,7 +25,7 @@ static int fill_sock_name(struct sockaddr_un *name, const char *filename)
 		return -1;
 
 	name->sun_family = AF_LOCAL;
-	sprintf(name->sun_path, "%s/%s", cwd, filename);
+	ssprintf(name->sun_path, "%s/%s", cwd, filename);
 	return 0;
 }
 
@@ -39,7 +39,7 @@ static int bind_and_listen(struct sockaddr_un *addr)
 		return -1;
 	}
 
-	if (bind(sk, addr, sizeof(*addr))) {
+	if (bind(sk, (struct sockaddr *) addr, sizeof(*addr))) {
 		fail("bind %s", addr->sun_path);
 		close(sk);
 		return -1;

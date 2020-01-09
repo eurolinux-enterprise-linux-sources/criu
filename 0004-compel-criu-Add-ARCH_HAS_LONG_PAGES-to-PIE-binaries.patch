@@ -1,0 +1,215 @@
+From 0f98ee4641458301a3bbe49c88df381edaea93dc Mon Sep 17 00:00:00 2001
+From: Dmitry Safonov <dima@arista.com>
+Date: Thu, 10 May 2018 19:14:44 +0100
+Subject: [PATCH 4/8] compel/criu: Add ARCH_HAS_LONG_PAGES to PIE binaries
+
+For architectures like aarch64/ppc64 it's needed to propagate the size
+of page inside PIEs. For the parasite page size will be defined during
+seizing, and for restorer during early initialization.
+Afterward we can use PAGE_SIZE in PIEs like we did before.
+
+Signed-off-by: Dmitry Safonov <dima@arista.com>
+Signed-off-by: Andrei Vagin <avagin@virtuozzo.com>
+---
+ compel/include/rpc-pie-priv.h          |  3 +++
+ compel/plugins/std/infect.c            | 17 +++++++++++++++++
+ compel/src/lib/infect.c                |  3 +++
+ criu/cr-restore.c                      |  3 +++
+ criu/include/restorer.h                |  3 +++
+ criu/pie/restorer.c                    | 16 ++++++++++++++++
+ include/common/arch/aarch64/asm/page.h |  9 +++++++++
+ include/common/arch/ppc64/asm/page.h   |  9 +++++++++
+ 8 files changed, 63 insertions(+)
+
+diff --git a/compel/include/rpc-pie-priv.h b/compel/include/rpc-pie-priv.h
+index f25ca89eb..15f5b14ca 100644
+--- a/compel/include/rpc-pie-priv.h
++++ b/compel/include/rpc-pie-priv.h
+@@ -38,6 +38,9 @@ struct parasite_init_args {
+ 	uint64_t			sigreturn_addr;
+ 	uint64_t			sigframe; /* pointer to sigframe */
+ 	futex_t				daemon_connected;
++#ifdef ARCH_HAS_LONG_PAGES
++	uint32_t			page_size;
++#endif
+ };
+ 
+ struct parasite_unmap_args {
+diff --git a/compel/plugins/std/infect.c b/compel/plugins/std/infect.c
+index 2d3aa3df8..d5e1b4354 100644
+--- a/compel/plugins/std/infect.c
++++ b/compel/plugins/std/infect.c
+@@ -3,6 +3,7 @@
+ #include "common/scm.h"
+ #include "common/compiler.h"
+ #include "common/lock.h"
++#include "common/page.h"
+ 
+ #define pr_err(fmt, ...)	print_on_level(1, fmt, ##__VA_ARGS__)
+ #define pr_info(fmt, ...)	print_on_level(3, fmt, ##__VA_ARGS__)
+@@ -19,6 +20,19 @@ static int tsock = -1;
+ 
+ static struct rt_sigframe *sigframe;
+ 
++#ifdef ARCH_HAS_LONG_PAGES
++/*
++ * XXX: Make it compel's std plugin global variable. Drop parasite_size().
++ * Hint: compel on aarch64 shall learn relocs for that.
++ */
++static unsigned __page_size;
++
++unsigned __attribute((weak)) page_size(void)
++{
++	return __page_size;
++}
++#endif
++
+ int parasite_get_rpc_sock(void)
+ {
+ 	return tsock;
+@@ -142,6 +156,9 @@ static noinline __used int parasite_init_daemon(void *data)
+ 
+ 	args->sigreturn_addr = (uint64_t)(uintptr_t)fini_sigreturn;
+ 	sigframe = (void*)(uintptr_t)args->sigframe;
++#ifdef ARCH_HAS_LONG_PAGES
++	__page_size = args->page_size;
++#endif
+ 
+ 	ret = tsock = sys_socket(PF_UNIX, SOCK_SEQPACKET, 0);
+ 	if (tsock < 0) {
+diff --git a/compel/src/lib/infect.c b/compel/src/lib/infect.c
+index ecc6599b1..d51b8aa88 100644
+--- a/compel/src/lib/infect.c
++++ b/compel/src/lib/infect.c
+@@ -613,6 +613,9 @@ static int parasite_init_daemon(struct parasite_ctl *ctl)
+ 
+ 	args->sigframe = (uintptr_t)ctl->rsigframe;
+ 	args->log_level = compel_log_get_loglevel();
++#ifdef ARCH_HAS_LONG_PAGES
++	args->page_size = PAGE_SIZE;
++#endif
+ 
+ 	futex_set(&args->daemon_connected, 0);
+ 
+diff --git a/criu/cr-restore.c b/criu/cr-restore.c
+index 54216b8ea..8a436cc98 100644
+--- a/criu/cr-restore.c
++++ b/criu/cr-restore.c
+@@ -3650,6 +3650,9 @@ static int sigreturn_restore(pid_t pid, struct task_restore_args *task_args, uns
+ 	task_args->premmapped_len = rsti(current)->premmapped_len;
+ 
+ 	task_args->task_size = kdat.task_size;
++#ifdef ARCH_HAS_LONG_PAGES
++	task_args->page_size = PAGE_SIZE;
++#endif
+ 
+ 	RST_MEM_FIXUP_PPTR(task_args->vmas);
+ 	RST_MEM_FIXUP_PPTR(task_args->rings);
+diff --git a/criu/include/restorer.h b/criu/include/restorer.h
+index 15307d9c0..70223be55 100644
+--- a/criu/include/restorer.h
++++ b/criu/include/restorer.h
+@@ -209,6 +209,9 @@ struct task_restore_args {
+ 	void				**breakpoint;
+ 
+ 	enum faults			fault_strategy;
++#ifdef ARCH_HAS_LONG_PAGES
++	unsigned			page_size;
++#endif
+ } __aligned(64);
+ 
+ /*
+diff --git a/criu/pie/restorer.c b/criu/pie/restorer.c
+index 69f8504e3..da20f3298 100644
+--- a/criu/pie/restorer.c
++++ b/criu/pie/restorer.c
+@@ -36,6 +36,7 @@
+ #include "uffd.h"
+ 
+ #include "common/lock.h"
++#include "common/page.h"
+ #include "restorer.h"
+ #include "aio.h"
+ #include "seccomp.h"
+@@ -76,6 +77,18 @@ bool fault_injected(enum faults f)
+ 	return __fault_injected(f, fi_strategy);
+ }
+ 
++#ifdef ARCH_HAS_LONG_PAGES
++/*
++ * XXX: Make it compel's std plugin global variable. Drop parasite_size().
++ * Hint: compel on aarch64 shall learn relocs for that.
++ */
++static unsigned __page_size;
++unsigned page_size(void)
++{
++	return __page_size;
++}
++#endif
++
+ /*
+  * These are stubs for std compel plugin.
+  */
+@@ -1230,6 +1243,9 @@ long __export_restore_task(struct task_restore_args *args)
+ 	zombies = args->zombies;
+ 	n_zombies = args->zombies_n;
+ 	*args->breakpoint = rst_sigreturn;
++#ifdef ARCH_HAS_LONG_PAGES
++	__page_size = args->page_size;
++#endif
+ 
+ 	ksigfillset(&act.rt_sa_mask);
+ 	act.rt_sa_handler = sigchld_handler;
+diff --git a/include/common/arch/aarch64/asm/page.h b/include/common/arch/aarch64/asm/page.h
+index de1fe5428..4126c8474 100644
+--- a/include/common/arch/aarch64/asm/page.h
++++ b/include/common/arch/aarch64/asm/page.h
+@@ -1,6 +1,9 @@
+ #ifndef __CR_ASM_PAGE_H__
+ #define __CR_ASM_PAGE_H__
+ 
++#define ARCH_HAS_LONG_PAGES
++
++#ifndef CR_NOGLIBC
+ #include <unistd.h>
+ 
+ #ifndef PAGE_SHIFT
+@@ -18,4 +21,10 @@
+ #define PAGE_PFN(addr)	((addr) / PAGE_SIZE)
+ #define page_size()	sysconf(_SC_PAGESIZE)
+ 
++#else /* CR_NOGLIBC */
++
++extern unsigned page_size(void);
++#define PAGE_SIZE page_size()
++
++#endif /* CR_NOGLIBC */
+ #endif /* __CR_ASM_PAGE_H__ */
+diff --git a/include/common/arch/ppc64/asm/page.h b/include/common/arch/ppc64/asm/page.h
+index 9d10455f1..a95af55ef 100644
+--- a/include/common/arch/ppc64/asm/page.h
++++ b/include/common/arch/ppc64/asm/page.h
+@@ -1,6 +1,9 @@
+ #ifndef __CR_ASM_PAGE_H__
+ #define __CR_ASM_PAGE_H__
+ 
++#define ARCH_HAS_LONG_PAGES
++
++#ifndef CR_NOGLIBC
+ #include <unistd.h>
+ 
+ /*
+@@ -22,4 +25,10 @@
+ #define PAGE_PFN(addr)	((addr) / PAGE_SIZE)
+ #define page_size()	sysconf(_SC_PAGESIZE)
+ 
++#else /* CR_NOGLIBC */
++
++extern unsigned page_size(void);
++#define PAGE_SIZE page_size()
++
++#endif /* CR_NOGLIBC */
+ #endif /* __CR_ASM_PAGE_H__ */
+-- 
+2.17.0
+

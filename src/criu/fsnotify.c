@@ -35,6 +35,7 @@
 #include "files-reg.h"
 #include "file-ids.h"
 #include "criu-log.h"
+#include "kerndat.h"
 #include "common/list.h"
 #include "common/lock.h"
 #include "irmap.h"
@@ -196,6 +197,7 @@ err:
 static int open_handle(unsigned int s_dev, unsigned long i_ino,
 		FhEntry *f_handle)
 {
+	struct mount_info *m;
 	int mntfd, fd = -1;
 	fh_t handle;
 
@@ -204,19 +206,23 @@ static int open_handle(unsigned int s_dev, unsigned long i_ino,
 	pr_debug("Opening fhandle %x:%Lx...\n",
 			s_dev, (unsigned long long)handle.__handle[0]);
 
-	mntfd = open_mount(s_dev);
-	if (mntfd < 0) {
-		pr_err("Mount root for %#08x not found\n", s_dev);
-		goto out;
-	}
+	for (m = mntinfo; m; m = m->next) {
+		if (m->s_dev != s_dev || !mnt_is_dir(m))
+			continue;
 
-	fd = userns_call(open_by_handle, UNS_FDOUT, &handle, sizeof(handle), mntfd);
-	if (fd < 0) {
-		pr_perror("Can't open file handle for %#08x:%#016lx",
-				s_dev, i_ino);
-	}
+		mntfd = __open_mountpoint(m, -1);
+		if (mntfd < 0) {
+			pr_err("Can't open mount for s_dev %x, continue\n", s_dev);
+			continue;
+		}
 
-	close(mntfd);
+		fd = userns_call(open_by_handle, UNS_FDOUT, &handle, sizeof(handle), mntfd);
+		if (fd >= 0) {
+			close(mntfd);
+			goto out;
+		}
+		close(mntfd);
+	}
 out:
 	return fd;
 }
@@ -551,21 +557,30 @@ static int restore_one_inotify(int inotify_fd, struct fsnotify_mark_info *info)
 	InotifyWdEntry *iwe = info->iwe;
 	int ret = -1, target = -1;
 	char buf[PSFDS], *path;
+	uint32_t mask;
 
 	path = get_mark_path("inotify", info->remap, iwe->f_handle,
 			     iwe->i_ino, iwe->s_dev, buf, &target);
 	if (!path)
 		goto err;
 
-	/*
-	 * FIXME The kernel allocates wd-s sequentially,
-	 * this is suboptimal, but the kernel doesn't
-	 * provide and API for this yet :(
-	 */
+	mask = iwe->mask & IN_ALL_EVENTS;
+	if (iwe->mask & ~IN_ALL_EVENTS) {
+		pr_info("\t\tfilter event mask %#x -> %#x\n",
+			iwe->mask, mask);
+	}
+
+	if (kdat.has_inotify_setnextwd) {
+		if (ioctl(inotify_fd, INOTIFY_IOC_SETNEXTWD, iwe->wd)) {
+			pr_perror("Can't set next inotify wd");
+			return -1;
+		}
+	}
+
 	while (1) {
 		int wd;
 
-		wd = inotify_add_watch(inotify_fd, path, iwe->mask);
+		wd = inotify_add_watch(inotify_fd, path, mask);
 		if (wd < 0) {
 			pr_perror("Can't add watch for 0x%x with 0x%x", inotify_fd, iwe->wd);
 			break;
@@ -577,7 +592,9 @@ static int restore_one_inotify(int inotify_fd, struct fsnotify_mark_info *info)
 			break;
 		}
 
-		pr_debug("\t\tWatch got 0x%x but 0x%x expected\n", wd, iwe->wd);
+		if (kdat.has_inotify_setnextwd)
+			return -1;
+
 		inotify_rm_watch(inotify_fd, wd);
 	}
 
@@ -675,8 +692,9 @@ static int open_inotify_fd(struct file_desc *d, int *new_fd)
 		pr_info("\tRestore 0x%x wd for %#08x\n", wd_info->iwe->wd, wd_info->iwe->id);
 		if (restore_one_inotify(tmp, wd_info)) {
 			close_safe(&tmp);
-			break;
+			return -1;
 		}
+		pr_info("\t 0x%x wd for %#08x is restored\n", wd_info->iwe->wd, wd_info->iwe->id);
 	}
 
 	if (restore_fown(tmp, info->ife->fown))
@@ -711,7 +729,7 @@ static int open_fanotify_fd(struct file_desc *d, int *new_fd)
 		pr_info("\tRestore fanotify for %#08x\n", mark->fme->id);
 		if (restore_one_fanotify(ret, mark)) {
 			close_safe(&ret);
-			break;
+			return -1;
 		}
 	}
 

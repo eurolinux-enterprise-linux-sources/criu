@@ -91,7 +91,7 @@ DEFINES			+= -D_GNU_SOURCE
 
 WARNINGS		:= -Wall -Wformat-security
 
-CFLAGS-GCOV		:= --coverage -fno-exceptions -fno-inline
+CFLAGS-GCOV		:= --coverage -fno-exceptions -fno-inline -fprofile-update=atomic
 export CFLAGS-GCOV
 
 ifneq ($(GCOV),)
@@ -181,7 +181,7 @@ criu-deps	+= include/common/asm
 
 #
 # Configure variables.
-export CONFIG_HEADER := criu/include/config.h
+export CONFIG_HEADER := include/common/config.h
 ifeq ($(filter tags etags cscope clean mrproper,$(MAKECMDGOALS)),)
 include Makefile.config
 else
@@ -195,8 +195,6 @@ endif
 $(eval $(call gen-built-in,images))
 criu-deps	+= images/built-in.o
 
-.PHONY: .FORCE
-
 #
 # Compel get used by CRIU, build it earlier
 include Makefile.compel
@@ -205,13 +203,10 @@ include Makefile.compel
 # Next the socket CR library
 #
 SOCCR_A := soccr/libsoccr.a
-SOCCR_CONFIG := soccr/config.h
-$(SOCCR_CONFIG): $(CONFIG_HEADER)
-	$(Q) test -f $@ || ln -s ../$(CONFIG_HEADER) $@
 soccr/Makefile: ;
-soccr/%: $(SOCCR_CONFIG) .FORCE
+soccr/%: $(CONFIG_HEADER) .FORCE
 	$(Q) $(MAKE) $(build)=soccr $@
-soccr/built-in.o: $(SOCCR_CONFIG) .FORCE
+soccr/built-in.o: $(CONFIG_HEADER) .FORCE
 	$(Q) $(MAKE) $(build)=soccr all
 $(SOCCR_A): |soccr/built-in.o
 criu-deps	+= $(SOCCR_A)
@@ -264,7 +259,6 @@ clean: clean-top
 
 mrproper-top: clean-top
 	$(Q) $(RM) $(CONFIG_HEADER)
-	$(Q) $(RM) $(SOCCR_CONFIG)
 	$(Q) $(RM) $(VERSION_HEADER)
 	$(Q) $(RM) $(COMPEL_VERSION_HEADER)
 	$(Q) $(RM) include/common/asm
@@ -284,11 +278,11 @@ docs:
 .PHONY: docs
 
 zdtm: all
-	$(Q) MAKEFLAGS= $(MAKE) -C test/zdtm all
+	$(Q) $(MAKE) -C test/zdtm all
 .PHONY: zdtm
 
 test: zdtm
-	$(Q) MAKEFLAGS= $(MAKE) -C test
+	$(Q) $(MAKE) -C test
 .PHONY: test
 
 #

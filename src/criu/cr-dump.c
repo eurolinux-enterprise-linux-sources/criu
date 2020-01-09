@@ -86,8 +86,13 @@
 /*
  * Architectures can overwrite this function to restore register sets that
  * are not covered by ptrace_set/get_regs().
+ *
+ * with_threads = false: Only the register sets of the tasks are restored
+ * with_threads = true : The register sets of the tasks with all their threads
+ *			 are restored
  */
-int __attribute__((weak)) arch_set_thread_regs(struct pstree_item *item)
+int __attribute__((weak)) arch_set_thread_regs(struct pstree_item *item,
+					       bool with_threads)
 {
 	return 0;
 }
@@ -1093,7 +1098,7 @@ static int dump_zombies(void)
 		return -1;
 
 	/*
-	 * We dump zombies separately becase for pid-ns case
+	 * We dump zombies separately because for pid-ns case
 	 * we'd have to resolve their pids w/o parasite via
 	 * target ns' proc.
 	 */
@@ -1281,7 +1286,7 @@ static int dump_one_task(struct pstree_item *item)
 
 	if (fault_injected(FI_DUMP_EARLY)) {
 		pr_info("fault: CRIU sudden detach\n");
-		BUG();
+		kill(getpid(), SIGKILL);
 	}
 
 	if (root_ns_mask & CLONE_NEWPID && root_item == item) {
@@ -1468,12 +1473,15 @@ static int cr_pre_dump_finish(int ret)
 {
 	struct pstree_item *item;
 
+	/*
+	 * Restore registers for tasks only. The threads have not been
+	 * infected. Therefore, the thread register sets have not been changed.
+	 */
+	if (arch_set_thread_regs(root_item, false) < 0)
+		goto err;
 	pstree_switch_state(root_item, TASK_ALIVE);
 
 	timing_stop(TIME_FROZEN);
-
-	if (ret < 0)
-		goto err;
 
 	pr_info("Pre-dumping tasks' memory\n");
 	for_each_pstree_item(item) {
@@ -1658,18 +1666,18 @@ static int cr_dump_finish(int ret)
 	 *  - error happened during checkpoint: just clean up
 	 *    everything and continue execution of the dumpee;
 	 *
-	 *  - dump successed but post-dump script returned
+	 *  - dump succeeded but post-dump script returned
 	 *    some ret code: same as in previous scenario --
 	 *    just clean up everything and continue execution,
 	 *    we will return script ret code back to criu caller
 	 *    and it's up to a caller what to do with running instance
 	 *    of the dumpee -- either kill it, or continue running;
 	 *
-	 *  - dump successed but -R option passed, pointing that
+	 *  - dump succeeded but -R option passed, pointing that
 	 *    we're asked to continue execution of the dumpee. It's
 	 *    assumed that a user will use post-dump script to keep
 	 *    consistency of the FS and other resources, we simply
-	 *    start rollback procedure and cleanup everyhting.
+	 *    start rollback procedure and cleanup everything.
 	 */
 	if (ret || post_dump_ret || opts.final_state == TASK_ALIVE) {
 		network_unlock();
@@ -1680,7 +1688,8 @@ static int cr_dump_finish(int ret)
 	if (!ret && opts.lazy_pages)
 		ret = cr_lazy_mem_dump();
 
-	arch_set_thread_regs(root_item);
+	if (arch_set_thread_regs(root_item, true) < 0)
+		return -1;
 	pstree_switch_state(root_item,
 			    (ret || post_dump_ret) ?
 			    TASK_ALIVE : opts.final_state);
@@ -1822,15 +1831,21 @@ int cr_dump_tasks(pid_t pid)
 	if (dump_pstree(root_item))
 		goto err;
 
+	/*
+	 * TODO: cr_dump_shmem has to be called before dump_namespaces(),
+	 * because page_ids is a global variable and it is used to dump
+	 * ipc shared memory, but an ipc namespace is dumped in a child
+	 * process.
+	 */
+	ret = cr_dump_shmem();
+	if (ret)
+		goto err;
+
 	if (root_ns_mask)
 		if (dump_namespaces(root_item, root_ns_mask) < 0)
 			goto err;
 
 	ret = dump_cgroups();
-	if (ret)
-		goto err;
-
-	ret = cr_dump_shmem();
 	if (ret)
 		goto err;
 

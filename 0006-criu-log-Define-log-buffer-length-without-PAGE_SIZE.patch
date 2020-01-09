@@ -1,0 +1,34 @@
+From f8064a7413a0a66ebe7afc8c19e2678b62177b9d Mon Sep 17 00:00:00 2001
+From: Dmitry Safonov <dima@arista.com>
+Date: Thu, 10 May 2018 19:14:46 +0100
+Subject: [PATCH 6/8] criu/log: Define log buffer length without PAGE_SIZE
+
+The same value, but as PAGE_SIZE can be different for the same
+platform - it's no more static value.
+
+Signed-off-by: Dmitry Safonov <dima@arista.com>
+Signed-off-by: Andrei Vagin <avagin@virtuozzo.com>
+---
+ criu/log.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/criu/log.c b/criu/log.c
+index 6a13266eb..43dcd106f 100644
+--- a/criu/log.c
++++ b/criu/log.c
+@@ -30,10 +30,11 @@
+ #define DEFAULT_LOGFD		STDERR_FILENO
+ /* Enable timestamps if verbosity is increased from default */
+ #define LOG_TIMESTAMP		(DEFAULT_LOGLEVEL + 1)
++#define LOG_BUF_LEN		(8*1024)
+ 
+ static unsigned int current_loglevel = DEFAULT_LOGLEVEL;
+ 
+-static char buffer[PAGE_SIZE * 2];
++static char buffer[LOG_BUF_LEN];
+ static char buf_off = 0;
+ 
+ static struct timeval start;
+-- 
+2.17.0
+

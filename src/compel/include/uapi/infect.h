@@ -96,6 +96,8 @@ struct rt_sigframe;
 
 typedef int (*open_proc_fn)(int pid, int mode, const char *fmt, ...)
 	__attribute__ ((__format__ (__printf__, 3, 4)));
+typedef int (*save_regs_t)(void *, user_regs_struct_t *, user_fpregs_struct_t *);
+typedef int (*make_sigframe_t)(void *, struct rt_sigframe *, struct rt_sigframe *, k_rtsigset_t *);
 
 struct infect_ctx {
 	int	sock;
@@ -103,8 +105,8 @@ struct infect_ctx {
 	/*
 	 * Regs manipulation context.
 	 */
-	int (*save_regs)(void *, user_regs_struct_t *, user_fpregs_struct_t *);
-	int (*make_sigframe)(void *, struct rt_sigframe *, struct rt_sigframe *, k_rtsigset_t *);
+	save_regs_t		save_regs;
+	make_sigframe_t		make_sigframe;
 	void *regs_arg;
 
 	unsigned long		task_size;
@@ -121,10 +123,16 @@ struct infect_ctx {
 
 extern struct infect_ctx *compel_infect_ctx(struct parasite_ctl *);
 
-#define INFECT_NO_MEMFD		0x1	/* don't use memfd() */
-#define INFECT_FAIL_CONNECT	0x2	/* make parasite connect() fail */
-#define INFECT_NO_BREAKPOINTS	0x4	/* no breakpoints in pie tracking */
-#define INFECT_COMPATIBLE	0x8	/* can run parasite inside compat tasks */
+/* Don't use memfd() */
+#define INFECT_NO_MEMFD			(1UL << 0)
+/* Make parasite connect() fail */
+#define INFECT_FAIL_CONNECT		(1UL << 1)
+/* No breakpoints in pie tracking */
+#define INFECT_NO_BREAKPOINTS		(1UL << 2)
+/* Can run parasite inside compat tasks */
+#define INFECT_COMPATIBLE		(1UL << 3)
+/* Workaround for ptrace bug on Skylake CPUs with kernels older than v4.14 */
+#define INFECT_X86_PTRACE_MXCSR_BUG	(1UL << 4)
 
 /*
  * There are several ways to describe a blob to compel
@@ -151,7 +159,6 @@ struct parasite_blob_desc {
 
 extern struct parasite_blob_desc *compel_parasite_blob_desc(struct parasite_ctl *);
 
-typedef int (*save_regs_t)(void *, user_regs_struct_t *, user_fpregs_struct_t *);
 extern int compel_get_thread_regs(struct parasite_thread_ctl *, save_regs_t, void *);
 
 extern void compel_relocs_apply(void *mem, void *vbase, size_t size, compel_reloc_t *elf_relocs, size_t nr_relocs);

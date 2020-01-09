@@ -771,17 +771,21 @@ int criu_local_add_cg_props_file(criu_opts *opts, char *path)
 
 int criu_local_add_cg_dump_controller(criu_opts *opts, char *name)
 {
-	char **new;
+	char **new, *ctrl_name;
 	size_t nr;
+
+	ctrl_name = strdup(name);
+	if (!ctrl_name)
+		return -ENOMEM;
 
 	nr = opts->rpc->n_cgroup_dump_controller + 1;
 	new = realloc(opts->rpc->cgroup_dump_controller, nr * sizeof(char *));
-	if (!new)
+	if (!new) {
+		free(ctrl_name);
 		return -ENOMEM;
+	}
 
-	new[opts->rpc->n_cgroup_dump_controller] = strdup(name);
-	if (!new[opts->rpc->n_cgroup_dump_controller])
-		return -ENOMEM;
+	new[opts->rpc->n_cgroup_dump_controller] = ctrl_name;
 
 	opts->rpc->n_cgroup_dump_controller = nr;
 	opts->rpc->cgroup_dump_controller = new;
@@ -1075,9 +1079,16 @@ static int criu_connect(criu_opts *opts, bool d)
 	memset(&addr, 0, sizeof(addr));
 	addr.sun_family = AF_LOCAL;
 
-	strncpy(addr.sun_path, opts->service_address, sizeof(addr.sun_path));
+	addr_len = strlen(opts->service_address);
+	if (addr_len >= sizeof(addr.sun_path)) {
+		fprintf(stderr, "The service address %s is too long",
+					opts->service_address);
+		close(fd);
+		return -1;
+	}
+	memcpy(addr.sun_path, opts->service_address, addr_len);
 
-	addr_len = strlen(opts->service_address) + sizeof(addr.sun_family);
+	addr_len += sizeof(addr.sun_family);
 
 	ret = connect(fd, (struct sockaddr *) &addr, addr_len);
 	if (ret < 0) {

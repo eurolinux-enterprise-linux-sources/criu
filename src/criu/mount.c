@@ -26,6 +26,8 @@
 #include "path.h"
 #include "files-reg.h"
 #include "external.h"
+#include "clone-noasan.h"
+#include "fdstore.h"
 
 #include "images/mnt.pb-c.h"
 
@@ -445,10 +447,10 @@ static void mnt_resort_siblings(struct mount_info *tree)
 
 		depth = mnt_depth(m);
 		list_for_each_entry(p, &list, siblings)
-			if (mnt_depth(p) <= depth)
+			if (mnt_depth(p) < depth)
 				break;
 
-		list_add(&m->siblings, &p->siblings);
+		list_add_tail(&m->siblings, &p->siblings);
 		mnt_resort_siblings(m);
 	}
 
@@ -552,12 +554,12 @@ static int validate_shared(struct mount_info *m)
 	/*
 	 * Check that all mounts in one shared group has the same set of
 	 * children. Only visible children are accounted. A non-root bind-mount
-	 * doesn't see children out of its root and it's excpected case.
+	 * doesn't see children out of its root and it's expected case.
 	 *
 	 * Here is a few conditions:
 	 * 1. t is wider than m
 	 * 2. We search a wider mount in the same direction, so when we
-	 *    enumirate all mounts, we can't be sure that all of them
+	 *    enumerate all mounts, we can't be sure that all of them
 	 *    has the same set of children.
 	 */
 
@@ -570,7 +572,7 @@ static int validate_shared(struct mount_info *m)
 		 */
 		return 0;
 
-	/* Search a child, which is visiable in both mounts. */
+	/* Search a child, which is visible in both mounts. */
 	list_for_each_entry(ct, &t->children, siblings) {
 		struct mount_info *cm;
 
@@ -628,7 +630,7 @@ static struct mount_info *find_fsroot_mount_for(struct mount_info *bm)
 	return NULL;
 }
 
-static bool does_mnt_overmount(struct mount_info *m)
+static bool mnt_needs_remap(struct mount_info *m)
 {
 	struct mount_info *t;
 
@@ -641,6 +643,14 @@ static bool does_mnt_overmount(struct mount_info *m)
 		if (issubpath(t->mountpoint, m->mountpoint))
 			return true;
 	}
+
+	/*
+	 * If we are children-overmount and parent is remapped, we should be
+	 * remapped too, else fixup_remap_mounts() won't be able to move parent
+	 * to it's real place, it will move child instead.
+	 */
+	if (!strcmp(m->parent->mountpoint, m->mountpoint))
+		return mnt_needs_remap(m->parent);
 
 	return false;
 }
@@ -688,7 +698,7 @@ static int validate_mounts(struct mount_info *info, bool for_dump)
 			return -1;
 
 		if (mnt_is_external(m))
-			goto skip_fstype;
+			continue;
 
 		/*
 		 * Mountpoint can point to / of an FS. In that case this FS
@@ -737,13 +747,6 @@ static int validate_mounts(struct mount_info *info, bool for_dump)
 					return -1;
 				}
 			}
-		}
-skip_fstype:
-		if (does_mnt_overmount(m) &&
-		    !list_empty(&m->parent->mnt_share)) {
-			pr_err("Unable to handle mounts under %d:%s\n",
-					m->mnt_id, m->mountpoint);
-			return -1;
 		}
 	}
 
@@ -1044,7 +1047,7 @@ int __open_mountpoint(struct mount_info *pm, int mnt_fd)
 	}
 
 	if (pm->s_dev_rt == MOUNT_INVALID_DEV) {
-		pr_err("Resolving over unvalid device for %#x %s %s\n",
+		pr_err("Resolving over invalid device for %#x %s %s\n",
 		       pm->s_dev, pm->fstype->name, pm->ns_mountpoint);
 		goto err;
 	}
@@ -1103,40 +1106,229 @@ static char *get_clean_mnt(struct mount_info *mi, char *mnt_path_tmp, char *mnt_
 	return mnt_path;
 }
 
-#define MNT_UNREACHABLE INT_MIN
-int open_mountpoint(struct mount_info *pm)
+static int get_clean_fd(struct mount_info *mi)
 {
-	struct mount_info *c;
-	int fd = -1, ns_old = -1;
+	char *mnt_path = NULL;
 	char mnt_path_tmp[] = "/tmp/cr-tmpfs.XXXXXX";
 	char mnt_path_root[] = "/cr-tmpfs.XXXXXX";
-	char *mnt_path = mnt_path_tmp;
-	int cwd_fd;
+
+	mnt_path = get_clean_mnt(mi, mnt_path_tmp, mnt_path_root);
+	if (!mnt_path)
+		return -1;
+
+	return open_detach_mount(mnt_path);
+}
+
+/*
+ * Our children mount can have same mountpoint as it's parent,
+ * call these - children-overmount.
+ * Sibling mount's mountpoint can be a subpath of our mountpoint
+ * call these - sibling-overmount.
+ * In both above cases our mountpoint is not visible from the
+ * root of our mount namespace as it is covered by other mount.
+ * mnt_is_overmounted() checks if mount is not visible.
+ */
+static bool mnt_is_overmounted(struct mount_info *mi)
+{
+	struct mount_info *t, *c, *m = mi;
+
+	while (m->parent) {
+		/* Check there is no sibling-overmount */
+		list_for_each_entry(t, &m->parent->children, siblings) {
+			if (m == t)
+				continue;
+			if (issubpath(m->mountpoint, t->mountpoint))
+				return true;
+		}
+
+		/*
+		 * If parent has sibling-overmount we are not visible too,
+		 * note that children-overmounts for parent are already
+		 * checked as our sibling overmounts.
+		 */
+		m = m->parent;
+	}
+
+	/* Check there is no children-overmount */
+	list_for_each_entry(c, &mi->children, siblings)
+		if (!strcmp(c->mountpoint, mi->mountpoint))
+			return true;
+
+	return false;
+}
+
+/*
+ * __umount_children_overmounts() assumes that the mountpoint and
+ * it's ancestors have no sibling-overmounts, so we can see children
+ * of these mount. Unmount our children-overmounts now.
+ */
+static int __umount_children_overmounts(struct mount_info *mi)
+{
+	struct mount_info *c, *m = mi;
 
 	/*
-	 * If a mount doesn't have children, we can open a mount point,
-	 * otherwise we need to create a "private" copy.
+	 * Our children-overmount can itself have children-overmount
+	 * which covers it, so find deepest children-overmount which
+	 * is visible for us now.
 	 */
-	if (list_empty(&pm->children))
-		return __open_mountpoint(pm, -1);
-
-	pr_info("Something is mounted on top of %s\n", pm->mountpoint);
-
-	list_for_each_entry(c, &pm->children, siblings) {
-		if (!strcmp(c->mountpoint, pm->mountpoint)) {
-			pr_debug("%d:%s is overmounted\n", pm->mnt_id, pm->mountpoint);
-			return MNT_UNREACHABLE;
+again:
+	list_for_each_entry(c, &m->children, siblings) {
+		if (!strcmp(c->mountpoint, m->mountpoint)) {
+			m = c;
+			goto again;
 		}
 	}
 
-	/*
-	 * To create a "private" copy, the target mount is bind-mounted
-	 * in a temporary place w/o MS_REC (non-recursively).
-	 * A mount point can't be bind-mounted in criu's namespace, it will be
-	 * mounted in a target namespace. The sequence of actions is
-	 * mkdtemp, setns(tgt), mount, open, detach, setns(old).
-	 */
+	/* Unmout children-overmounts in the order of visibility */
+	while (m != mi) {
+		if (umount2(m->mountpoint, MNT_DETACH)) {
+			pr_perror("Unable to umount child-overmount %s", m->mountpoint);
+			return -1;
+		}
+		BUG_ON(!m->parent);
+		m = m->parent;
+	}
 
+	return 0;
+}
+
+/* Makes the mountpoint visible except for children-overmounts. */
+static int __umount_overmounts(struct mount_info *m)
+{
+	struct mount_info *t, *ovm;
+	int ovm_len, ovm_len_min = 0;
+
+	/* Root mount has no sibling-overmounts */
+	if (!m->parent)
+		return 0;
+
+	/*
+	 * If parent is sibling-overmounted we are not visible
+	 * too, so first try to unmount overmounts for parent.
+	 */
+	if (__umount_overmounts(m->parent))
+		return -1;
+
+	/* Unmount sibling-overmounts in visibility order */
+next:
+	ovm = NULL;
+	ovm_len = strlen(m->mountpoint) + 1;
+	list_for_each_entry(t, &m->parent->children, siblings) {
+		if (m == t)
+			continue;
+		if (issubpath(m->mountpoint, t->mountpoint)) {
+			int t_len = strlen(t->mountpoint);
+
+			if (t_len < ovm_len && t_len > ovm_len_min) {
+				ovm = t;
+				ovm_len = t_len;
+			}
+		}
+	}
+
+	if (ovm) {
+		ovm_len_min = ovm_len;
+
+		/* Our sibling-overmount can have children-overmount covering it */
+		if (__umount_children_overmounts(ovm))
+			return -1;
+
+		if (umount2(ovm->mountpoint, MNT_DETACH)) {
+			pr_perror("Unable to umount %s", ovm->mountpoint);
+			return -1;
+		}
+
+		goto next;
+	}
+
+	return 0;
+}
+
+/* Make our mountpoint fully visible */
+static int umount_overmounts(struct mount_info *m)
+{
+	if (__umount_overmounts(m))
+		return -1;
+
+	if (__umount_children_overmounts(m))
+		return -1;
+
+	return 0;
+}
+
+struct clone_arg {
+	struct mount_info *mi;
+	int *fd;
+};
+
+/*
+ * Get access to the mountpoint covered by overmounts
+ * and open it's cleaned copy (without children mounts).
+ */
+int ns_open_mountpoint(void *arg)
+{
+	struct clone_arg *ca = arg;
+	struct mount_info *mi = ca->mi;
+	int *fd = ca->fd;
+
+	/*
+	 * We should enter user namespace owning mount namespace of our mount
+	 * before creating helper mount namespace. Else all mounts in helper
+	 * mount namespace will be locked (MNT_LOCKED) and we won't be able to
+	 * unmount them (see CL_UNPRIVILEGED in sys_umount(), clone_mnt() and
+	 * copy_mnt_ns() in linux kernel code).
+	 */
+	if ((root_ns_mask & CLONE_NEWUSER) &&
+	    switch_ns(root_item->pid->real, &user_ns_desc, NULL) < 0)
+		goto err;
+
+	/*
+	 * Create a helper mount namespace in which we can safely do unmounts
+	 * without breaking dumping process' environment.
+	 */
+	if (unshare(CLONE_NEWNS)) {
+		pr_perror("Unable to unshare a mount namespace");
+		goto err;
+	}
+
+	/* Remount all mounts as private to disable propagation */
+	if (mount("none", "/", NULL, MS_REC|MS_PRIVATE, NULL))
+		goto err;
+
+	if (umount_overmounts(mi))
+		goto err;
+
+	/* Save fd which we opened for parent due to CLONE_FILES flag */
+	*fd = get_clean_fd(mi);
+	if (*fd < 0)
+		goto err;
+
+	return 0;
+err:
+	return 1;
+}
+
+int open_mountpoint(struct mount_info *pm)
+{
+	int fd = -1, cwd_fd, ns_old = -1;
+
+	/* No overmounts and children - the entire mount is visible */
+	if (list_empty(&pm->children) && !mnt_is_overmounted(pm))
+		return __open_mountpoint(pm, -1);
+
+	pr_info("Mount is not fully visible %s\n", pm->mountpoint);
+
+	/*
+	 * We do two things below:
+	 * a) If mount has children mounts in it which partially cover it's
+	 * content, to get access to the content we create a "private" copy of
+	 * such a mount, bind-mounting mount w/o MS_REC in a temporary place.
+	 * b) If mount is overmounted we create a private copy of it's mount
+	 * namespace so that we can safely get rid of overmounts and get an
+	 * access to the mount.
+	 * In both cases we can't do the thing from criu's mount namespace, so
+	 * we need to switch to mount's mount namespace, and later swtich back.
+	 */
 	cwd_fd = open(".", O_DIRECTORY);
 	if (cwd_fd < 0) {
 		pr_perror("Unable to open cwd");
@@ -1144,33 +1336,54 @@ int open_mountpoint(struct mount_info *pm)
 	}
 
 	if (switch_ns(pm->nsid->ns_pid, &mnt_ns_desc, &ns_old) < 0)
-		goto out;
+		goto err;
 
-	mnt_path = get_clean_mnt(pm, mnt_path_tmp, mnt_path_root);
-	if (mnt_path == NULL) {
+	if (!mnt_is_overmounted(pm)) {
+		pr_info("\tmount has children %s\n", pm->mountpoint);
+
+		fd = get_clean_fd(pm);
+		if (fd < 0)
+			goto err;
+	} else {
+		int pid, status;
+		struct clone_arg ca = {
+			.mi = pm,
+			.fd = &fd
+		};
+
+		pr_info("\tmount is overmounted %s\n", pm->mountpoint);
+
 		/*
-		 * We probably can't create a temporary direcotry,
-		 * so we can try to clone the mount namespace, open
-		 * the required mount and destroy this mount namespace
-		 * by calling restore_ns() below in this function.
+		 * We are overmounted - not accessible in a regular way. We
+		 * need to clone "private" copy of mount's monut namespace and
+		 * unmount all covering overmounts in it. We also need to enter
+		 * user namespace owning these mount namespace just before that
+		 * (see explanation in ns_open_mountpoint). Thus we also have
+		 * to create helper process here as entering user namespace is
+		 * irreversible operation.
 		 */
-		if (unshare(CLONE_NEWNS)) {
-			pr_perror("Unable to clone a mount namespace");
-			goto out;
+		pid = clone_noasan(ns_open_mountpoint, CLONE_VFORK | CLONE_VM
+				| CLONE_FILES | CLONE_IO | CLONE_SIGHAND
+				| CLONE_SYSVSEM, &ca);
+		if (pid == -1) {
+			pr_perror("Can't clone helper process");
+			goto err;
 		}
 
-		fd = open(pm->mountpoint, O_RDONLY | O_DIRECTORY, 0);
-		if (fd < 0)
-			pr_perror("Can't open directory %s: %d", pm->mountpoint, fd);
-	} else
-		fd = open_detach_mount(mnt_path);
-	if (fd < 0)
-		goto out;
+		errno = 0;
+		if (waitpid(pid, &status, __WALL) != pid || !WIFEXITED(status)
+				|| WEXITSTATUS(status)) {
+			pr_err("Can't wait or bad status: errno=%d, status=%d\n",
+				errno, status);
+			goto err;
+		}
+	}
 
 	if (restore_ns(ns_old, &mnt_ns_desc)) {
 		ns_old = -1;
-		goto out;
+		goto err;
 	}
+
 	if (fchdir(cwd_fd)) {
 		pr_perror("Unable to restore cwd");
 		close(cwd_fd);
@@ -1180,9 +1393,9 @@ int open_mountpoint(struct mount_info *pm)
 	close(cwd_fd);
 
 	return __open_mountpoint(pm, fd);
-out:
+err:
 	if (ns_old >= 0)
-		 restore_ns(ns_old, &mnt_ns_desc);
+		restore_ns(ns_old, &mnt_ns_desc);
 	close_safe(&fd);
 	if (fchdir(cwd_fd))
 		pr_perror("Unable to restore cwd");
@@ -1438,7 +1651,7 @@ static int dump_mnt_ns(struct ns_id *ns, struct mount_info *pms)
 	struct mount_info *pm;
 	int ret = -1;
 	struct cr_img *img;
-	int ns_id = ns->id;
+	unsigned int ns_id = ns->id;
 
 	pr_info("Dumping mountpoints\n");
 	img = open_image(CR_FD_MNTS, O_DUMP, ns_id);
@@ -1460,7 +1673,7 @@ err:
  * _fn_f  - pre-order traversal function
  * _fn_f  - post-order traversal function
  * _plist - a postpone list. _el is added to this list, if _fn_f returns
- *	    a positive value, and all lower elements are not enumirated.
+ *	    a positive value, and all lower elements are not enumerated.
  */
 #define MNT_TREE_WALK(_r, _el, _fn_f, _fn_r, _plist, _prgs) do {		\
 		struct mount_info *_mi = _r;					\
@@ -1644,7 +1857,7 @@ static int propagate_siblings(struct mount_info *mi)
 
 	/*
 	 * Find all mounts, which must be bind-mounted from this one
-	 * to inherite shared group or master id
+	 * to inherit shared group or master id
 	 */
 	list_for_each_entry(t, &mi->mnt_share, mnt_share) {
 		if (t->mounted)
@@ -1685,12 +1898,21 @@ static int propagate_mount(struct mount_info *mi)
 		char path[PATH_MAX], *mp;
 		bool found = false;
 
+		/*
+		 * If a mount from parent's shared group is not yet mounted
+		 * it shouldn't have 'sibling' in it - see can_mount_now()
+		 */
+		if (!t->mounted)
+			continue;
+
 		mp = mnt_get_sibling_path(mi, t, path, sizeof(path));
 		if (mp == NULL)
 			continue;
 
 		list_for_each_entry(c, &t->children, siblings) {
 			if (mounts_equal(mi, c) && !strcmp(mp, c->mountpoint)) {
+				/* Should not propagate the same mount twice */
+				BUG_ON(c->mounted);
 				pr_debug("\t\tPropagate %s\n", c->mountpoint);
 
 				/*
@@ -1842,7 +2064,7 @@ static int do_new_mount(struct mount_info *mi)
 		sflags |= MS_RDONLY;
 		if (userns_call(apply_sb_flags, 0,
 				&sflags, sizeof(sflags), fd)) {
-			pr_perror("Unable to apply mount falgs %d for %s",
+			pr_perror("Unable to apply mount flags %d for %s",
 						mi->sb_flags, mi->mountpoint);
 			close(fd);
 			return -1;
@@ -2112,8 +2334,8 @@ static bool can_mount_now(struct mount_info *mi)
 	/*
 	 * We're the slave peer:
 	 *   - Make sure the master peer is already mounted
-	 *   - Make sure all children is mounted as well to
-	 *     eliminame mounts duplications
+	 *   - Make sure all children are mounted as well to
+	 *     eliminate mounts duplications
 	 */
 	if (mi->master_id > 0) {
 		struct mount_info *c;
@@ -2132,18 +2354,27 @@ static bool can_mount_now(struct mount_info *mi)
 
 shared:
 	if (mi->parent->shared_id) {
-		struct mount_info *p = mi->parent, *n;
+		struct mount_info *n;
 
-		if (mi->parent->shared_id == mi->shared_id) {
-			int rlen = strlen(mi->root);
-			list_for_each_entry(n, &p->mnt_share, mnt_share)
-				if (strlen(n->root) < rlen && !n->mounted)
-					return false;
-		} else {
-			list_for_each_entry(n, &p->mnt_share, mnt_share)
-				if (!n->mounted)
-					return false;
-		}
+		list_for_each_entry(n, &mi->parent->mnt_share, mnt_share)
+			/*
+			 * All mounts from mi's parent shared group which
+			 * have mi's 'sibling' should receive it through
+			 * mount propagation, so all such mounts in parent
+			 * shared group should be mounted beforehand.
+			 */
+			if (!n->mounted) {
+				char path[PATH_MAX], *mp;
+				struct mount_info *c;
+
+				mp = mnt_get_sibling_path(mi, n, path, sizeof(path));
+				if (mp == NULL)
+					continue;
+
+				list_for_each_entry(c, &n->children, siblings)
+					if (mounts_equal(mi, c) && !strcmp(mp, c->mountpoint))
+						return false;
+			}
 	}
 
 	return true;
@@ -2239,7 +2470,7 @@ static int do_umount_one(struct mount_info *mi)
 }
 
 /*
- * If a mount overmounts other mounts, it is restored separetly in the roots
+ * If a mount overmounts other mounts, it is restored separately in the roots
  * yard and then moved to the right place.
  *
  * mnt_remap_entry is created for each such mount and it's added into
@@ -2275,17 +2506,17 @@ static int try_remap_mount(struct mount_info *m)
 {
 	struct mnt_remap_entry *r;
 
-	if (!does_mnt_overmount(m))
+	if (!mnt_needs_remap(m))
 		return 0;
 
-	BUG_ON(!m->parent || !list_empty(&m->parent->mnt_share));
+	BUG_ON(!m->parent);
 
 	r = xmalloc(sizeof(struct mnt_remap_entry));
 	if (!r)
 		return -1;
 
 	r->mi = m;
-	list_add(&r->node, &mnt_remap_list);
+	list_add_tail(&r->node, &mnt_remap_list);
 
 	return 0;
 }
@@ -2329,7 +2560,8 @@ static int fixup_remap_mounts()
 		char path[PATH_MAX];
 		int len;
 
-		strncpy(path, m->mountpoint, PATH_MAX);
+		strncpy(path, m->mountpoint, PATH_MAX - 1);
+		path[PATH_MAX - 1] = 0;
 		len = print_ns_root(m->nsid, 0, path, PATH_MAX);
 		path[len] = '/';
 
@@ -2716,7 +2948,7 @@ static int do_restore_task_mnt_ns(struct ns_id *nsid, struct pstree_item *curren
 {
 	int fd;
 
-	fd = open_proc(vpid(root_item), "fd/%d", nsid->mnt.ns_fd);
+	fd = fdstore_get(nsid->mnt.nsfd_id);
 	if (fd < 0)
 		return -1;
 
@@ -2776,8 +3008,6 @@ void fini_restore_mntns(void)
 	for (nsid = ns_ids; nsid != NULL; nsid = nsid->next) {
 		if (nsid->nd != &mnt_ns_desc)
 			continue;
-		close_safe(&nsid->mnt.ns_fd);
-		close_safe(&nsid->mnt.root_fd);
 		nsid->ns_populated = true;
 	}
 }
@@ -2807,7 +3037,7 @@ static int populate_roots_yard(void)
 
 	/*
 	 * mnt_remap_list is filled in find_remap_mounts() and
-	 * contains mounts which has to be restored separatly
+	 * contains mounts which has to be restored separately
 	 */
 	list_for_each_entry(r, &mnt_remap_list, node) {
 		if (mkdirpat(AT_FDCWD, r->mi->mountpoint, 0755)) {
@@ -2982,7 +3212,7 @@ void cleanup_mnt_ns(void)
 
 int prepare_mnt_ns(void)
 {
-	int ret = -1, rst = -1;
+	int ret = -1, rst = -1, fd;
 	struct ns_id ns = { .type = NS_CRIU, .ns_pid = PROC_SELF, .nd = &mnt_ns_desc };
 	struct ns_id *nsid;
 
@@ -3024,7 +3254,7 @@ int prepare_mnt_ns(void)
 	if (rst < 0)
 		return -1;
 
-	/* resotre non-root namespaces */
+	/* restore non-root namespaces */
 	for (nsid = ns_ids; nsid != NULL; nsid = nsid->next) {
 		char path[PATH_MAX];
 
@@ -3036,9 +3266,11 @@ int prepare_mnt_ns(void)
 			goto err;
 		}
 
-		if (nsid->type == NS_ROOT) {
-			int fd;
+		fd = open_proc(PROC_SELF, "ns/mnt");
+		if (fd < 0)
+			goto err;
 
+		if (nsid->type == NS_ROOT) {
 			/*
 			 * We need to create a mount namespace which will be
 			 * used to clean up remap files
@@ -3047,20 +3279,19 @@ int prepare_mnt_ns(void)
 			 * namespace, because there are file descriptors
 			 * linked with it (e.g. to bind-mount slave pty-s).
 			 */
-			fd = open_proc(PROC_SELF, "ns/mnt");
-			if (fd < 0)
-				goto err;
 			if (setns(rst, CLONE_NEWNS)) {
 				pr_perror("Can't restore mntns back");
 				goto err;
 			}
-			nsid->mnt.ns_fd = rst;
-			rst = fd;
-		} else {
-			/* Pin one with a file descriptor */
-			nsid->mnt.ns_fd = open_proc(PROC_SELF, "ns/mnt");
-			if (nsid->mnt.ns_fd < 0)
-				goto err;
+			SWAP(rst, fd);
+		}
+
+		/* Pin one with a file descriptor */
+		nsid->mnt.nsfd_id = fdstore_add(fd);
+		close(fd);
+		if (nsid->mnt.nsfd_id < 0) {
+			pr_err("Can't add ns fd\n");
+			goto err;
 		}
 
 		/* Set its root */
@@ -3069,10 +3300,17 @@ int prepare_mnt_ns(void)
 		if (cr_pivot_root(path))
 			goto err;
 
-		/* root_fd is used to restore file mappings */
-		nsid->mnt.root_fd = open_proc(PROC_SELF, "root");
-		if (nsid->mnt.root_fd < 0)
+		/* root fd is used to restore file mappings */
+		fd = open_proc(PROC_SELF, "root");
+		if (fd < 0)
 			goto err;
+		nsid->mnt.root_fd_id = fdstore_add(fd);
+		if (nsid->mnt.root_fd_id < 0) {
+			pr_err("Can't add root fd\n");
+			close(fd);
+			goto err;
+		}
+		close(fd);
 
 		/* And return back to regain the access to the roots yard */
 		if (setns(rst, CLONE_NEWNS)) {
@@ -3112,8 +3350,6 @@ int __mntns_get_root_fd(pid_t pid)
 	if (mntns_root_pid == pid) /* The required root is already opened */
 		return get_service_fd(ROOT_FD_OFF);
 
-	close_service_fd(ROOT_FD_OFF);
-
 	if (!(root_ns_mask & CLONE_NEWNS)) {
 		/*
 		 * If criu and tasks we dump live in the same mount
@@ -3152,7 +3388,6 @@ int __mntns_get_root_fd(pid_t pid)
 	}
 
 	fd = openat(pfd, "root", O_RDONLY | O_DIRECTORY, 0);
-	close_pid_proc();
 	if (fd < 0) {
 		pr_perror("Can't open the task root");
 		return -1;
@@ -3187,7 +3422,7 @@ int mntns_get_root_fd(struct ns_id *mntns)
 	if (!mntns->ns_populated) {
 		int fd;
 
-		fd = open_proc(vpid(root_item), "fd/%d", mntns->mnt.root_fd);
+		fd = fdstore_get(mntns->mnt.root_fd_id);
 		if (fd < 0)
 			return -1;
 
@@ -3205,7 +3440,7 @@ struct ns_id *lookup_nsid_by_mnt_id(int mnt_id)
 	 * Kernel before 3.15 doesn't show mnt_id for file descriptors.
 	 * mnt_id isn't saved for files, if mntns isn't dumped.
 	 * In both these cases we have only one root, so here
-	 * is not matter which mount will be restured.
+	 * is not matter which mount will be restored.
 	 */
 	if (mnt_id == -1)
 		mi = mntinfo;

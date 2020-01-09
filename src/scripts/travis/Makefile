@@ -11,15 +11,19 @@ ifdef CLANG
 	target-suffix = -clang
 endif
 
-alpine:
-	$(MAKE) -C ../build $@$(target-suffix)
-	docker run --rm -it --privileged -v /lib/modules:/lib/modules criu-alpine ./test/zdtm.py run -t zdtm/static/env00
+TARGETS := fedora-asan alpine fedora-rawhide
+ZDTM_OPTIONS :=
 
-asan:
+alpine: ZDTM_OPTIONS=-x zdtm/static/binfmt_misc -x zdtm/static/netns-nf -x zdtm/static/sched_policy00 -x zdtm/static/seccomp_strict -x zdtm/static/sigaltstack -x zdtm/static/signalfd00 -x zdtm/static/config_inotify_irmap
+
+$(TARGETS):
 	echo 'DOCKER_OPTS="--storage-driver=devicemapper"' > /etc/default/docker
 	restart docker
-	$(MAKE) -C ../build fedora-asan
-	docker run --rm -it --privileged -v /lib/modules:/lib/modules criu-fedora-asan ./scripts/travis/asan.sh
+	$(MAKE) -C ../build $@$(target-suffix)
+	docker run --rm -it --privileged -v /lib/modules:/lib/modules --tmpfs /run criu-$@ ./scripts/travis/asan.sh $(ZDTM_OPTIONS)
+
+docker-test:
+	./docker-test.sh
 
 %:
 	$(MAKE) -C ../build $@$(target-suffix)

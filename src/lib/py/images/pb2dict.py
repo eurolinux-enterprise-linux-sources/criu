@@ -124,10 +124,30 @@ gen_maps = {
 }
 
 sk_maps = {
-	'family'    : { 2: 'INET' },
-	'type'      : { 1: 'STREAM', 2: 'DGRAM' },
-	'state'     : { 1: 'ESTABLISHED', 7: 'CLOSE', 10: 'LISTEN' },
-	'proto'     : { 6: 'TCP' },
+	'family'    : {  1: 'UNIX',
+			 2: 'INET',
+			10: 'INET6',
+			16: 'NETLINK',
+			17: 'PACKET' },
+	'type'      : {  1: 'STREAM',
+			 2: 'DGRAM',
+			 3: 'RAW',
+			 5: 'SEQPACKET',
+			10: 'PACKET' },
+	'state'     : {  1: 'ESTABLISHED',
+			 2: 'SYN_SENT',
+			 3: 'SYN_RECV',
+			 4: 'FIN_WAIT1',
+			 5: 'FIN_WAIT2',
+			 6: 'TIME_WAIT',
+			 7: 'CLOSE',
+			 8: 'CLOSE_WAIT',
+			 9: 'LAST_ACK',
+			10: 'LISTEN' },
+	'proto'     : {   0: 'IP',
+			  6: 'TCP',
+			 17: 'UDP',
+			136: 'UDPLITE' },
 }
 
 gen_rmaps = { k: {v2:k2 for k2,v2 in v.items()} for k,v in gen_maps.items() }

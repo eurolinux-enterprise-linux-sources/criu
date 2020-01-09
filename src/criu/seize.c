@@ -142,7 +142,7 @@ static int seize_cgroup_tree(char *root_path, const char *state)
 			if (stat(buf, &st) == -1 && errno == ENOENT)
 				continue;
 			/*
-			 * fails when meets a zombie, or eixting process:
+			 * fails when meets a zombie, or exiting process:
 			 * there is a small race in a kernel -- the process
 			 * may start exiting and we are trying to freeze it
 			 * before it compete exit procedure. The caller simply
@@ -350,7 +350,7 @@ static int freeze_processes(void)
 		nr_attempts = (10 * 1000000) / step_ms;
 	}
 
-	pr_debug("freezing processes: %lu attempst with %lu ms steps\n",
+	pr_debug("freezing processes: %lu attempts with %lu ms steps\n",
 		 nr_attempts, step_ms);
 
 	snprintf(path, sizeof(path), "%s/freezer.state", opts.freeze_cgroup);
@@ -629,23 +629,14 @@ static inline bool thread_collected(struct pstree_item *i, pid_t tid)
 static bool creds_dumpable(struct proc_status_creds *parent,
 				struct proc_status_creds *child)
 {
-	size_t size;
 	/*
-	 * The comparison rules are the following
-	 *
-	 *  - CAPs can be different
 	 *  - seccomp filters should be passed via
 	 *    semantic comparison (FIXME) but for
 	 *    now we require them to be exactly
 	 *    identical
-	 *  - sigpnd may be different
-	 *  - the rest of members must match
 	 */
-
-	size = offsetof(struct proc_status_creds, cap_inh) -
-	       sizeof(parent->s.sigpnd);
-
-	if (memcmp(&parent->s.sigpnd, &child->s.sigpnd, size)) {
+	if (parent->s.seccomp_mode != child->s.seccomp_mode ||
+	    parent->last_filter != child->last_filter) {
 		if (!pr_quelled(LOG_DEBUG)) {
 			pr_debug("Creds undumpable (parent:child)\n"
 				 "  uids:               %d:%d %d:%d %d:%d %d:%d\n"
